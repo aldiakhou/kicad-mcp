@@ -197,6 +197,7 @@ Detailed documentation for each feature is available in the `docs/` directory:
 - [PCB Visualization](docs/thumbnail_guide.md)
 - [Circuit Pattern Recognition](docs/pattern_guide.md)
 - [Prompt Templates](docs/prompt_guide.md)
+- [Safe Schematic Editing](docs/schematic_edit_guide.md)
 
 ## Configuration
 

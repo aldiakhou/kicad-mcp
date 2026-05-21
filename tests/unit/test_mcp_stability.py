@@ -43,6 +43,9 @@ async def test_create_server_registers_smoke_resources_and_tools():
 
     assert "extract_schematic_netlist" in tools
     assert "run_drc_check" in tools
+    assert "validate_schematic_syntax" in tools
+    assert "schematic_move_symbol" in tools
+    assert "export_schematic_svg" in tools
     assert "kicad://netlist/{schematic_path}" in resource_templates
     assert "kicad://drc/{project_path}" in resource_templates
     assert server_module._server_instance is server
