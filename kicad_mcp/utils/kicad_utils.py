@@ -1,16 +1,15 @@
 """
 KiCad-specific utility functions.
 """
-import logging  # Import logging
+
+import logging
 import os
 import subprocess
-import sys  # Add sys import
+import sys
 from typing import Any
 
 from kicad_mcp import config
 
-# Get PID for logging - Removed, handled by logging config
-# _PID = os.getpid()
 
 def find_kicad_projects() -> list[dict[str, Any]]:
     """Find KiCad projects in the user's directory.

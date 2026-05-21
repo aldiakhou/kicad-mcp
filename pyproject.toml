@@ -190,6 +190,8 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html:htmlcov",
     "--cov-report=xml",
+    # The repository's current measured full-suite baseline is ~39%;
+    # keep the gate honest until broader legacy-module test coverage is added.
     "--cov-fail-under=39",
     "-ra",
     "--tb=short",

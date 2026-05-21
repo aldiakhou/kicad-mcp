@@ -47,7 +47,9 @@ def load_dotenv(env_file: str = ".env") -> dict[str, str]:
                     logging.debug(f"Parsed line {line_num}: Key='{key}', RawValue='{value}'")
 
                     # Remove quotes if present
-                    if value.startswith('"') and value.endswith('"') or value.startswith("'") and value.endswith("'"):
+                    if (value.startswith('"') and value.endswith('"')) or (
+                        value.startswith("'") and value.endswith("'")
+                    ):
                         value = value[1:-1]
 
                     # Expand ~ to user's home directory
