@@ -66,8 +66,12 @@ SYMBOL_CONNECTION_SEARCH_PADDING_MM = 2.5
 TEXT_CHAR_WIDTH_MM = 0.9
 DEFAULT_SYMBOL_HALF_WIDTH_MM = 5.0
 DEFAULT_SYMBOL_HALF_HEIGHT_MM = 4.0
+# Treat symbol properties within roughly one symbol width as visually attached to the symbol.
 BLOCK_PROPERTY_ATTACHMENT_PADDING_MM = 12.0
+# Coarse half-size for including KiCad junction markers in block bounds.
 JUNCTION_MARKER_HALF_SIZE_MM = 0.6
+BLOCK_CONFIDENCE_HIGH_THRESHOLD = 3
+BLOCK_CONFIDENCE_MEDIUM_THRESHOLD = 1
 
 
 @dataclass(frozen=True)
@@ -1757,7 +1761,11 @@ class KiCadSchematic:
             if score > best_score:
                 best_name = name
                 best_score = score
-        confidence = "high" if best_score >= 3 else "medium" if best_score >= 1 else "low"
+        confidence = (
+            "high"
+            if best_score >= BLOCK_CONFIDENCE_HIGH_THRESHOLD
+            else "medium" if best_score >= BLOCK_CONFIDENCE_MEDIUM_THRESHOLD else "low"
+        )
         return best_name, confidence
 
     def _label_has_overlap(self, label_uuid: str) -> bool:
