@@ -1,0 +1,43 @@
+(kicad_sch
+  (version 20231120)
+  (generator "pytest")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "sym-1")
+    (property "Reference" "R1"
+      (at 100 96 0)
+    )
+    (property "Value" "10k"
+      (at 100 104 0)
+    )
+    (property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+      (at 100 108 0)
+    )
+  )
+  (symbol
+    (lib_id "Connector_Generic:Conn_01x04")
+    (at 120 100 0)
+    (uuid "sym-2")
+    (property "Reference" "J1"
+      (at 120 96 0)
+    )
+    (property "Value" "PN532"
+      (at 120 104 0)
+    )
+  )
+  (label "SCL"
+    (at 100 100 0)
+    (uuid "label-1")
+  )
+  (global_label "USB_D+"
+    (shape input)
+    (at 120 100 0)
+    (uuid "glabel-1")
+  )
+  (wire
+    (pts (xy 100 100) (xy 110 100))
+    (uuid "wire-1")
+  )
+)
