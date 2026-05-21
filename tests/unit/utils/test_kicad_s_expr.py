@@ -126,7 +126,7 @@ def test_move_label_with_wire_moves_only_attached_endpoint():
 def test_move_label_with_wire_refuses_mid_segment_label():
     schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
 
-    with pytest.raises(ValueError, match="middle of a wire segment"):
+    with pytest.raises(ValueError, match="wire endpoint, not mid-segment"):
         schematic.move_label_with_wire("label-mid", 245.0, 100.0)
 
 

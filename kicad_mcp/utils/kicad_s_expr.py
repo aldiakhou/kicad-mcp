@@ -152,7 +152,8 @@ class KiCadSchematic:
 
     def get_symbol_connection_points(self, reference: str) -> list[dict[str, Any]]:
         """Return wire endpoints that appear attached to a symbol."""
-        self.get_symbol(reference)  # Triggers not-found parity with other helpers through _find below.
+        if self.get_symbol(reference) is None:
+            raise KeyError(f"Symbol not found: {reference}")
         connection_points: list[dict[str, Any]] = []
         seen: set[tuple[str | None, int]] = set()
         for wire in self.find_wires_intersecting_symbol(reference):
@@ -268,7 +269,7 @@ class KiCadSchematic:
         point_nodes = self._wire_point_nodes(wire)
         if len(point_nodes) != 2:
             raise ValueError(
-                f"Wire {wire_uuid} is not a straight 2-point wire; endpoint editing is not supported yet."
+                f"Wire {wire_uuid} must be a straight 2-point wire for endpoint editing."
             )
 
         matched_index: int | None = None
@@ -917,7 +918,7 @@ class KiCadSchematic:
             wire_uuid = wire.get("uuid")
             if wire["point_count"] != 2:
                 raise ValueError(
-                    f"Cannot move {reference} safely: wire {wire_uuid} is not a straight 2-point wire yet."
+                    f"Cannot move {reference} safely: wire {wire_uuid} must be a straight 2-point wire."
                 )
             attached_endpoints = [endpoint for endpoint in wire["endpoints"] if endpoint["inside_symbol"]]
             if not attached_endpoints:
@@ -978,11 +979,11 @@ class KiCadSchematic:
             wire_uuid = wire.get("uuid")
             if wire["point_count"] != 2:
                 raise ValueError(
-                    f"Cannot move label {label_uuid} safely: wire {wire_uuid} is not a straight 2-point wire yet."
+                    f"Cannot move label {label_uuid} safely: wire {wire_uuid} must be a straight 2-point wire."
                 )
             if not wire["touching_endpoints"]:
                 raise ValueError(
-                    f"Cannot move label {label_uuid} safely: label is in the middle of a wire segment; splitting wires is not implemented yet."
+                    f"Cannot move label {label_uuid} safely: label must be at a wire endpoint, not mid-segment."
                 )
             for endpoint_index in wire["touching_endpoints"]:
                 endpoint_key = (wire_uuid, endpoint_index)

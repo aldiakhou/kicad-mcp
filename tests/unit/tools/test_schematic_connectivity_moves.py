@@ -15,7 +15,9 @@ def _copy_fixture(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_connectivity_move_tools_and_preview(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+async def test_connectivity_move_preview_does_not_mutate_and_move_persists_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
     schematic_path = _copy_fixture(tmp_path)
     original_text = schematic_path.read_text(encoding="utf-8")
     server = create_server()
@@ -88,7 +90,7 @@ async def test_connectivity_move_tools_refuse_unsupported_cases(
     assert move_symbol_result["success"] is False
     assert "intersecting wire segments" in move_symbol_result["error"]
     assert move_label_result["success"] is False
-    assert "middle of a wire segment" in move_label_result["error"]
+    assert "wire endpoint, not mid-segment" in move_label_result["error"]
 
 
 @pytest.mark.asyncio
