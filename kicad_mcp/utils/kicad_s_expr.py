@@ -66,7 +66,7 @@ SYMBOL_CONNECTION_SEARCH_PADDING_MM = 2.5
 TEXT_CHAR_WIDTH_MM = 0.9
 DEFAULT_SYMBOL_HALF_WIDTH_MM = 5.0
 DEFAULT_SYMBOL_HALF_HEIGHT_MM = 4.0
-# Treat symbol properties within roughly one symbol width as visually attached to the symbol.
+# Treat symbol properties within slightly more than one coarse symbol width as visually attached.
 BLOCK_PROPERTY_ATTACHMENT_PADDING_MM = 12.0
 # Coarse half-size for including KiCad junction markers in block bounds.
 JUNCTION_MARKER_HALF_SIZE_MM = 0.6
