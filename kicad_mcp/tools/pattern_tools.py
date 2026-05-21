@@ -20,6 +20,109 @@ from kicad_mcp.utils.pattern_recognition import (
 )
 
 
+async def _identify_circuit_patterns_impl(
+    schematic_path: str, ctx: Context | None
+) -> dict[str, Any]:
+    """Identify circuit patterns without MCP decoration."""
+    if not os.path.exists(schematic_path):
+        if ctx:
+            await ctx.info(f"Schematic file not found: {schematic_path}")
+        return {"success": False, "error": f"Schematic file not found: {schematic_path}"}
+
+    if ctx:
+        await ctx.report_progress(10, 100)
+        await ctx.info(f"Loading schematic file: {os.path.basename(schematic_path)}")
+
+    try:
+        if ctx:
+            await ctx.report_progress(20, 100)
+            await ctx.info("Parsing schematic structure...")
+
+        netlist_data = extract_netlist(schematic_path)
+
+        if "error" in netlist_data:
+            if ctx:
+                await ctx.info(f"Error extracting netlist: {netlist_data['error']}")
+            return {"success": False, "error": netlist_data["error"]}
+
+        if ctx:
+            await ctx.report_progress(30, 100)
+            await ctx.info("Analyzing components and connections...")
+
+        components = netlist_data.get("components", {})
+        nets = netlist_data.get("nets", {})
+
+        if ctx:
+            await ctx.report_progress(50, 100)
+            await ctx.info("Identifying circuit patterns...")
+
+        identified_patterns = {
+            "power_supply_circuits": [],
+            "amplifier_circuits": [],
+            "filter_circuits": [],
+            "oscillator_circuits": [],
+            "digital_interface_circuits": [],
+            "microcontroller_circuits": [],
+            "sensor_interface_circuits": [],
+            "other_patterns": [],
+        }
+
+        if ctx:
+            await ctx.report_progress(60, 100)
+        identified_patterns["power_supply_circuits"] = identify_power_supplies(components, nets)
+
+        if ctx:
+            await ctx.report_progress(70, 100)
+        identified_patterns["amplifier_circuits"] = identify_amplifiers(components, nets)
+
+        if ctx:
+            await ctx.report_progress(75, 100)
+        identified_patterns["filter_circuits"] = identify_filters(components, nets)
+
+        if ctx:
+            await ctx.report_progress(80, 100)
+        identified_patterns["oscillator_circuits"] = identify_oscillators(components, nets)
+
+        if ctx:
+            await ctx.report_progress(85, 100)
+        identified_patterns["digital_interface_circuits"] = identify_digital_interfaces(
+            components, nets
+        )
+
+        if ctx:
+            await ctx.report_progress(90, 100)
+        identified_patterns["microcontroller_circuits"] = identify_microcontrollers(components)
+
+        if ctx:
+            await ctx.report_progress(95, 100)
+        identified_patterns["sensor_interface_circuits"] = identify_sensor_interfaces(
+            components, nets
+        )
+
+        result = {
+            "success": True,
+            "schematic_path": schematic_path,
+            "component_count": netlist_data["component_count"],
+            "identified_patterns": identified_patterns,
+        }
+
+        total_patterns = sum(len(patterns) for patterns in identified_patterns.values())
+        result["total_patterns_found"] = total_patterns
+
+        if ctx:
+            await ctx.report_progress(100, 100)
+            await ctx.info(
+                f"Pattern recognition complete. Found {total_patterns} circuit patterns."
+            )
+
+        return result
+
+    except Exception as e:
+        if ctx:
+            await ctx.info(f"Error identifying circuit patterns: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+
 def register_pattern_tools(mcp: FastMCP) -> None:
     """Register circuit pattern recognition tools with the MCP server.
 
@@ -46,117 +149,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         Returns:
             Dictionary with identified circuit patterns
         """
-        if not os.path.exists(schematic_path):
-            if ctx:
-                await ctx.info(f"Schematic file not found: {schematic_path}")
-            return {"success": False, "error": f"Schematic file not found: {schematic_path}"}
-
-        # Report progress
-        if ctx:
-            await ctx.report_progress(10, 100)
-            await ctx.info(f"Loading schematic file: {os.path.basename(schematic_path)}")
-
-        try:
-            # Extract netlist information
-            if ctx:
-                await ctx.report_progress(20, 100)
-                await ctx.info("Parsing schematic structure...")
-
-            netlist_data = extract_netlist(schematic_path)
-
-            if "error" in netlist_data:
-                if ctx:
-                    await ctx.info(f"Error extracting netlist: {netlist_data['error']}")
-                return {"success": False, "error": netlist_data["error"]}
-
-            # Analyze components and nets
-            if ctx:
-                await ctx.report_progress(30, 100)
-                await ctx.info("Analyzing components and connections...")
-
-            components = netlist_data.get("components", {})
-            nets = netlist_data.get("nets", {})
-
-            # Start pattern recognition
-            if ctx:
-                await ctx.report_progress(50, 100)
-                await ctx.info("Identifying circuit patterns...")
-
-            identified_patterns = {
-                "power_supply_circuits": [],
-                "amplifier_circuits": [],
-                "filter_circuits": [],
-                "oscillator_circuits": [],
-                "digital_interface_circuits": [],
-                "microcontroller_circuits": [],
-                "sensor_interface_circuits": [],
-                "other_patterns": [],
-            }
-
-            # Identify power supply circuits
-            if ctx:
-                await ctx.report_progress(60, 100)
-            identified_patterns["power_supply_circuits"] = identify_power_supplies(components, nets)
-
-            # Identify amplifier circuits
-            if ctx:
-                await ctx.report_progress(70, 100)
-            identified_patterns["amplifier_circuits"] = identify_amplifiers(components, nets)
-
-            # Identify filter circuits
-            if ctx:
-                await ctx.report_progress(75, 100)
-            identified_patterns["filter_circuits"] = identify_filters(components, nets)
-
-            # Identify oscillator circuits
-            if ctx:
-                await ctx.report_progress(80, 100)
-            identified_patterns["oscillator_circuits"] = identify_oscillators(components, nets)
-
-            # Identify digital interface circuits
-            if ctx:
-                await ctx.report_progress(85, 100)
-            identified_patterns["digital_interface_circuits"] = identify_digital_interfaces(
-                components, nets
-            )
-
-            # Identify microcontroller circuits
-            if ctx:
-                await ctx.report_progress(90, 100)
-            identified_patterns["microcontroller_circuits"] = identify_microcontrollers(components)
-
-            # Identify sensor interface circuits
-            if ctx:
-                await ctx.report_progress(95, 100)
-            identified_patterns["sensor_interface_circuits"] = identify_sensor_interfaces(
-                components, nets
-            )
-
-            # Build result
-            result = {
-                "success": True,
-                "schematic_path": schematic_path,
-                "component_count": netlist_data["component_count"],
-                "identified_patterns": identified_patterns,
-            }
-
-            # Count total patterns
-            total_patterns = sum(len(patterns) for patterns in identified_patterns.values())
-            result["total_patterns_found"] = total_patterns
-
-            # Complete progress
-            if ctx:
-                await ctx.report_progress(100, 100)
-                await ctx.info(
-                    f"Pattern recognition complete. Found {total_patterns} circuit patterns."
-                )
-
-            return result
-
-        except Exception as e:
-            if ctx:
-                await ctx.info(f"Error identifying circuit patterns: {str(e)}")
-            return {"success": False, "error": str(e)}
+        return await _identify_circuit_patterns_impl(schematic_path, ctx)
 
     @mcp.tool()
     async def analyze_project_circuit_patterns(
@@ -193,8 +186,9 @@ def register_pattern_tools(mcp: FastMCP) -> None:
             if ctx:
                 await ctx.info(f"Found schematic file: {os.path.basename(schematic_path)}")
 
-            # Identify patterns in the schematic
-            result = await identify_circuit_patterns(schematic_path, ctx)
+            # Call the undecorated implementation. FastMCP tool decorators return
+            # FunctionTool objects, which are not directly callable.
+            result = await _identify_circuit_patterns_impl(schematic_path, ctx)
 
             # Add project path to result
             if "success" in result and result["success"]:
@@ -203,5 +197,6 @@ def register_pattern_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            await ctx.info(f"Error analyzing project circuit patterns: {str(e)}")
+            if ctx:
+                await ctx.info(f"Error analyzing project circuit patterns: {str(e)}")
             return {"success": False, "error": str(e)}

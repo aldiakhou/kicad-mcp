@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tempfile
 from typing import Any, cast
 
 from kicad_mcp.utils.file_utils import get_project_files
@@ -233,34 +234,73 @@ def export_schematic_svg_file(
     """Export a schematic SVG to disk."""
     validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
     schematic_dir = os.path.dirname(validated_path) or validated_path
+    schematic_stem = Path(validated_path).stem
     if output_path is None:
-        output_path = os.path.join(schematic_dir, f"{Path(validated_path).stem}_schematic.svg")
-    output_path = os.path.realpath(os.path.expanduser(output_path))
+        requested_path = os.path.join(schematic_dir, f"{schematic_stem}_schematic.svg")
+    else:
+        requested_path = os.path.realpath(os.path.expanduser(output_path))
 
-    output_dir_name = os.path.dirname(output_path)
-    output_dir = output_dir_name if output_dir_name else schematic_dir
+    requested = Path(requested_path)
+    requested_is_svg_file = requested.suffix.lower() == ".svg"
+    legacy_svg_directory = requested_is_svg_file and requested.is_dir()
+    if legacy_svg_directory:
+        final_svg_path = requested / f"{schematic_stem}.svg"
+        output_dir = str(requested)
+        temp_dir_context = None
+    elif requested_is_svg_file:
+        final_svg_path = requested
+        output_dir = str(requested.parent if str(requested.parent) else Path(schematic_dir))
+        os.makedirs(output_dir, exist_ok=True)
+        temp_dir_context = tempfile.TemporaryDirectory(
+            prefix=".kicad_mcp_svg_", dir=output_dir
+        )
+    else:
+        output_dir = str(requested)
+        os.makedirs(output_dir, exist_ok=True)
+        final_svg_path = Path(output_dir) / f"{schematic_stem}.svg"
+        temp_dir_context = None
+
+    cli_output_dir = temp_dir_context.name if temp_dir_context is not None else output_dir
+    generated_svg_path = Path(cli_output_dir) / f"{schematic_stem}.svg"
     validator = PathValidator(trusted_roots={schematic_dir, output_dir})
     runner = SecureSubprocessRunner(path_validator=validator)
-    result = runner.run_kicad_command(
-        ["sch", "export", "svg", validated_path, "-o", output_path],
-        input_files=[validated_path],
-        output_files=[output_path],
-        working_dir=schematic_dir,
-    )
-    if result.returncode != 0:
+    try:
+        result = runner.run_kicad_command(
+            ["sch", "export", "svg", validated_path, "-o", cli_output_dir],
+            input_files=[validated_path],
+            output_files=[str(generated_svg_path)],
+            working_dir=schematic_dir,
+        )
+        if result.returncode != 0:
+            return {
+                "success": False,
+                "schematic_path": validated_path,
+                "svg_path": str(final_svg_path),
+                "error": result.stderr or result.stdout or "KiCad CLI export failed",
+            }
+
+        if not generated_svg_path.is_file():
+            return {
+                "success": False,
+                "schematic_path": validated_path,
+                "svg_path": str(final_svg_path),
+                "error": f"KiCad CLI did not create expected SVG: {generated_svg_path}",
+            }
+
+        if generated_svg_path != final_svg_path:
+            os.makedirs(final_svg_path.parent, exist_ok=True)
+            os.replace(generated_svg_path, final_svg_path)
+
         return {
-            "success": False,
+            "success": True,
             "schematic_path": validated_path,
-            "svg_path": output_path,
-            "error": result.stderr or result.stdout or "KiCad CLI export failed",
+            "svg_path": str(final_svg_path),
+            "stdout": result.stdout,
+            "stderr": result.stderr,
         }
-    return {
-        "success": True,
-        "schematic_path": validated_path,
-        "svg_path": output_path,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }
+    finally:
+        if temp_dir_context is not None:
+            temp_dir_context.cleanup()
 
 
 def apply_transactional_schematic_edit(

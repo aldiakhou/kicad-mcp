@@ -6,7 +6,7 @@ ENV/
 
 # Environment files
 .env
-
+.codex_kicad_tool_test/
 # Python cache files
 __pycache__/
 *.py[cod]

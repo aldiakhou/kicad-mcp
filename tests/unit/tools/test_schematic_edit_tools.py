@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import subprocess
 
 import pytest
 
@@ -116,4 +117,87 @@ async def test_export_schematic_svg_uses_secure_cli_runner(monkeypatch: pytest.M
 
     assert result["success"] is True
     assert result["svg_path"] == str(output_path)
+    assert result["preview"]._format == "svg"
+
+
+@pytest.mark.asyncio
+async def test_export_schematic_svg_resolves_cli_directory_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    schematic_path = _copy_fixture(tmp_path)
+    output_path = tmp_path / "preview.svg"
+    server = create_server()
+    tools = await server.get_tools()
+
+    def fake_run_kicad_command(
+        self,
+        command_args,
+        input_files=None,
+        output_files=None,
+        working_dir=None,
+        timeout=None,
+        capture_output=True,
+    ):
+        output_dir = Path(command_args[-1])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / f"{schematic_path.stem}.svg").write_text("<svg/>", encoding="utf-8")
+        return subprocess.CompletedProcess(command_args, 0, "", "")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.schematic_edit_tools.validate_schematic_with_cli_export",
+        lambda path: {"success": True, "skipped": False, "stdout": "", "stderr": ""},
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.utils.transactional_edit.SecureSubprocessRunner.run_kicad_command",
+        fake_run_kicad_command,
+    )
+
+    result = await tools["export_schematic_svg"].fn(str(schematic_path), str(output_path), None)
+
+    assert result["success"] is True
+    assert result["svg_path"] == str(output_path)
+    assert output_path.is_file()
+    assert result["preview"]._format == "svg"
+
+
+@pytest.mark.asyncio
+async def test_export_schematic_svg_reads_legacy_svg_named_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    schematic_path = _copy_fixture(tmp_path)
+    legacy_output_dir = tmp_path / "legacy.svg"
+    legacy_output_dir.mkdir()
+    server = create_server()
+    tools = await server.get_tools()
+
+    def fake_run_kicad_command(
+        self,
+        command_args,
+        input_files=None,
+        output_files=None,
+        working_dir=None,
+        timeout=None,
+        capture_output=True,
+    ):
+        output_dir = Path(command_args[-1])
+        (output_dir / f"{schematic_path.stem}.svg").write_text("<svg/>", encoding="utf-8")
+        return subprocess.CompletedProcess(command_args, 0, "", "")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.schematic_edit_tools.validate_schematic_with_cli_export",
+        lambda path: {"success": True, "skipped": False, "stdout": "", "stderr": ""},
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.utils.transactional_edit.SecureSubprocessRunner.run_kicad_command",
+        fake_run_kicad_command,
+    )
+
+    result = await tools["export_schematic_svg"].fn(
+        str(schematic_path), str(legacy_output_dir), None
+    )
+
+    expected_svg = legacy_output_dir / f"{schematic_path.stem}.svg"
+    assert result["success"] is True
+    assert result["svg_path"] == str(expected_svg)
+    assert expected_svg.is_file()
     assert result["preview"]._format == "svg"

@@ -18,6 +18,79 @@ from kicad_mcp.utils.netlist_parser import (
 logger = logging.getLogger(__name__)
 
 
+async def _extract_schematic_netlist_impl(
+    schematic_path: str, ctx: Context | None
+) -> dict[str, Any]:
+    """Extract netlist information from a schematic without MCP decoration."""
+    logger.info(f"Extracting netlist from schematic: {schematic_path}")
+
+    if not os.path.exists(schematic_path):
+        logger.info(f"Schematic file not found: {schematic_path}")
+        if ctx:
+            await ctx.info(f"Schematic file not found: {schematic_path}")
+        return {"success": False, "error": f"Schematic file not found: {schematic_path}"}
+
+    if ctx:
+        await ctx.report_progress(10, 100)
+        await ctx.info(f"Loading schematic file: {os.path.basename(schematic_path)}")
+
+    try:
+        if ctx:
+            await ctx.report_progress(20, 100)
+            await ctx.info("Parsing schematic structure...")
+
+        netlist_data = extract_netlist(schematic_path)
+
+        if "error" in netlist_data:
+            logger.info(f"Error extracting netlist: {netlist_data['error']}")
+            if ctx:
+                await ctx.info(f"Error extracting netlist: {netlist_data['error']}")
+            return {"success": False, "error": netlist_data["error"]}
+
+        if ctx:
+            await ctx.report_progress(60, 100)
+            await ctx.info(
+                f"Extracted {netlist_data['component_count']} components and {netlist_data['net_count']} nets"
+            )
+            await ctx.info(
+                "Note: net connectivity is currently partial and inferred from labels and power symbols."
+            )
+
+        if ctx:
+            await ctx.report_progress(70, 100)
+            await ctx.info("Analyzing netlist data...")
+
+        analysis_results = analyze_netlist(netlist_data)
+
+        if ctx:
+            await ctx.report_progress(90, 100)
+
+        result = {
+            "success": True,
+            "schematic_path": schematic_path,
+            "component_count": netlist_data["component_count"],
+            "net_count": netlist_data["net_count"],
+            "components": netlist_data["components"],
+            "nets": netlist_data["nets"],
+            "analysis": analysis_results,
+            "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
+            "netlist_quality": netlist_data.get("netlist_quality", "partial"),
+            "connectivity_complete": False,
+        }
+
+        if ctx:
+            await ctx.report_progress(100, 100)
+            await ctx.info("Netlist extraction complete")
+
+        return result
+
+    except Exception as e:
+        logger.info(f"Error extracting netlist: {str(e)}")
+        if ctx:
+            await ctx.info(f"Error extracting netlist: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+
 def register_netlist_tools(mcp: FastMCP) -> None:
     """Register netlist-related tools with the MCP server.
 
@@ -39,78 +112,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
         Returns:
             Dictionary with netlist information
         """
-        logger.info(f"Extracting netlist from schematic: {schematic_path}")
-
-        if not os.path.exists(schematic_path):
-            logger.info(f"Schematic file not found: {schematic_path}")
-            if ctx:
-                await ctx.info(f"Schematic file not found: {schematic_path}")
-            return {"success": False, "error": f"Schematic file not found: {schematic_path}"}
-
-        # Report progress
-        if ctx:
-            await ctx.report_progress(10, 100)
-            await ctx.info(f"Loading schematic file: {os.path.basename(schematic_path)}")
-
-        # Extract netlist information
-        try:
-            if ctx:
-                await ctx.report_progress(20, 100)
-                await ctx.info("Parsing schematic structure...")
-
-            netlist_data = extract_netlist(schematic_path)
-
-            if "error" in netlist_data:
-                logger.info(f"Error extracting netlist: {netlist_data['error']}")
-                if ctx:
-                    await ctx.info(f"Error extracting netlist: {netlist_data['error']}")
-                return {"success": False, "error": netlist_data["error"]}
-
-            if ctx:
-                await ctx.report_progress(60, 100)
-                await ctx.info(
-                    f"Extracted {netlist_data['component_count']} components and {netlist_data['net_count']} nets"
-                )
-                await ctx.info(
-                    "Note: net connectivity is currently partial and inferred from labels and power symbols."
-                )
-
-            # Analyze the netlist
-            if ctx:
-                await ctx.report_progress(70, 100)
-                await ctx.info("Analyzing netlist data...")
-
-            analysis_results = analyze_netlist(netlist_data)
-
-            if ctx:
-                await ctx.report_progress(90, 100)
-
-            # Build result
-            result = {
-                "success": True,
-                "schematic_path": schematic_path,
-                "component_count": netlist_data["component_count"],
-                "net_count": netlist_data["net_count"],
-                "components": netlist_data["components"],
-                "nets": netlist_data["nets"],
-                "analysis": analysis_results,
-                "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
-                "netlist_quality": netlist_data.get("netlist_quality", "partial"),
-                "connectivity_complete": False,
-            }
-
-            # Complete progress
-            if ctx:
-                await ctx.report_progress(100, 100)
-                await ctx.info("Netlist extraction complete")
-
-            return result
-
-        except Exception as e:
-            logger.info(f"Error extracting netlist: {str(e)}")
-            if ctx:
-                await ctx.info(f"Error extracting netlist: {str(e)}")
-            return {"success": False, "error": str(e)}
+        return await _extract_schematic_netlist_impl(schematic_path, ctx)
 
     @mcp.tool()
     async def extract_project_netlist(project_path: str, ctx: Context | None) -> dict[str, Any]:
@@ -157,8 +159,9 @@ def register_netlist_tools(mcp: FastMCP) -> None:
             if ctx:
                 await ctx.report_progress(20, 100)
 
-            # Call the schematic netlist extraction
-            result = await extract_schematic_netlist(schematic_path, ctx)
+            # Call the undecorated implementation. FastMCP tool decorators return
+            # FunctionTool objects, which are not directly callable.
+            result = await _extract_schematic_netlist_impl(schematic_path, ctx)
 
             # Add project path to result
             if "success" in result and result["success"]:
