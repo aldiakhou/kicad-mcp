@@ -36,6 +36,28 @@ This guide helps you troubleshoot common issues with the KiCad MCP Server.
 
 ## MCP Client Integration Issues
 
+### ChatGPT Shows `Unsafe URL`
+
+**Symptoms:**
+- ChatGPT rejects the MCP server URL with `Unsafe URL`
+- The local server works in logs or MCP Inspector, but ChatGPT will not save the connector/app
+
+**Possible Causes and Solutions:**
+
+1. **Local HTTP URL**
+   - **Problem:** ChatGPT apps/connectors expect a remote MCP server URL. Local URLs such as `http://127.0.0.1:8765/sse` or `http://localhost:8765/mcp` can be rejected.
+   - **Solution:** Expose the local server through an HTTPS tunnel or OpenAI Secure MCP Tunnel, then register the public `https://...` URL in ChatGPT.
+
+2. **Wrong Transport Path**
+   - **Problem:** The URL path does not match the selected transport.
+   - **Solution:** Use `/sse` with `KICAD_MCP_TRANSPORT=sse`, or `/mcp` with `KICAD_MCP_TRANSPORT=streamable-http`.
+
+3. **Developer Mode Not Enabled**
+   - **Problem:** Full MCP tool access in ChatGPT requires developer mode.
+   - **Solution:** Enable developer mode in ChatGPT settings, then create or refresh the app/connector.
+
+See [ChatGPT MCP Setup](chatgpt_desktop_setup.md) for the full setup flow.
+
 ### Server Not Appearing in Client
 
 **Symptoms:**

@@ -205,7 +205,10 @@ def validate_schematic_with_cli_export(schematic_path: str) -> dict[str, Any]:
         working_dir=schematic_dir,
     )
     if os.path.exists(output_path):
-        os.unlink(output_path)
+        if os.path.isdir(output_path):
+            shutil.rmtree(output_path, ignore_errors=True)
+        else:
+            os.unlink(output_path)
 
     if result.returncode != 0:
         return {
@@ -224,7 +227,9 @@ def validate_schematic_with_cli_export(schematic_path: str) -> dict[str, Any]:
     }
 
 
-def export_schematic_svg_file(schematic_path: str, output_path: str | None = None) -> dict[str, Any]:
+def export_schematic_svg_file(
+    schematic_path: str, output_path: str | None = None
+) -> dict[str, Any]:
     """Export a schematic SVG to disk."""
     validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
     schematic_dir = os.path.dirname(validated_path) or validated_path
@@ -328,7 +333,12 @@ def validate_block_connectivity_snapshots(
 ) -> dict[str, Any]:
     """Validate block connectivity snapshots after a write."""
     if not before_snapshots:
-        return {"success": True, "skipped": True, "reason": "No block moves planned", "block_connectivity": "preserved"}
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "No block moves planned",
+            "block_connectivity": "preserved",
+        }
     schematic = KiCadSchematic.from_file(schematic_path)
     comparisons = []
     failures = []
@@ -410,7 +420,9 @@ def apply_transactional_schematic_cleanup(
         if not cli_validation["success"]:
             raise TransactionalEditError(cli_validation.get("stderr") or "CLI validation failed")
 
-        connectivity_validation = validate_block_connectivity_snapshots(validated_path, before_snapshots)
+        connectivity_validation = validate_block_connectivity_snapshots(
+            validated_path, before_snapshots
+        )
         if not connectivity_validation["success"]:
             raise TransactionalEditError(cast(str, connectivity_validation["reason"]))
 

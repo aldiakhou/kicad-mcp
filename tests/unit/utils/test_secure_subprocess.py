@@ -4,6 +4,7 @@ Tests for secure subprocess utility.
 
 import os
 import subprocess
+import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -230,7 +231,9 @@ class TestSecureSubprocessRunner:
         """Test subprocess execution with output capture."""
         runner = SecureSubprocessRunner()
 
-        result = runner._run_subprocess(["echo", "test"], capture_output=True, timeout=5.0)
+        result = runner._run_subprocess(
+            [sys.executable, "-c", "print('test')"], capture_output=True, timeout=5.0
+        )
 
         assert result.returncode == 0
         assert "test" in result.stdout
@@ -239,7 +242,9 @@ class TestSecureSubprocessRunner:
         """Test subprocess execution without output capture."""
         runner = SecureSubprocessRunner()
 
-        result = runner._run_subprocess(["echo", "test"], capture_output=False, timeout=5.0)
+        result = runner._run_subprocess(
+            [sys.executable, "-c", "print('test')"], capture_output=False, timeout=5.0
+        )
 
         assert result.returncode == 0
         # stdout/stderr should be None when not captured
@@ -251,7 +256,9 @@ class TestSecureSubprocessRunner:
         runner = SecureSubprocessRunner()
 
         with pytest.raises(subprocess.TimeoutExpired):
-            runner._run_subprocess(["sleep", "10"], timeout=0.1)
+            runner._run_subprocess(
+                [sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.1
+            )
 
 
 class TestConvenienceFunctions:

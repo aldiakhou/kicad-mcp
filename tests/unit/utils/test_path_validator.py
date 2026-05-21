@@ -184,7 +184,10 @@ class TestPathValidator:
             with open(real_file, "w") as f:
                 f.write("test")
 
-            os.symlink(real_file, link_file)
+            try:
+                os.symlink(real_file, link_file)
+            except (OSError, NotImplementedError) as exc:
+                pytest.skip(f"Symlink creation is not available in this environment: {exc}")
 
             # Both should resolve to same real path
             real_result = validator.validate_path(real_file, must_exist=True)

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 from typing import Any, TypeAlias, cast
+import uuid
 
 
 class SExpressionError(ValueError):
@@ -130,9 +131,201 @@ class KiCadSchematic:
         """Load a schematic model from disk."""
         return cls.from_text(Path(schematic_path).read_text(encoding="utf-8"))
 
+    @classmethod
+    def empty(cls, paper: str = "A4") -> KiCadSchematic:
+        """Create an empty KiCad schematic model."""
+        return cls(
+            SExprList(
+                [
+                    SExprAtom("kicad_sch"),
+                    SExprList([SExprAtom("version"), SExprAtom("20230121")]),
+                    SExprList([SExprAtom("generator"), SExprAtom("kicad_mcp", quoted=True)]),
+                    SExprList([SExprAtom("uuid"), SExprAtom(str(uuid.uuid4()))]),
+                    SExprList([SExprAtom("paper"), SExprAtom(paper, quoted=True)]),
+                    SExprList([SExprAtom("lib_symbols")]),
+                ]
+            )
+        )
+
     def to_text(self) -> str:
         """Serialize the schematic back to KiCad S-expression text."""
         return f"{serialize_s_expression(self.root)}\n"
+
+    def embed_lib_symbol(self, lib_id: str, symbol_node: SExprList) -> dict[str, Any]:
+        """Embed a library symbol definition if it is not already present."""
+        lib_symbols = self._ensure_lib_symbols()
+        for existing in lib_symbols.child_lists("symbol"):
+            if len(existing.items) > 1 and self._atom_text(existing.items[1], default="") == lib_id:
+                return {"lib_id": lib_id, "embedded": False}
+        lib_symbols.items.append(symbol_node)
+        return {"lib_id": lib_id, "embedded": True}
+
+    def add_symbol(
+        self,
+        lib_id: str,
+        reference: str,
+        value: str,
+        x: float,
+        y: float,
+        angle: float = 0.0,
+        footprint: str | None = None,
+        properties: dict[str, str] | None = None,
+        lib_symbol: SExprList | None = None,
+    ) -> dict[str, Any]:
+        """Add a schematic symbol instance."""
+        if self._find_symbol_node(reference) is not None:
+            raise ValueError(f"Symbol reference already exists: {reference}")
+        embedded = None
+        if lib_symbol is not None:
+            embedded = self.embed_lib_symbol(lib_id, lib_symbol)
+        symbol_uuid = str(uuid.uuid4())
+        symbol = SExprList(
+            [
+                SExprAtom("symbol"),
+                SExprList([SExprAtom("lib_id"), SExprAtom(lib_id, quoted=True)]),
+                self._build_at(x, y, angle),
+                SExprList([SExprAtom("unit"), SExprAtom("1")]),
+                SExprList([SExprAtom("exclude_from_sim"), SExprAtom("no")]),
+                SExprList([SExprAtom("in_bom"), SExprAtom("yes")]),
+                SExprList([SExprAtom("on_board"), SExprAtom("yes")]),
+                SExprList([SExprAtom("uuid"), SExprAtom(symbol_uuid)]),
+                self._build_property("Reference", reference, x, y - 4.0),
+                self._build_property("Value", value, x, y + 4.0),
+                self._build_property("Footprint", footprint or "", x, y + 8.0, hidden=True),
+                self._build_property("Datasheet", "", x, y + 12.0, hidden=True),
+            ]
+        )
+        for name, property_value in (properties or {}).items():
+            if name not in {"Reference", "Value", "Footprint", "Datasheet"}:
+                symbol.items.append(
+                    self._build_property(name, property_value, x, y + 16.0, hidden=True)
+                )
+        self.root.items.append(symbol)
+        return {
+            "reference": reference,
+            "value": value,
+            "lib_id": lib_id,
+            "uuid": symbol_uuid,
+            "position": {"x": x, "y": y, "angle": angle},
+            "footprint": footprint,
+            "embedded_symbol": embedded,
+        }
+
+    def add_label(
+        self,
+        text: str,
+        x: float,
+        y: float,
+        label_type: str = "local",
+        angle: float = 0.0,
+    ) -> dict[str, Any]:
+        """Add a local, global, or hierarchical schematic label."""
+        head = {
+            "local": "label",
+            "global": "global_label",
+            "hierarchical": "hierarchical_label",
+        }.get(label_type)
+        if head is None:
+            raise ValueError("label_type must be one of: local, global, hierarchical")
+        label_uuid = str(uuid.uuid4())
+        label = SExprList(
+            [
+                SExprAtom(head),
+                SExprAtom(text, quoted=True),
+                self._build_at(x, y, angle),
+                SExprList([SExprAtom("uuid"), SExprAtom(label_uuid)]),
+            ]
+        )
+        if head != "label":
+            label.items.insert(2, SExprList([SExprAtom("shape"), SExprAtom("input")]))
+        self.root.items.append(label)
+        return {
+            "uuid": label_uuid,
+            "type": label_type,
+            "text": text,
+            "position": {"x": x, "y": y, "angle": angle},
+        }
+
+    def add_wire(
+        self, points: list[dict[str, float]], net_name: str | None = None
+    ) -> dict[str, Any]:
+        """Add a schematic wire and optionally a local label at its first point."""
+        normalized_points = [_coerce_point(point) for point in points]
+        if len(normalized_points) < 2:
+            raise ValueError("A wire requires at least two points")
+        wire_uuid = str(uuid.uuid4())
+        wire = SExprList(
+            [
+                SExprAtom("wire"),
+                SExprList(
+                    [
+                        SExprAtom("pts"),
+                        *[self._build_xy(point["x"], point["y"]) for point in normalized_points],
+                    ]
+                ),
+                SExprList([SExprAtom("uuid"), SExprAtom(wire_uuid)]),
+            ]
+        )
+        self.root.items.append(wire)
+        label = None
+        if net_name:
+            first = normalized_points[0]
+            label = self.add_label(net_name, first["x"], first["y"], "local", 0.0)
+        return {"uuid": wire_uuid, "points": normalized_points, "net_label": label}
+
+    def connect_points(
+        self,
+        start: dict[str, float],
+        end: dict[str, float],
+        style: str = "orthogonal",
+        net_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Connect two schematic points with a direct or orthogonal wire."""
+        start_point = _coerce_point(start)
+        end_point = _coerce_point(end)
+        if style == "direct":
+            points = [start_point, end_point]
+        elif style == "orthogonal":
+            corner = {"x": end_point["x"], "y": start_point["y"]}
+            points = [start_point, corner, end_point]
+        else:
+            raise ValueError("style must be one of: orthogonal, direct")
+        return self.add_wire(points, net_name)
+
+    def delete_item(self, item_type: str, item_id: str) -> dict[str, Any]:
+        """Delete a supported top-level schematic item."""
+        if item_type == "symbol":
+
+            def predicate(item: SExprNode) -> bool:
+                return (
+                    isinstance(item, SExprList)
+                    and item.head() == "symbol"
+                    and self._symbol_reference(item) == item_id
+                )
+        elif item_type == "wire":
+
+            def predicate(item: SExprNode) -> bool:
+                return (
+                    isinstance(item, SExprList)
+                    and item.head() == "wire"
+                    and self._get_uuid(item) == item_id
+                )
+        elif item_type == "label":
+
+            def predicate(item: SExprNode) -> bool:
+                return (
+                    isinstance(item, SExprList)
+                    and item.head() in {"label", "global_label", "hierarchical_label"}
+                    and self._get_uuid(item) == item_id
+                )
+        else:
+            raise ValueError("item_type must be one of: symbol, wire, label")
+
+        for index, item in enumerate(self.root.items):
+            if predicate(item):
+                removed = self.root.items.pop(index)
+                return {"item_type": item_type, "item_id": item_id, "removed_head": removed.head()}
+        raise KeyError(f"{item_type} not found: {item_id}")
 
     def list_symbols(self) -> list[dict[str, Any]]:
         """Return all top-level schematic symbols."""
@@ -340,7 +533,9 @@ class KiCadSchematic:
             self._set_xy(point_node, point["x"] + dx, point["y"] + dy)
         return self._wire_to_dict(wire)
 
-    def move_junction(self, old_x: float, old_y: float, new_x: float, new_y: float) -> dict[str, Any]:
+    def move_junction(
+        self, old_x: float, old_y: float, new_x: float, new_y: float
+    ) -> dict[str, Any]:
         """Move a junction marker identified by its current position."""
         junction = self._find_junction_node(old_x, old_y)
         if junction is None:
@@ -401,7 +596,9 @@ class KiCadSchematic:
         symbols = self.list_symbols()
 
         label_boxes = {
-            label["uuid"]: self._label_bbox(label) for label in labels if label.get("uuid") is not None
+            label["uuid"]: self._label_bbox(label)
+            for label in labels
+            if label.get("uuid") is not None
         }
         property_entries: list[dict[str, Any]] = []
         symbol_boxes: dict[str, BoundingBox] = {}
@@ -513,7 +710,9 @@ class KiCadSchematic:
 
         return overlaps
 
-    def move_symbol(self, reference: str, x: float, y: float, angle: float | None = None) -> dict[str, Any]:
+    def move_symbol(
+        self, reference: str, x: float, y: float, angle: float | None = None
+    ) -> dict[str, Any]:
         """Move a symbol instance."""
         symbol = self._find_symbol_node(reference)
         if symbol is None:
@@ -612,17 +811,22 @@ class KiCadSchematic:
                     group["wires"].append(wire_uuid)
 
         labels_by_id = {
-            cast(str, label["uuid"]): label for label in self.list_labels() if label.get("uuid") is not None
+            cast(str, label["uuid"]): label
+            for label in self.list_labels()
+            if label.get("uuid") is not None
         }
         nearby_labels: list[dict[str, Any]] = []
         nearby_label_ids: set[str] = set()
         for group in point_groups.values():
             for label in labels_by_id.values():
                 label_position = label["position"]
-                if math.dist(
-                    (group["x"], group["y"]),
-                    (label_position["x"], label_position["y"]),
-                ) > CONNECTIVITY_TOLERANCE_MM:
+                if (
+                    math.dist(
+                        (group["x"], group["y"]),
+                        (label_position["x"], label_position["y"]),
+                    )
+                    > CONNECTIVITY_TOLERANCE_MM
+                ):
                     continue
                 label_entry = {
                     "uuid": cast(str, label["uuid"]),
@@ -669,11 +873,7 @@ class KiCadSchematic:
             "text": label_data["text"],
             "position": position,
             "touching_wires": sorted(
-                {
-                    wire["uuid"]
-                    for wire in touching_wires
-                    if wire.get("uuid") is not None
-                }
+                {wire["uuid"] for wire in touching_wires if wire.get("uuid") is not None}
             ),
             "wire_contacts": sorted(
                 [
@@ -857,7 +1057,9 @@ class KiCadSchematic:
                 "block_id": block_id,
                 "dx": dx,
                 "dy": dy,
-                "planned_changes": {"refusals": ["Only connectivity-preserving block moves are supported."]},
+                "planned_changes": {
+                    "refusals": ["Only connectivity-preserving block moves are supported."]
+                },
             }
         block = self._require_functional_block(block_id)
         plan = self._plan_block_move(block, dx, dy)
@@ -928,7 +1130,8 @@ class KiCadSchematic:
             plan = self._plan_block_move(block, placement["dx"], placement["dy"])
             if plan["refusals"]:
                 refusals.extend(
-                    f"{block['block_id']}: {refusal}" for refusal in cast(list[str], plan["refusals"])
+                    f"{block['block_id']}: {refusal}"
+                    for refusal in cast(list[str], plan["refusals"])
                 )
                 continue
             moves.append(
@@ -1059,7 +1262,12 @@ class KiCadSchematic:
                 )
             )
         return {
-            "symbols": sorted({move["reference"] for move in cast(list[dict[str, Any]], preview["property_moves"])}),
+            "symbols": sorted(
+                {
+                    move["reference"]
+                    for move in cast(list[dict[str, Any]], preview["property_moves"])
+                }
+            ),
             "properties_arranged": cast(list[dict[str, Any]], preview["property_moves"]),
             "arranged_count": len(arranged_properties),
         }
@@ -1238,7 +1446,9 @@ class KiCadSchematic:
                 raise ValueError(
                     f"Cannot move {reference} safely: wire {wire_uuid} must be a straight 2-point wire."
                 )
-            attached_endpoints = [endpoint for endpoint in wire["endpoints"] if endpoint["inside_symbol"]]
+            attached_endpoints = [
+                endpoint for endpoint in wire["endpoints"] if endpoint["inside_symbol"]
+            ]
             if not attached_endpoints:
                 raise ValueError(
                     f"Cannot move {reference} safely: symbol has intersecting wire segments and no reliable pin map yet."
@@ -1295,7 +1505,9 @@ class KiCadSchematic:
             raise KeyError(f"Label not found: {label_uuid}")
         current_position = self._parse_at(label)
         requested_angle = current_position["angle"] if angle is None else angle
-        touching_wires = self.find_wires_touching_point(current_position["x"], current_position["y"])
+        touching_wires = self.find_wires_touching_point(
+            current_position["x"], current_position["y"]
+        )
 
         wire_endpoint_moves: list[dict[str, Any]] = []
         seen_endpoints: set[tuple[str | None, int]] = set()
@@ -1368,10 +1580,13 @@ class KiCadSchematic:
                 if label_uuid is None or label_uuid in seen_labels:
                     continue
                 position = label["position"]
-                if math.dist(
-                    (point["x"], point["y"]),
-                    (position["x"], position["y"]),
-                ) > CONNECTIVITY_TOLERANCE_MM:
+                if (
+                    math.dist(
+                        (point["x"], point["y"]),
+                        (position["x"], position["y"]),
+                    )
+                    > CONNECTIVITY_TOLERANCE_MM
+                ):
                     continue
                 seen_labels.add(label_uuid)
                 label_moves.append(
@@ -1428,13 +1643,17 @@ class KiCadSchematic:
                 wire_uuid = wire.get("uuid")
                 if wire_uuid is None:
                     continue
-                attached_endpoints = [endpoint for endpoint in wire["endpoints"] if endpoint["inside_symbol"]]
+                attached_endpoints = [
+                    endpoint for endpoint in wire["endpoints"] if endpoint["inside_symbol"]
+                ]
                 if not attached_endpoints:
                     continue
                 claimed_endpoints = wire_claims.setdefault(wire_uuid, set())
                 for endpoint in attached_endpoints:
                     claimed_endpoints.add(endpoint["endpoint_index"])
-                    for label in self._labels_touching_point(endpoint["point"]["x"], endpoint["point"]["y"]):
+                    for label in self._labels_touching_point(
+                        endpoint["point"]["x"], endpoint["point"]["y"]
+                    ):
                         label_uuid = label.get("uuid")
                         if label_uuid is not None:
                             label_ids.add(cast(str, label_uuid))
@@ -1477,8 +1696,12 @@ class KiCadSchematic:
                 symbol_data = self.get_symbol(symbol_ref)
                 if symbol_data is None:
                     continue
-                cast(set[str], block["symbol_properties"]).update(self._attached_property_ids(symbol_data))
-            for wire_uuid, claimed_indices in cast(dict[str, set[int]], block["wire_claims"]).items():
+                cast(set[str], block["symbol_properties"]).update(
+                    self._attached_property_ids(symbol_data)
+                )
+            for wire_uuid, claimed_indices in cast(
+                dict[str, set[int]], block["wire_claims"]
+            ).items():
                 wire_data = self._get_wire_by_uuid(wire_uuid)
                 if wire_data is None:
                     continue
@@ -1512,7 +1735,9 @@ class KiCadSchematic:
         junction_ids = sorted(cast(set[str], block["junctions"]))
         wire_claims = {
             wire_uuid: sorted(endpoint_indices)
-            for wire_uuid, endpoint_indices in sorted(cast(dict[str, set[int]], block["wire_claims"]).items())
+            for wire_uuid, endpoint_indices in sorted(
+                cast(dict[str, set[int]], block["wire_claims"]).items()
+            )
         }
         wire_ids = sorted(wire_claims)
         finalized = {
@@ -1558,7 +1783,9 @@ class KiCadSchematic:
         for wire_uuid in cast(list[str], block["wires"]):
             wire = self._get_wire_by_uuid(wire_uuid)
             if wire is None:
-                cast(list[str], plan["refusals"]).append(f"Wire {wire_uuid} is missing from the schematic.")
+                cast(list[str], plan["refusals"]).append(
+                    f"Wire {wire_uuid} is missing from the schematic."
+                )
                 continue
             point_count = len(wire["points"])
             claimed_indices = set(cast(list[int], block["wire_claims"].get(wire_uuid, [])))
@@ -1653,7 +1880,10 @@ class KiCadSchematic:
                 )
             )
 
-        translated_wires = [self.translate_wire(wire_uuid, plan["dx"], plan["dy"]) for wire_uuid in plan["translated_wires"]]
+        translated_wires = [
+            self.translate_wire(wire_uuid, plan["dx"], plan["dy"])
+            for wire_uuid in plan["translated_wires"]
+        ]
         moved_wire_endpoints = [
             self.move_wire_endpoint(
                 endpoint["wire_uuid"],
@@ -1687,7 +1917,8 @@ class KiCadSchematic:
             "symbol_properties": list(block["symbol_properties"]),
             "translated_wires": [wire["uuid"] for wire in translated_wires],
             "moved_wire_endpoints": [
-                f"{endpoint['uuid']}:{endpoint['endpoint_index']}" for endpoint in moved_wire_endpoints
+                f"{endpoint['uuid']}:{endpoint['endpoint_index']}"
+                for endpoint in moved_wire_endpoints
             ],
             "translated_junctions": list(block["junctions"]),
         }
@@ -1784,7 +2015,9 @@ class KiCadSchematic:
             }
             block_entries.append(block_entry)
             if raw_plan["refusals"]:
-                refusals.extend(f"{block['block_id']}: {refusal}" for refusal in raw_plan["refusals"])
+                refusals.extend(
+                    f"{block['block_id']}: {refusal}" for refusal in raw_plan["refusals"]
+                )
                 continue
             safe_block_moves.append(
                 {
@@ -1908,13 +2141,17 @@ class KiCadSchematic:
             "junctions": set(cast(set[str], seed["junctions"])),
             "wire_claims": {
                 wire_uuid: set(endpoint_indices)
-                for wire_uuid, endpoint_indices in cast(dict[str, set[int]], seed["wire_claims"]).items()
+                for wire_uuid, endpoint_indices in cast(
+                    dict[str, set[int]], seed["wire_claims"]
+                ).items()
             },
         }
 
     def _blocks_should_merge(self, left: dict[str, Any], right: dict[str, Any]) -> bool:
         return bool(
-            set(cast(dict[str, Any], left["wire_claims"])).intersection(cast(dict[str, Any], right["wire_claims"]))
+            set(cast(dict[str, Any], left["wire_claims"])).intersection(
+                cast(dict[str, Any], right["wire_claims"])
+            )
             or cast(set[str], left["labels"]).intersection(cast(set[str], right["labels"]))
             or cast(set[str], left["junctions"]).intersection(cast(set[str], right["junctions"]))
         )
@@ -1922,18 +2159,23 @@ class KiCadSchematic:
     def _merge_block_members(self, left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
         merged = self._copy_block_seed(left)
         cast(set[str], merged["symbols"]).update(cast(set[str], right["symbols"]))
-        cast(set[str], merged["symbol_properties"]).update(cast(set[str], right["symbol_properties"]))
+        cast(set[str], merged["symbol_properties"]).update(
+            cast(set[str], right["symbol_properties"])
+        )
         cast(set[str], merged["labels"]).update(cast(set[str], right["labels"]))
         cast(set[str], merged["junctions"]).update(cast(set[str], right["junctions"]))
         for wire_uuid, endpoint_indices in cast(dict[str, set[int]], right["wire_claims"]).items():
-            cast(dict[str, set[int]], merged["wire_claims"]).setdefault(wire_uuid, set()).update(endpoint_indices)
+            cast(dict[str, set[int]], merged["wire_claims"]).setdefault(wire_uuid, set()).update(
+                endpoint_indices
+            )
         return merged
 
     def _labels_touching_point(self, x: float, y: float) -> list[dict[str, Any]]:
         return [
             label
             for label in self.list_labels()
-            if math.dist((x, y), (label["position"]["x"], label["position"]["y"])) <= CONNECTIVITY_TOLERANCE_MM
+            if math.dist((x, y), (label["position"]["x"], label["position"]["y"]))
+            <= CONNECTIVITY_TOLERANCE_MM
         ]
 
     def _wire_touches_junction_at_points(self, points: list[dict[str, float]]) -> bool:
@@ -1988,7 +2230,11 @@ class KiCadSchematic:
             symbol = self.get_symbol(reference)
             if symbol is None or property_name not in symbol["properties"]:
                 continue
-            boxes.append(self._property_bbox(property_name, cast(dict[str, Any], symbol["properties"][property_name])))
+            boxes.append(
+                self._property_bbox(
+                    property_name, cast(dict[str, Any], symbol["properties"][property_name])
+                )
+            )
         for label_uuid in cast(list[str], block["labels"]):
             label = self._find_label_node(label_uuid)
             if label is not None:
@@ -2054,8 +2300,14 @@ class KiCadSchematic:
                 label_texts.append(cast(str, self._label_to_dict(label)["text"]))
         haystack = " ".join(refs + values + label_texts).upper()
         rules = [
-            ("USB-C / Connector block", ("USB", "USB_C", "TYPE-C", "VBUS", "USB_D+", "USB_D-", "CC1", "CC2")),
-            ("MCU block", ("ESP32", "MCU", "MICROCONTROLLER", "GPIO", "EN", "BOOT", "TX", "RX", "SDA", "SCL")),
+            (
+                "USB-C / Connector block",
+                ("USB", "USB_C", "TYPE-C", "VBUS", "USB_D+", "USB_D-", "CC1", "CC2"),
+            ),
+            (
+                "MCU block",
+                ("ESP32", "MCU", "MICROCONTROLLER", "GPIO", "EN", "BOOT", "TX", "RX", "SDA", "SCL"),
+            ),
             ("NFC block", ("PN532", "NFC", "RFID", "ANT", "IRQ")),
             ("Display block", ("LCD", "OLED", "DISPLAY", "RS", "D4", "D5", "D6", "D7")),
             ("Power block", ("LDO", "REGULATOR", "BUCK", "5V", "3V3", "VIN", "VOUT", "GND")),
@@ -2064,7 +2316,9 @@ class KiCadSchematic:
         best_score = 0
         for name, terms in rules:
             score = sum(1 for term in terms if term in haystack)
-            if name == "USB-C / Connector block" and any(reference.startswith("J") for reference in refs):
+            if name == "USB-C / Connector block" and any(
+                reference.startswith("J") for reference in refs
+            ):
                 score += 1
             if name == "MCU block" and any(reference.startswith("U") for reference in refs):
                 score += 1
@@ -2074,11 +2328,15 @@ class KiCadSchematic:
         confidence = (
             "high"
             if best_score >= BLOCK_CONFIDENCE_HIGH_THRESHOLD
-            else "medium" if best_score >= BLOCK_CONFIDENCE_MEDIUM_THRESHOLD else "low"
+            else "medium"
+            if best_score >= BLOCK_CONFIDENCE_MEDIUM_THRESHOLD
+            else "low"
         )
         return best_name, confidence
 
-    def _sort_blocks_for_layout(self, blocks: list[dict[str, Any]], layout_style: str | None) -> list[dict[str, Any]]:
+    def _sort_blocks_for_layout(
+        self, blocks: list[dict[str, Any]], layout_style: str | None
+    ) -> list[dict[str, Any]]:
         if layout_style != "left_to_right":
             return sorted(blocks, key=self._default_block_sort_key)
         return sorted(
@@ -2114,7 +2372,9 @@ class KiCadSchematic:
             return BLOCK_LAYOUT_PRIORITY_HEADERS
         return BLOCK_LAYOUT_PRIORITY_OTHER
 
-    def _default_block_sort_key(self, block: dict[str, Any]) -> tuple[float, float, tuple[str, ...]]:
+    def _default_block_sort_key(
+        self, block: dict[str, Any]
+    ) -> tuple[float, float, tuple[str, ...]]:
         return (block["bounds"]["top"], block["bounds"]["left"], tuple(block["symbols"]))
 
     def _plan_symbol_property_arrangement(self, reference: str) -> list[dict[str, Any]]:
@@ -2136,12 +2396,26 @@ class KiCadSchematic:
             current_box = self._property_bbox(property_name, current)
             if current_box in planned_boxes:
                 planned_boxes.remove(current_box)
-            target = self._choose_property_position(reference, property_name, current, symbol_boxes, planned_boxes)
-            planned_boxes.append(self._property_bbox(property_name, {"text": current.get("text"), "position": target}))
+            target = self._choose_property_position(
+                reference, property_name, current, symbol_boxes, planned_boxes
+            )
+            planned_boxes.append(
+                self._property_bbox(
+                    property_name, {"text": current.get("text"), "position": target}
+                )
+            )
             if not (
-                math.isclose(current["position"]["x"], target["x"], abs_tol=FLOAT_COMPARISON_TOLERANCE)
-                and math.isclose(current["position"]["y"], target["y"], abs_tol=FLOAT_COMPARISON_TOLERANCE)
-                and math.isclose(current["position"]["angle"], target["angle"], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+                math.isclose(
+                    current["position"]["x"], target["x"], abs_tol=FLOAT_COMPARISON_TOLERANCE
+                )
+                and math.isclose(
+                    current["position"]["y"], target["y"], abs_tol=FLOAT_COMPARISON_TOLERANCE
+                )
+                and math.isclose(
+                    current["position"]["angle"],
+                    target["angle"],
+                    abs_tol=FLOAT_COMPARISON_TOLERANCE,
+                )
             ):
                 moves.append(
                     {
@@ -2166,7 +2440,11 @@ class KiCadSchematic:
             raise KeyError(f"Symbol not found: {reference}")
         symbol_position = symbol["position"]
         for dx, dy in self._property_candidate_offsets(property_name):
-            candidate = {"x": symbol_position["x"] + dx, "y": symbol_position["y"] + dy, "angle": 0.0}
+            candidate = {
+                "x": symbol_position["x"] + dx,
+                "y": symbol_position["y"] + dy,
+                "angle": 0.0,
+            }
             candidate_box = self._property_bbox(
                 property_name,
                 {
@@ -2227,8 +2505,19 @@ class KiCadSchematic:
     def _label_has_overlap(self, label_uuid: str) -> bool:
         return any(label_uuid in overlap["objects"] for overlap in self.find_overlaps())
 
+    def _ensure_lib_symbols(self) -> SExprList:
+        lib_symbols = self.root.first_child("lib_symbols")
+        if lib_symbols is None:
+            lib_symbols = SExprList([SExprAtom("lib_symbols")])
+            self.root.items.insert(min(len(self.root.items), 5), lib_symbols)
+        return lib_symbols
+
     def _top_level(self, head: str) -> list[SExprList]:
-        return [item for item in self.root.items[1:] if isinstance(item, SExprList) and item.head() == head]
+        return [
+            item
+            for item in self.root.items[1:]
+            if isinstance(item, SExprList) and item.head() == head
+        ]
 
     def _find_symbol_node(self, reference: str) -> SExprList | None:
         for symbol in self._top_level("symbol"):
@@ -2399,6 +2688,36 @@ class KiCadSchematic:
             ]
         )
 
+    def _build_property(
+        self,
+        name: str,
+        value: str,
+        x: float,
+        y: float,
+        angle: float = 0.0,
+        hidden: bool = False,
+    ) -> SExprList:
+        items: list[SExprNode] = [
+            SExprAtom("property"),
+            SExprAtom(name, quoted=True),
+            SExprAtom(value, quoted=True),
+            self._build_at(x, y, angle),
+            SExprList(
+                [
+                    SExprAtom("effects"),
+                    SExprList(
+                        [
+                            SExprAtom("font"),
+                            SExprList([SExprAtom("size"), SExprAtom("1.27"), SExprAtom("1.27")]),
+                        ]
+                    ),
+                ]
+            ),
+        ]
+        if hidden:
+            items.append(SExprList([SExprAtom("hide"), SExprAtom("yes")]))
+        return SExprList(items)
+
     def _child_text(self, expr: SExprList, head: str) -> str | None:
         child = expr.first_child(head)
         if child is None or len(child.items) < 2:
@@ -2534,22 +2853,26 @@ def _segment_intersects_bbox(
     if max_x < bbox.left or min_x > bbox.right or max_y < bbox.top or min_y > bbox.bottom:
         return False
 
-    return any(
-        _point_on_segment(corner, start, end, tolerance=0.01)
-        for corner in (
-            (bbox.left, bbox.top),
-            (bbox.left, bbox.bottom),
-            (bbox.right, bbox.top),
-            (bbox.right, bbox.bottom),
+    return (
+        any(
+            _point_on_segment(corner, start, end, tolerance=0.01)
+            for corner in (
+                (bbox.left, bbox.top),
+                (bbox.left, bbox.bottom),
+                (bbox.right, bbox.top),
+                (bbox.right, bbox.bottom),
+            )
         )
-    ) or (
-        math.isclose(start[0], end[0], abs_tol=FLOAT_COMPARISON_TOLERANCE)
-        and bbox.left <= start[0] <= bbox.right
-        and not (max_y < bbox.top or min_y > bbox.bottom)
-    ) or (
-        math.isclose(start[1], end[1], abs_tol=FLOAT_COMPARISON_TOLERANCE)
-        and bbox.top <= start[1] <= bbox.bottom
-        and not (max_x < bbox.left or min_x > bbox.right)
+        or (
+            math.isclose(start[0], end[0], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+            and bbox.left <= start[0] <= bbox.right
+            and not (max_y < bbox.top or min_y > bbox.bottom)
+        )
+        or (
+            math.isclose(start[1], end[1], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+            and bbox.top <= start[1] <= bbox.bottom
+            and not (max_x < bbox.left or min_x > bbox.right)
+        )
     )
 
 
@@ -2565,7 +2888,9 @@ def compare_connectivity_snapshots(
         before_point_wire_counts = sorted(
             len(point.get("wires", [])) for point in before.get("connection_points", [])
         )
-        after_point_wire_counts = sorted(len(point.get("wires", [])) for point in after.get("connection_points", []))
+        after_point_wire_counts = sorted(
+            len(point.get("wires", [])) for point in after.get("connection_points", [])
+        )
         preserved = (
             sorted(before.get("nearby_wires", [])) == sorted(after.get("nearby_wires", []))
             and before_label_texts == after_label_texts
@@ -2580,10 +2905,10 @@ def compare_connectivity_snapshots(
         }
 
     if target_type == "label":
-        preserved = (
-            sorted(before.get("touching_wires", [])) == sorted(after.get("touching_wires", []))
-            and sorted(before.get("wire_contacts", []), key=lambda entry: entry["uuid"])
-            == sorted(after.get("wire_contacts", []), key=lambda entry: entry["uuid"])
+        preserved = sorted(before.get("touching_wires", [])) == sorted(
+            after.get("touching_wires", [])
+        ) and sorted(before.get("wire_contacts", []), key=lambda entry: entry["uuid"]) == sorted(
+            after.get("wire_contacts", []), key=lambda entry: entry["uuid"]
         )
         reason = "connectivity preserved" if preserved else "touching wires changed"
         return {
@@ -2596,10 +2921,13 @@ def compare_connectivity_snapshots(
     raise ValueError(f"Unsupported connectivity comparison target type: {target_type}")
 
 
-def compare_block_connectivity_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+def compare_block_connectivity_snapshots(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, Any]:
     """Compare two coarse block connectivity snapshots."""
     preserved = (
-        sorted(before.get("external_connections", [])) == sorted(after.get("external_connections", []))
+        sorted(before.get("external_connections", []))
+        == sorted(after.get("external_connections", []))
         and before.get("boundary_wire_count") == after.get("boundary_wire_count")
         and sorted(before.get("internal_symbols", [])) == sorted(after.get("internal_symbols", []))
         and sorted(before.get("labels", [])) == sorted(after.get("labels", []))
@@ -2613,8 +2941,17 @@ def _point_key(x: float, y: float) -> tuple[float, float]:
     return (round(x, 6), round(y, 6))
 
 
+def _coerce_point(point: dict[str, float]) -> dict[str, float]:
+    try:
+        return {"x": float(point["x"]), "y": float(point["y"])}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Point must contain numeric x and y values: {point}") from exc
+
+
 def _needs_quotes(value: str) -> bool:
-    return value == "" or any(char.isspace() or char in S_EXPRESSION_SPECIAL_CHARS for char in value)
+    return value == "" or any(
+        char.isspace() or char in S_EXPRESSION_SPECIAL_CHARS for char in value
+    )
 
 
 def _format_number(value: float) -> str:
@@ -2664,7 +3001,11 @@ def tokenize_s_expression(content: str) -> list[SExprAtom | str]:
             continue
 
         start = index
-        while index < len(content) and not content[index].isspace() and content[index] not in {"(", ")"}:
+        while (
+            index < len(content)
+            and not content[index].isspace()
+            and content[index] not in {"(", ")"}
+        ):
             index += 1
         tokens.append(SExprAtom(content[start:index], quoted=False))
     return tokens

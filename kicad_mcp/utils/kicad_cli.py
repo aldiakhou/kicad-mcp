@@ -7,6 +7,7 @@ with caching and configuration support.
 
 import logging
 import os
+from pathlib import Path
 import platform
 import shutil
 import subprocess
@@ -175,6 +176,15 @@ class KiCadCLIManager:
                     r"C:\KiCad\bin\kicad-cli.exe",
                 ]
             )
+            for root in (Path(r"C:\Program Files\KiCad"), Path(r"C:\Program Files (x86)\KiCad")):
+                if root.exists():
+                    paths.extend(
+                        str(path)
+                        for path in sorted(
+                            root.glob(r"*\bin\kicad-cli.exe"),
+                            reverse=True,
+                        )
+                    )
         else:  # Linux and other Unix-like systems
             paths.extend(
                 [

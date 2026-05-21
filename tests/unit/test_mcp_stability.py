@@ -5,6 +5,7 @@ Tests for MCP startup and stdout-safe behavior.
 from __future__ import annotations
 
 import importlib
+import os
 from pathlib import Path
 import runpy
 
@@ -39,7 +40,14 @@ class FakeRunnableServer:
     def __init__(self) -> None:
         self.run_kwargs: dict[str, object] | None = None
 
-    def run(self, *, transport: str = "stdio", host: str | None = None, port: int | None = None, path: str | None = None) -> None:
+    def run(
+        self,
+        *,
+        transport: str = "stdio",
+        host: str | None = None,
+        port: int | None = None,
+        path: str | None = None,
+    ) -> None:
         self.run_kwargs = {"transport": transport, "host": host, "port": port, "path": path}
 
 
@@ -105,8 +113,8 @@ def test_transport_config_defaults_to_stdio(monkeypatch):
     }
 
 
-def test_transport_config_supports_sse_for_chatgpt_desktop(monkeypatch):
-    """SSE transport should be selectable for ChatGPT Desktop style local HTTP use."""
+def test_transport_config_supports_sse_http_endpoint(monkeypatch):
+    """SSE transport should be selectable for tunneled or remote HTTP use."""
     monkeypatch.setenv("KICAD_MCP_TRANSPORT", "sse")
     monkeypatch.setenv("KICAD_MCP_HOST", "127.0.0.1")
     monkeypatch.setenv("KICAD_MCP_PORT", "8765")
@@ -217,8 +225,12 @@ def test_config_honors_environment_overrides(monkeypatch):
 
     reloaded = importlib.reload(config)
 
-    assert str(Path("~/CustomKiCadProjects").expanduser()) == reloaded.KICAD_USER_DIR
-    assert str(Path("~/Applications/KiCadCustom.app").expanduser()) == reloaded.KICAD_APP_PATH
+    assert os.path.normpath(str(Path("~/CustomKiCadProjects").expanduser())) == os.path.normpath(
+        reloaded.KICAD_USER_DIR
+    )
+    assert os.path.normpath(
+        str(Path("~/Applications/KiCadCustom.app").expanduser())
+    ) == os.path.normpath(reloaded.KICAD_APP_PATH)
 
     monkeypatch.setenv("KICAD_USER_DIR", original_user_dir)
     monkeypatch.setenv("KICAD_APP_PATH", original_app_path)

@@ -31,6 +31,7 @@ from kicad_mcp.resources.pattern_resources import register_pattern_resources
 from kicad_mcp.resources.projects import register_project_resources
 from kicad_mcp.tools.analysis_tools import register_analysis_tools
 from kicad_mcp.tools.bom_tools import register_bom_tools
+from kicad_mcp.tools.creation_tools import register_creation_tools
 from kicad_mcp.tools.drc_tools import register_drc_tools
 from kicad_mcp.tools.export_tools import register_export_tools
 from kicad_mcp.tools.netlist_tools import register_netlist_tools
@@ -175,6 +176,7 @@ def create_server() -> FastMCP:
     register_netlist_tools(mcp)
     register_pattern_tools(mcp)
     register_schematic_edit_tools(mcp)
+    register_creation_tools(mcp)
 
     # Register prompts
     logging.info("Registering prompts...")
@@ -272,7 +274,7 @@ def _run_server_with_config(server: FastMCP, transport_config: dict[str, Any]) -
 
     The installed FastMCP version owns the actual transport implementation. This wrapper only
     passes arguments supported by the local FastMCP.run signature, so stdio users keep the old
-    behavior while ChatGPT Desktop users can opt into SSE/HTTP transports.
+    behavior while remote MCP users can opt into SSE/HTTP transports.
     """
     run_signature = inspect.signature(server.run)
     accepted_args = set(run_signature.parameters)
@@ -286,7 +288,9 @@ def _run_server_with_config(server: FastMCP, transport_config: dict[str, Any]) -
     if "transport" in accepted_args:
         kwargs["transport"] = transport
     elif transport != "stdio":
-        raise RuntimeError("Installed FastMCP version does not expose transport selection in run().")
+        raise RuntimeError(
+            "Installed FastMCP version does not expose transport selection in run()."
+        )
 
     if transport != "stdio":
         for key in ("host", "port", "path"):

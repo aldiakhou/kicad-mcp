@@ -190,6 +190,7 @@ The LLM will understand your intent and request the relevant information from th
 Detailed documentation for each feature is available in the `docs/` directory:
 
 - [Project Management](docs/project_guide.md)
+- [Project Creation and PCB Authoring](docs/creation_guide.md)
 - [PCB Design Analysis](docs/analysis_guide.md)
 - [Netlist Extraction](docs/netlist_guide.md)
 - [Bill of Materials (BOM)](docs/bom_guide.md)
@@ -198,7 +199,7 @@ Detailed documentation for each feature is available in the `docs/` directory:
 - [Circuit Pattern Recognition](docs/pattern_guide.md)
 - [Prompt Templates](docs/prompt_guide.md)
 - [Safe Schematic Editing](docs/schematic_edit_guide.md)
-- [ChatGPT Desktop MCP Setup](docs/chatgpt_desktop_setup.md)
+- [ChatGPT MCP Setup](docs/chatgpt_desktop_setup.md)
 
 ## Safe editing guarantees and limitations
 
