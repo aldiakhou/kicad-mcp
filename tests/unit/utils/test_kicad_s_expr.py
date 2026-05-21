@@ -1,8 +1,16 @@
 from pathlib import Path
 
-from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, parse_s_expression, validate_schematic_text
+import pytest
+
+from kicad_mcp.utils.kicad_s_expr import (
+    KiCadSchematic,
+    compare_connectivity_snapshots,
+    parse_s_expression,
+    validate_schematic_text,
+)
 
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "sample_schematic.kicad_sch"
+CONNECTED_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "connected_move_schematic.kicad_sch"
 EXPECTED_REFERENCE_Y = 96.0
 EXPECTED_VALUE_Y = 104.0
 EXPECTED_FOOTPRINT_Y = 108.0
@@ -65,3 +73,71 @@ def test_connectivity_risk_detects_attached_symbols_and_labels():
     assert label_risk["attached"] is True
     assert any(attachment["type"] == "wire" for attachment in label_risk["attachments"])
     assert auto_arrange_risks
+
+
+def test_connection_helpers_detect_symbol_endpoint_attachment():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+
+    points = schematic.get_symbol_connection_points("R1")
+    intersecting_wires = schematic.find_wires_intersecting_symbol("R1")
+
+    assert points == [
+        {
+            "wire_uuid": "wire-r1",
+            "endpoint_index": 0,
+            "point": {"x": 100.0, "y": 100.0},
+        }
+    ]
+    assert intersecting_wires[0]["uuid"] == "wire-r1"
+    assert intersecting_wires[0]["endpoints"][0]["inside_symbol"] is True
+
+
+def test_move_symbol_with_connections_moves_attached_endpoint_and_label():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+
+    result = schematic.move_symbol_with_connections("R1", 110.0, 100.0)
+
+    assert result["symbol"]["position"]["x"] == 110.0
+    assert result["moved_wire_endpoints"][0]["new_point"] == {"x": 110.0, "y": 100.0}
+    updated_wire = next(wire for wire in schematic.list_wires() if wire["uuid"] == "wire-r1")
+    assert updated_wire["points"] == [{"x": 110.0, "y": 100.0}, {"x": 120.0, "y": 100.0}]
+    moved_label = next(label for label in schematic.list_labels() if label["uuid"] == "label-r1")
+    assert moved_label["position"]["x"] == 110.0
+
+
+def test_move_symbol_with_connections_refuses_ambiguous_intersection():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+
+    with pytest.raises(ValueError, match="intersecting wire segments"):
+        schematic.move_symbol_with_connections("R2", 210.0, 100.0)
+
+
+def test_move_label_with_wire_moves_only_attached_endpoint():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+
+    result = schematic.move_label_with_wire("label-sda", 160.0, 100.0)
+
+    assert result["label"]["position"]["x"] == 160.0
+    assert result["moved_wire_endpoints"][0]["new_point"] == {"x": 160.0, "y": 100.0}
+    updated_wire = next(wire for wire in schematic.list_wires() if wire["uuid"] == "wire-sda")
+    assert updated_wire["points"] == [{"x": 140.0, "y": 100.0}, {"x": 160.0, "y": 100.0}]
+
+
+def test_move_label_with_wire_refuses_mid_segment_label():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+
+    with pytest.raises(ValueError, match="middle of a wire segment"):
+        schematic.move_label_with_wire("label-mid", 245.0, 100.0)
+
+
+def test_connectivity_snapshot_and_comparison_report_preserved_connections():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+    before = schematic.target_connectivity_snapshot("symbol", "R1")
+
+    schematic.move_symbol_with_connections("R1", 110.0, 100.0)
+    after = schematic.target_connectivity_snapshot("symbol", "R1")
+    comparison = compare_connectivity_snapshots("symbol", before, after)
+
+    assert before["nearby_wires"] == ["wire-r1"]
+    assert before["nearby_labels"][0]["text"] == "NET_R1"
+    assert comparison["preserved"] is True

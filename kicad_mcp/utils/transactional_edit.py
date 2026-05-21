@@ -224,6 +224,7 @@ def apply_transactional_schematic_edit(
     mutator: Callable[[KiCadSchematic], dict[str, Any]],
     *,
     run_cli_validation: bool = True,
+    post_write_validator: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Apply a schematic edit transactionally with backup and rollback."""
     validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
@@ -246,6 +247,16 @@ def apply_transactional_schematic_edit(
         if not cli_validation["success"]:
             raise TransactionalEditError(cli_validation.get("stderr") or "CLI validation failed")
 
+        post_write_validation = (
+            post_write_validator(validated_path)
+            if post_write_validator is not None
+            else {"success": True, "skipped": True, "reason": "Post-write validation disabled"}
+        )
+        if not post_write_validation.get("success", False):
+            raise TransactionalEditError(
+                cast(str, post_write_validation.get("error") or post_write_validation.get("reason"))
+            )
+
         diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
         return {
             "success": True,
@@ -256,6 +267,7 @@ def apply_transactional_schematic_edit(
                 "before": before_validation,
                 "after": after_validation,
                 "cli": cli_validation,
+                "post_write": post_write_validation,
             },
             "rolled_back": False,
             "diff": diff_result["diff"],
