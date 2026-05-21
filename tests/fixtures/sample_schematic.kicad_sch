@@ -27,6 +27,7 @@
       (at 120 104 0)
     )
   )
+  ; Intentional overlap for tests: symbol, label, and wire share this point.
   (label "SCL"
     (at 100 100 0)
     (uuid "label-1")
