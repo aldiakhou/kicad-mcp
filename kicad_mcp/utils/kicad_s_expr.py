@@ -1305,8 +1305,6 @@ class KiCadSchematic:
                 if wire_data is None:
                     continue
                 endpoint_indices = set(claimed_indices)
-                if endpoint_indices and 0 in endpoint_indices and len(wire_data["points"]) - 1 in endpoint_indices:
-                    endpoint_indices = {0, len(wire_data["points"]) - 1}
                 for endpoint_index in endpoint_indices:
                     point = wire_data["points"][endpoint_index]
                     for label in self._labels_touching_point(point["x"], point["y"]):
@@ -1386,7 +1384,7 @@ class KiCadSchematic:
                 continue
             point_count = len(wire["points"])
             claimed_indices = set(cast(list[int], block["wire_claims"].get(wire_uuid, [])))
-            if point_count >= 2 and 0 in claimed_indices and point_count - 1 in claimed_indices:
+            if self._wire_fully_claimed(wire, claimed_indices):
                 cast(list[str], plan["translated_wires"]).append(wire_uuid)
                 continue
             if len(claimed_indices) != 1:
@@ -1558,9 +1556,8 @@ class KiCadSchematic:
             wire = self._get_wire_by_uuid(wire_uuid)
             if wire is None:
                 continue
-            point_count = len(wire["points"])
             claimed_set = set(claimed_indices)
-            if point_count >= 2 and 0 in claimed_set and point_count - 1 in claimed_set:
+            if self._wire_fully_claimed(wire, claimed_set):
                 continue
             boundary_wires.append(wire_uuid)
         label_texts = []
@@ -1637,6 +1634,10 @@ class KiCadSchematic:
         return math.isclose(dx, 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE) and math.isclose(
             dy, 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE
         )
+
+    def _wire_fully_claimed(self, wire: dict[str, Any], claimed_indices: set[int]) -> bool:
+        point_count = len(wire["points"])
+        return point_count >= 2 and 0 in claimed_indices and point_count - 1 in claimed_indices
 
     def _attached_property_ids(self, symbol: dict[str, Any]) -> list[str]:
         symbol_box = self._symbol_bbox(symbol)
@@ -1721,7 +1722,7 @@ class KiCadSchematic:
             if wire is None or len(wire["points"]) < 2:
                 continue
             claimed_set = set(claimed_indices)
-            if 0 in claimed_set and len(wire["points"]) - 1 in claimed_set:
+            if self._wire_fully_claimed(wire, claimed_set):
                 continue
             if len(claimed_set) != 1 or len(wire["points"]) != 2:
                 continue

@@ -19,13 +19,8 @@ def _get_block_by_symbols(blocks: list[dict], *symbols: str) -> dict:
     return next(block for block in blocks if block["symbols"] == wanted)
 
 
-@pytest.mark.asyncio
-async def test_block_tools_preview_and_move(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    schematic_path = _copy_fixture(tmp_path)
-    original_text = schematic_path.read_text(encoding="utf-8")
-    server = create_server()
-    tools = await server.get_tools()
-
+@pytest.fixture
+def patch_cli_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "kicad_mcp.tools.schematic_edit_tools.validate_schematic_with_cli_export",
         lambda path: {"success": True, "skipped": True, "reason": "test"},
@@ -34,6 +29,14 @@ async def test_block_tools_preview_and_move(monkeypatch: pytest.MonkeyPatch, tmp
         "kicad_mcp.utils.transactional_edit.validate_schematic_with_cli_export",
         lambda path: {"success": True, "skipped": True, "reason": "test"},
     )
+
+
+@pytest.mark.asyncio
+async def test_block_tools_preview_and_move(patch_cli_validation: None, tmp_path: Path):
+    schematic_path = _copy_fixture(tmp_path)
+    original_text = schematic_path.read_text(encoding="utf-8")
+    server = create_server()
+    tools = await server.get_tools()
 
     blocks_result = tools["schematic_find_functional_blocks"].fn(str(schematic_path))
     usb_block = _get_block_by_symbols(blocks_result["blocks"], "J1", "R1")
@@ -57,21 +60,12 @@ async def test_block_tools_preview_and_move(monkeypatch: pytest.MonkeyPatch, tmp
 
 @pytest.mark.asyncio
 async def test_block_tools_refuse_unsafe_moves_and_roll_back(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, patch_cli_validation: None, tmp_path: Path
 ):
     schematic_path = _copy_fixture(tmp_path)
     original_text = schematic_path.read_text(encoding="utf-8")
     server = create_server()
     tools = await server.get_tools()
-
-    monkeypatch.setattr(
-        "kicad_mcp.tools.schematic_edit_tools.validate_schematic_with_cli_export",
-        lambda path: {"success": True, "skipped": True, "reason": "test"},
-    )
-    monkeypatch.setattr(
-        "kicad_mcp.utils.transactional_edit.validate_schematic_with_cli_export",
-        lambda path: {"success": True, "skipped": True, "reason": "test"},
-    )
 
     blocks_result = tools["schematic_find_functional_blocks"].fn(str(schematic_path))
     mcu_block = _get_block_by_symbols(blocks_result["blocks"], "U1")
