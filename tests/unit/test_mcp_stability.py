@@ -43,6 +43,16 @@ class FakeRunnableServer:
         self.run_kwargs = {"transport": transport, "host": host, "port": port, "path": path}
 
 
+class FakeKwargsRunnableServer:
+    """FastMCP-like server double that accepts transport kwargs via **kwargs."""
+
+    def __init__(self) -> None:
+        self.run_kwargs: dict[str, object] | None = None
+
+    def run(self, *, transport: str = "stdio", **transport_kwargs: object) -> None:
+        self.run_kwargs = {"transport": transport, **transport_kwargs}
+
+
 @pytest.mark.asyncio
 async def test_create_server_registers_smoke_resources_and_tools():
     """The server should initialize and expose core tools/resources."""
@@ -112,6 +122,23 @@ def test_transport_config_supports_sse_for_chatgpt_desktop(monkeypatch):
 def test_run_server_passes_sse_transport_arguments():
     """Run wrapper should pass transport arguments only when supported by FastMCP.run."""
     fake_server = FakeRunnableServer()
+
+    server_module._run_server_with_config(
+        fake_server,
+        {"transport": "sse", "host": "127.0.0.1", "port": 8765, "path": "/sse"},
+    )
+
+    assert fake_server.run_kwargs == {
+        "transport": "sse",
+        "host": "127.0.0.1",
+        "port": 8765,
+        "path": "/sse",
+    }
+
+
+def test_run_server_passes_sse_transport_arguments_via_var_kwargs():
+    """Run wrapper should forward SSE options when FastMCP.run uses **transport_kwargs."""
+    fake_server = FakeKwargsRunnableServer()
 
     server_module._run_server_with_config(
         fake_server,
