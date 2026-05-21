@@ -150,6 +150,17 @@ class KiCadSchematic:
             )
         return wires
 
+    def list_junctions(self) -> list[dict[str, Any]]:
+        """Return all top-level junction markers."""
+        junctions: list[dict[str, Any]] = []
+        for junction in self._top_level("junction"):
+            xy_expr = junction.first_child("xy")
+            if xy_expr is None:
+                continue
+            position = self._parse_xy(xy_expr)
+            junctions.append({"position": position, "uuid": self._get_uuid(junction)})
+        return junctions
+
     def get_symbol_connection_points(self, reference: str) -> list[dict[str, Any]]:
         """Return wire endpoints that appear attached to a symbol."""
         if self.get_symbol(reference) is None:
@@ -212,6 +223,18 @@ class KiCadSchematic:
                 }
             )
         return touching_wires
+
+    def find_junctions_touching_point(
+        self, x: float, y: float, tolerance: float = CONNECTIVITY_TOLERANCE_MM
+    ) -> list[dict[str, Any]]:
+        """Return junction markers touching a point."""
+        point = (x, y)
+        touching_junctions: list[dict[str, Any]] = []
+        for junction in self.list_junctions():
+            position = junction["position"]
+            if math.dist(point, (position["x"], position["y"])) <= tolerance:
+                touching_junctions.append(junction)
+        return touching_junctions
 
     def find_wires_intersecting_symbol(self, reference: str) -> list[dict[str, Any]]:
         """Return wires that intersect a symbol's coarse connection search region."""
@@ -302,6 +325,22 @@ class KiCadSchematic:
             point = self._parse_xy(point_node)
             self._set_xy(point_node, point["x"] + dx, point["y"] + dy)
         return self._wire_to_dict(wire)
+
+    def move_junction(self, old_x: float, old_y: float, new_x: float, new_y: float) -> dict[str, Any]:
+        """Move a junction marker identified by its current position."""
+        junction = self._find_junction_node(old_x, old_y)
+        if junction is None:
+            raise KeyError(
+                f"Junction not found at ({_format_number(old_x)}, {_format_number(old_y)})"
+            )
+        xy_expr = junction.first_child("xy")
+        if xy_expr is None:
+            raise SExpressionError("Junction is malformed: missing xy node")
+        self._set_xy(xy_expr, new_x, new_y)
+        return {
+            "old_point": {"x": old_x, "y": old_y},
+            "new_point": {"x": new_x, "y": new_y},
+        }
 
     def get_symbol(self, reference: str) -> dict[str, Any] | None:
         """Return a single symbol by reference."""
@@ -916,6 +955,8 @@ class KiCadSchematic:
         wire_endpoint_moves: list[dict[str, Any]] = []
         for wire in self.find_wires_intersecting_symbol(reference):
             wire_uuid = wire.get("uuid")
+            if wire_uuid is None:
+                raise ValueError(f"Cannot move {reference} safely: attached wire has no UUID.")
             if wire["point_count"] != 2:
                 raise ValueError(
                     f"Cannot move {reference} safely: wire {wire_uuid} must be a straight 2-point wire."
@@ -945,6 +986,11 @@ class KiCadSchematic:
                 f"Cannot rotate {reference} safely with attached wires: rotation-aware pin mapping is not implemented yet."
             )
 
+        self._refuse_junctions_at_points(
+            reference,
+            "symbol",
+            [endpoint["old_point"] for endpoint in wire_endpoint_moves],
+        )
         moved_labels = self._plan_labels_at_points_to_translate(
             [endpoint["old_point"] for endpoint in wire_endpoint_moves],
             dx,
@@ -977,6 +1023,8 @@ class KiCadSchematic:
         seen_endpoints: set[tuple[str | None, int]] = set()
         for wire in touching_wires:
             wire_uuid = wire.get("uuid")
+            if wire_uuid is None:
+                raise ValueError(f"Cannot move label {label_uuid} safely: attached wire has no UUID.")
             if wire["point_count"] != 2:
                 raise ValueError(
                     f"Cannot move label {label_uuid} safely: wire {wire_uuid} must be a straight 2-point wire."
@@ -1012,6 +1060,11 @@ class KiCadSchematic:
                 f"Cannot rotate label {label_uuid} safely with attached wires: rotation-aware pin mapping is not implemented yet."
             )
 
+        self._refuse_junctions_at_points(
+            label_uuid,
+            "label",
+            [endpoint["old_point"] for endpoint in wire_endpoint_moves],
+        )
         return {
             "label_uuid": label_uuid,
             "from_position": current_position,
@@ -1051,6 +1104,18 @@ class KiCadSchematic:
                     }
                 )
         return label_moves
+
+    def _refuse_junctions_at_points(
+        self,
+        target_id: str,
+        target_type: str,
+        points: list[dict[str, float]],
+    ) -> None:
+        for point in points:
+            if self.find_junctions_touching_point(point["x"], point["y"]):
+                raise ValueError(
+                    f"Cannot move {target_type} {target_id} safely: connection point has a junction and junction-preserving movement is not implemented yet."
+                )
 
     def _candidate_positions(self, x: float, y: float) -> list[tuple[float, float]]:
         """Generate nearby candidate offsets in an expanding pattern for overlap resolution."""
@@ -1093,6 +1158,16 @@ class KiCadSchematic:
         for wire in self._top_level("wire"):
             if self._get_uuid(wire) == wire_uuid:
                 return wire
+        return None
+
+    def _find_junction_node(self, x: float, y: float) -> SExprList | None:
+        for junction in self._top_level("junction"):
+            xy_expr = junction.first_child("xy")
+            if xy_expr is None:
+                continue
+            position = self._parse_xy(xy_expr)
+            if math.dist((x, y), (position["x"], position["y"])) <= CONNECTIVITY_TOLERANCE_MM:
+                return junction
         return None
 
     def _find_property_node(self, reference: str, property_name: str) -> SExprList | None:

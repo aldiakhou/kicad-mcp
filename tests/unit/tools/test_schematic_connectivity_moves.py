@@ -86,11 +86,26 @@ async def test_connectivity_move_tools_refuse_unsupported_cases(
     move_label_result = await tools["schematic_move_label_with_wire"].fn(
         str(schematic_path), "label-mid", 245.0, 100.0, None, True, None
     )
+    move_symbol_junction_result = await tools["schematic_move_symbol_with_connections"].fn(
+        str(schematic_path), "R3", 310.0, 100.0, None, True, None
+    )
+    move_symbol_missing_uuid_result = await tools["schematic_move_symbol_with_connections"].fn(
+        str(schematic_path), "R4", 370.0, 100.0, None, True, None
+    )
+    preview_missing_uuid_result = tools["schematic_preview_connectivity_move"].fn(
+        str(schematic_path), "symbol", "R4", 370.0, 100.0, None
+    )
 
     assert move_symbol_result["success"] is False
     assert "intersecting wire segments" in move_symbol_result["error"]
     assert move_label_result["success"] is False
     assert "wire endpoint, not mid-segment" in move_label_result["error"]
+    assert move_symbol_junction_result["success"] is False
+    assert "connection point has a junction" in move_symbol_junction_result["error"]
+    assert move_symbol_missing_uuid_result["success"] is False
+    assert "attached wire has no UUID" in move_symbol_missing_uuid_result["error"]
+    assert preview_missing_uuid_result["success"] is False
+    assert "attached wire has no UUID" in preview_missing_uuid_result["error"]
 
 
 @pytest.mark.asyncio

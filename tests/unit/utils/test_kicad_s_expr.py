@@ -112,6 +112,25 @@ def test_move_symbol_with_connections_refuses_ambiguous_intersection():
         schematic.move_symbol_with_connections("R2", 210.0, 100.0)
 
 
+def test_move_symbol_with_connections_refuses_junction_endpoint():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+
+    assert schematic.list_junctions() == [{"position": {"x": 300.0, "y": 100.0}, "uuid": None}]
+    assert schematic.find_junctions_touching_point(300.0, 100.0) == [
+        {"position": {"x": 300.0, "y": 100.0}, "uuid": None}
+    ]
+
+    with pytest.raises(ValueError, match="connection point has a junction"):
+        schematic.move_symbol_with_connections("R3", 310.0, 100.0)
+
+
+def test_move_symbol_with_connections_refuses_missing_wire_uuid():
+    schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
+
+    with pytest.raises(ValueError, match="attached wire has no UUID"):
+        schematic.move_symbol_with_connections("R4", 370.0, 100.0)
+
+
 def test_move_label_with_wire_moves_only_attached_endpoint():
     schematic = KiCadSchematic.from_file(str(CONNECTED_FIXTURE_PATH))
 
