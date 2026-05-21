@@ -14,7 +14,7 @@ from kicad_mcp import config
 
 def find_kicad_projects() -> List[Dict[str, Any]]:
     """Find KiCad projects in the user's directory.
-    
+
     Returns:
         List of dictionaries with project information
     """
@@ -33,14 +33,14 @@ def find_kicad_projects() -> List[Dict[str, Any]]:
             expanded_search_dirs.append(expanded_dir)
         else:
             logging.info(f"Skipping duplicate expanded path: {expanded_dir}")
-            
+
     logging.info(f"Expanded search directories: {expanded_search_dirs}")
 
     for search_dir in expanded_search_dirs:
         if not os.path.exists(search_dir):
             logging.warning(f"Expanded search directory does not exist: {search_dir}") # Use warning level
             continue
-        
+
         logging.info(f"Scanning expanded directory: {search_dir}")
         # Use followlinks=True to follow symlinks if needed
         for root, _, files in os.walk(search_dir, followlinks=True):
@@ -51,7 +51,7 @@ def find_kicad_projects() -> List[Dict[str, Any]]:
                     if not os.path.isfile(project_path):
                         logging.info(f"Skipping non-file/broken symlink: {project_path}")
                         continue
-                    
+
                     try:
                         # Attempt to get modification time to ensure file is accessible
                         mod_time = os.path.getmtime(project_path)
@@ -68,16 +68,16 @@ def find_kicad_projects() -> List[Dict[str, Any]]:
                     except OSError as e:
                         logging.error(f"Error accessing project file {project_path}: {e}") # Use error level
                         continue # Skip if we can't access it
-    
+
     logging.info(f"Found {len(projects)} KiCad projects after scanning.")
     return projects
 
 def get_project_name_from_path(project_path: str) -> str:
     """Extract the project name from a .kicad_pro file path.
-    
+
     Args:
         project_path: Path to the .kicad_pro file
-        
+
     Returns:
         Project name without extension
     """
@@ -87,16 +87,16 @@ def get_project_name_from_path(project_path: str) -> str:
 
 def open_kicad_project(project_path: str) -> Dict[str, Any]:
     """Open a KiCad project using the KiCad application.
-    
+
     Args:
         project_path: Path to the .kicad_pro file
-        
+
     Returns:
         Dictionary with result information
     """
     if not os.path.exists(project_path):
         return {"success": False, "error": f"Project not found: {project_path}"}
-    
+
     try:
         cmd = []
         if sys.platform == "darwin":  # macOS
@@ -110,13 +110,13 @@ def open_kicad_project(project_path: str) -> Dict[str, Any]:
             return {"success": False, "error": f"Unsupported operating system: {sys.platform}"}
 
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
+
         return {
             "success": result.returncode == 0,
             "command": " ".join(cmd),
             "output": result.stdout,
             "error": result.stderr if result.returncode != 0 else None
         }
-    
+
     except Exception as e:
         return {"success": False, "error": str(e)}

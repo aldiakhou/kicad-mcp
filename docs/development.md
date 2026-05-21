@@ -6,12 +6,11 @@ This guide provides detailed information for developers who want to modify or ex
 
 1. **Set up your Python environment**:
    ```bash
-   # Create and activate a virtual environment
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   
    # Install development dependencies
-   pip install -r requirements.txt
+   uv sync --group dev
+
+   # Optional: activate the environment for manual commands
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    ```
 
 2. **Run the server**:
@@ -128,13 +127,13 @@ def register_my_tools(mcp: FastMCP) -> None:
         """
         # Report progress to the user
         await ctx.report_progress(10, 100)
-        ctx.info(f"Starting operation on {parameter}")
+        await ctx.info(f"Starting operation on {parameter}")
         
         # Implementation goes here
         
         # Complete progress
         await ctx.report_progress(100, 100)
-        ctx.info("Operation complete")
+        await ctx.info("Operation complete")
         
         return {
             "success": True,

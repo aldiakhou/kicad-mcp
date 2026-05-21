@@ -6,11 +6,13 @@ This guide explains how to use the schematic netlist extraction features in the 
 
 The netlist extraction functionality allows you to:
 
-1. Extract comprehensive netlist information from KiCad schematics
+1. Extract partial netlist information from KiCad schematics
 2. Analyze component connections and relationships
 3. Identify power and signal nets
 4. Find specific component connections
 5. Visualize the connectivity of your design
+
+> Warning: the current parser does **not** perform full connectivity tracing. Nets are inferred primarily from global labels and power symbols, so hierarchical and wire-level connectivity may be incomplete.
 
 ## Quick Reference
 
@@ -34,9 +36,9 @@ Extract the netlist from my schematic at /path/to/project.kicad_sch
 This will:
 - Parse the schematic file
 - Extract all components and their properties
-- Identify connections between components
+- Infer a subset of connections between components
 - Analyze power and signal nets
-- Return comprehensive netlist information
+- Return partial netlist information with limitations
 
 ### Project-Based Netlist Extraction
 
@@ -46,7 +48,7 @@ To extract a netlist from a KiCad project:
 Extract the netlist for my KiCad project at /path/to/project.kicad_pro
 ```
 
-This will find the schematic associated with your project and extract its netlist.
+This will find the schematic associated with your project and extract its partial netlist.
 
 ### Analyzing Component Connections
 
@@ -58,9 +60,9 @@ Show me the connections for U1 in my schematic at /path/to/project.kicad_sch
 
 This will provide:
 - Detailed component information
-- All pins and their connections
-- Components connected to each pin
-- Net names for each connection
+- Known pins and inferred connections
+- Components connected to each identified pin
+- Net names for each inferred connection
 
 ### Viewing Netlist Reports
 

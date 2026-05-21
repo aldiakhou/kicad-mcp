@@ -42,19 +42,22 @@ system = platform.system()
 # Platform-specific KiCad installation and user directory paths
 # These paths are used for finding KiCad resources and user projects
 if system == "Darwin":  # macOS
-    KICAD_USER_DIR = os.path.expanduser("~/Documents/KiCad")
-    KICAD_APP_PATH = "/Applications/KiCad/KiCad.app"
+    default_user_dir = "~/Documents/KiCad"
+    default_app_path = "/Applications/KiCad/KiCad.app"
 elif system == "Windows":
-    KICAD_USER_DIR = os.path.expanduser("~/Documents/KiCad")
-    KICAD_APP_PATH = r"C:\Program Files\KiCad"
+    default_user_dir = "~/Documents/KiCad"
+    default_app_path = r"C:\Program Files\KiCad"
 elif system == "Linux":
-    KICAD_USER_DIR = os.path.expanduser("~/KiCad")
-    KICAD_APP_PATH = "/usr/share/kicad"
+    default_user_dir = "~/KiCad"
+    default_app_path = "/usr/share/kicad"
 else:
     # Default to macOS paths if system is unknown for maximum compatibility
     # This ensures the server can start even on unrecognized platforms
-    KICAD_USER_DIR = os.path.expanduser("~/Documents/KiCad")
-    KICAD_APP_PATH = "/Applications/KiCad/KiCad.app"
+    default_user_dir = "~/Documents/KiCad"
+    default_app_path = "/Applications/KiCad/KiCad.app"
+
+KICAD_USER_DIR = os.path.expanduser(os.getenv("KICAD_USER_DIR", default_user_dir))
+KICAD_APP_PATH = os.path.expanduser(os.getenv("KICAD_APP_PATH", default_app_path))
 
 # Additional search paths from environment variable KICAD_SEARCH_PATHS
 # Users can specify custom project locations as comma-separated paths

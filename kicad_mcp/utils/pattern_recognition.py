@@ -8,28 +8,28 @@ from kicad_mcp.utils.component_utils import extract_voltage_from_regulator, extr
 
 def identify_power_supplies(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Identify power supply circuits in the schematic.
-    
+
     Args:
         components: Dictionary of components from netlist
         nets: Dictionary of nets from netlist
-        
+
     Returns:
         List of identified power supply circuits
     """
     power_supplies = []
-    
+
     # Look for voltage regulators (Linear)
     regulator_patterns = {
         "78xx": r"78\d\d|LM78\d\d|MC78\d\d",  # 7805, 7812, etc.
         "79xx": r"79\d\d|LM79\d\d|MC79\d\d",  # 7905, 7912, etc.
         "LDO": r"LM\d{3}|LD\d{3}|AMS\d{4}|LT\d{4}|TLV\d{3}|AP\d{4}|MIC\d{4}|NCP\d{3}|LP\d{4}|L\d{2}|TPS\d{5}"
     }
-    
+
     for ref, component in components.items():
         # Check for voltage regulators by part value or lib_id
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         for reg_type, pattern in regulator_patterns.items():
             if re.search(pattern, component_value, re.IGNORECASE) or re.search(pattern, component_lib, re.IGNORECASE):
                 # Found a regulator, look for associated components
@@ -42,18 +42,18 @@ def identify_power_supplies(components: Dict[str, Any], nets: Dict[str, Any]) ->
                     "output_voltage": extract_voltage_from_regulator(component_value),
                     "associated_components": []  # Would need connection analysis to find these
                 })
-    
+
     # Look for switching regulators
     switching_patterns = {
         "buck": r"LM\d{4}|TPS\d{4}|MP\d{4}|RT\d{4}|LT\d{4}|MC\d{4}|NCP\d{4}|TL\d{4}|LTC\d{4}",
         "boost": r"MC\d{4}|LT\d{4}|TPS\d{4}|MAX\d{4}|NCP\d{4}|LTC\d{4}",
         "buck_boost": r"LTC\d{4}|LM\d{4}|TPS\d{4}|MAX\d{4}"
     }
-    
+
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         # Check for inductor (key component in switching supplies)
         if ref.startswith('L') or 'Inductor' in component_lib:
             # Look for nearby ICs that might be switching controllers
@@ -61,7 +61,7 @@ def identify_power_supplies(components: Dict[str, Any], nets: Dict[str, Any]) ->
                 if ic_ref.startswith('U') or ic_ref.startswith('IC'):
                     ic_value = ic_component.get('value', '').upper()
                     ic_lib = ic_component.get('lib_id', '').upper()
-                    
+
                     for converter_type, pattern in switching_patterns.items():
                         if re.search(pattern, ic_value, re.IGNORECASE) or re.search(pattern, ic_lib, re.IGNORECASE):
                             power_supplies.append({
@@ -71,32 +71,32 @@ def identify_power_supplies(components: Dict[str, Any], nets: Dict[str, Any]) ->
                                 "inductor": ref,
                                 "value": ic_value
                             })
-    
+
     return power_supplies
 
 
 def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Identify amplifier circuits in the schematic.
-    
+
     Args:
         components: Dictionary of components from netlist
         nets: Dictionary of nets from netlist
-        
+
     Returns:
         List of identified amplifier circuits
     """
     amplifiers = []
-    
+
     # Look for op-amps
     opamp_patterns = [
         r"LM\d{3}|TL\d{3}|NE\d{3}|LF\d{3}|OP\d{2}|MCP\d{3}|AD\d{3}|LT\d{4}|OPA\d{3}",
         r"Opamp|Op-Amp|OpAmp|Operational Amplifier"
     ]
-    
+
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         # Check for op-amps
         for pattern in opamp_patterns:
             if re.search(pattern, component_value, re.IGNORECASE) or re.search(pattern, component_lib, re.IGNORECASE):
@@ -131,14 +131,14 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
                         "component": ref,
                         "value": component_value
                     })
-    
+
     # Look for transistor amplifiers
     transistor_refs = [ref for ref in components.keys() if ref.startswith('Q')]
-    
+
     for ref in transistor_refs:
         component = components[ref]
         component_lib = component.get('lib_id', '').upper()
-        
+
         # Check if it's a BJT or FET
         if 'BJT' in component_lib or 'NPN' in component_lib or 'PNP' in component_lib:
             # Look for resistors connected to transistor (biasing network)
@@ -150,7 +150,7 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
                     if any(pin.get('component', '').startswith('R') for pin in pins):
                         has_biasing = True
                         break
-            
+
             if has_biasing:
                 amplifiers.append({
                     "type": "transistor_amplifier",
@@ -158,7 +158,7 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
                     "component": ref,
                     "value": component.get('value', '')
                 })
-        
+
         elif 'FET' in component_lib or 'MOSFET' in component_lib or 'JFET' in component_lib:
             # Similar check for FET amplifiers
             has_biasing = False
@@ -167,7 +167,7 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
                     if any(pin.get('component', '').startswith('R') for pin in pins):
                         has_biasing = True
                         break
-            
+
             if has_biasing:
                 amplifiers.append({
                     "type": "transistor_amplifier",
@@ -175,16 +175,16 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
                     "component": ref,
                     "value": component.get('value', '')
                 })
-    
+
     # Look for audio amplifier ICs
     audio_amp_patterns = [
         r"LM386|LM383|LM380|LM1875|LM3886|TDA\d{4}|TPA\d{4}|SSM\d{4}|PAM\d{4}|TAS\d{4}"
     ]
-    
+
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         for pattern in audio_amp_patterns:
             if re.search(pattern, component_value, re.IGNORECASE) or re.search(pattern, component_lib, re.IGNORECASE):
                 amplifiers.append({
@@ -192,34 +192,34 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
                     "component": ref,
                     "value": component_value
                 })
-    
+
     return amplifiers
 
 
 def identify_filters(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Identify filter circuits in the schematic.
-    
+
     Args:
         components: Dictionary of components from netlist
         nets: Dictionary of nets from netlist
-        
+
     Returns:
         List of identified filter circuits
     """
     filters = []
-    
+
     # Look for RC low-pass filters
     # These typically have a resistor followed by a capacitor to ground
     resistor_refs = [ref for ref in components.keys() if ref.startswith('R')]
     capacitor_refs = [ref for ref in components.keys() if ref.startswith('C')]
-    
+
     for r_ref in resistor_refs:
         r_nets = []
         # Find which nets this resistor is connected to
         for net_name, pins in nets.items():
             if any(pin.get('component') == r_ref for pin in pins):
                 r_nets.append(net_name)
-        
+
         # For each net, check if there's a capacitor connected to it
         for net_name in r_nets:
             # Find capacitors connected to this net
@@ -228,7 +228,7 @@ def identify_filters(components: Dict[str, Any], nets: Dict[str, Any]) -> List[D
                 comp = pin.get('component')
                 if comp and comp.startswith('C'):
                     connected_caps.append(comp)
-            
+
             if connected_caps:
                 # Check if the other side of the capacitor goes to ground
                 for c_ref in connected_caps:
@@ -240,100 +240,100 @@ def identify_filters(components: Dict[str, Any], nets: Dict[str, Any]) -> List[D
                                 break
                         if c_is_to_ground:
                             break
-                    
+
                     if c_is_to_ground:
                         filters.append({
                             "type": "passive_filter",
                             "subtype": "rc_low_pass",
                             "components": [r_ref, c_ref]
                         })
-    
+
     # Look for active filters (op-amp with feedback RC components)
     opamp_refs = []
-    
+
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
-        if re.search(r"LM\d{3}|TL\d{3}|NE\d{3}|LF\d{3}|OP\d{2}|MCP\d{3}|AD\d{3}|LT\d{4}|OPA\d{3}", 
+
+        if re.search(r"LM\d{3}|TL\d{3}|NE\d{3}|LF\d{3}|OP\d{2}|MCP\d{3}|AD\d{3}|LT\d{4}|OPA\d{3}",
                      component_value, re.IGNORECASE) or "OP_AMP" in component_lib:
             opamp_refs.append(ref)
-    
+
     for op_ref in opamp_refs:
         # Find op-amp output
         # In a full implementation, we'd know which pin is the output
         # For simplicity, we'll look for feedback components
         has_feedback_r = False
         has_feedback_c = False
-        
+
         for net_name, pins in nets.items():
             # If this net connects to our op-amp
             if any(pin.get('component') == op_ref for pin in pins):
                 # Check if it also connects to resistors and capacitors
                 connects_to_r = any(pin.get('component', '').startswith('R') for pin in pins)
                 connects_to_c = any(pin.get('component', '').startswith('C') for pin in pins)
-                
+
                 if connects_to_r:
                     has_feedback_r = True
                 if connects_to_c:
                     has_feedback_c = True
-        
+
         if has_feedback_r and has_feedback_c:
             filters.append({
                 "type": "active_filter",
                 "main_component": op_ref,
                 "value": components[op_ref].get('value', '')
             })
-    
+
     # Look for crystal filters or ceramic filters
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         if ref.startswith('Y') or ref.startswith('X') or "CRYSTAL" in component_lib or "XTAL" in component_lib:
             filters.append({
                 "type": "crystal_filter",
                 "component": ref,
                 "value": component_value
             })
-        
+
         if "FILTER" in component_lib or "MURATA" in component_lib or "CERAMIC_FILTER" in component_lib:
             filters.append({
                 "type": "ceramic_filter",
                 "component": ref,
                 "value": component_value
             })
-    
+
     return filters
 
 
 def identify_oscillators(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Identify oscillator circuits in the schematic.
-    
+
     Args:
         components: Dictionary of components from netlist
         nets: Dictionary of nets from netlist
-        
+
     Returns:
         List of identified oscillator circuits
     """
     oscillators = []
-    
+
     # Look for crystal oscillators
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         # Crystals
         if ref.startswith('Y') or ref.startswith('X') or "CRYSTAL" in component_lib or "XTAL" in component_lib:
             # Check if the crystal has load capacitors
             has_load_caps = False
             crystal_nets = []
-            
+
             for net_name, pins in nets.items():
                 if any(pin.get('component') == ref for pin in pins):
                     crystal_nets.append(net_name)
-            
+
             # Look for capacitors connected to the crystal nets
             for net_name in crystal_nets:
                 for pin in nets.get(net_name, []):
@@ -343,7 +343,7 @@ def identify_oscillators(components: Dict[str, Any], nets: Dict[str, Any]) -> Li
                         break
                 if has_load_caps:
                     break
-            
+
             oscillators.append({
                 "type": "crystal_oscillator",
                 "component": ref,
@@ -351,7 +351,7 @@ def identify_oscillators(components: Dict[str, Any], nets: Dict[str, Any]) -> Li
                 "frequency": extract_frequency_from_value(component_value),
                 "has_load_capacitors": has_load_caps
             })
-        
+
         # Oscillator ICs
         if "OSC" in component_lib or "OSCILLATOR" in component_lib or re.search(r"OSC|OSCILLATOR", component_value, re.IGNORECASE):
             oscillators.append({
@@ -360,7 +360,7 @@ def identify_oscillators(components: Dict[str, Any], nets: Dict[str, Any]) -> Li
                 "value": component_value,
                 "frequency": extract_frequency_from_value(component_value)
             })
-        
+
         # RC oscillators (555 timer, etc)
         if re.search(r"NE555|LM555|ICM7555|TLC555", component_value, re.IGNORECASE) or "555" in component_lib:
             oscillators.append({
@@ -369,126 +369,126 @@ def identify_oscillators(components: Dict[str, Any], nets: Dict[str, Any]) -> Li
                 "component": ref,
                 "value": component_value
             })
-    
+
     return oscillators
 
 
 def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Identify digital interface circuits in the schematic.
-    
+
     Args:
         components: Dictionary of components from netlist
         nets: Dictionary of nets from netlist
-        
+
     Returns:
         List of identified digital interface circuits
     """
     interfaces = []
-    
+
     # I2C interface detection
     i2c_signals = {"SCL", "SDA", "I2C_SCL", "I2C_SDA"}
     has_i2c = False
-    
+
     for net_name in nets.keys():
         if any(signal in net_name.upper() for signal in i2c_signals):
             has_i2c = True
             break
-    
+
     if has_i2c:
         interfaces.append({
             "type": "i2c_interface",
             "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in i2c_signals)]
         })
-    
+
     # SPI interface detection
     spi_signals = {"MOSI", "MISO", "SCK", "SS", "SPI_MOSI", "SPI_MISO", "SPI_SCK", "SPI_CS"}
     has_spi = False
-    
+
     for net_name in nets.keys():
         if any(signal in net_name.upper() for signal in spi_signals):
             has_spi = True
             break
-    
+
     if has_spi:
         interfaces.append({
             "type": "spi_interface",
             "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in spi_signals)]
         })
-    
+
     # UART interface detection
     uart_signals = {"TX", "RX", "TXD", "RXD", "UART_TX", "UART_RX"}
     has_uart = False
-    
+
     for net_name in nets.keys():
         if any(signal in net_name.upper() for signal in uart_signals):
             has_uart = True
             break
-    
+
     if has_uart:
         interfaces.append({
             "type": "uart_interface",
             "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in uart_signals)]
         })
-    
+
     # USB interface detection
     usb_signals = {"USB_D+", "USB_D-", "USB_DP", "USB_DM", "D+", "D-", "DP", "DM", "VBUS"}
     has_usb = False
-    
+
     for net_name in nets.keys():
         if any(signal in net_name.upper() for signal in usb_signals):
             has_usb = True
             break
-    
+
     # Also check for USB interface ICs
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         if re.search(r"FT232|CH340|CP210|MCP2200|TUSB|FT231|FT201", component_value, re.IGNORECASE):
             has_usb = True
             break
-    
+
     if has_usb:
         interfaces.append({
             "type": "usb_interface",
             "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in usb_signals)]
         })
-    
+
     # Ethernet interface detection
     ethernet_signals = {"TX+", "TX-", "RX+", "RX-", "MDI", "MDIO", "ETH"}
     has_ethernet = False
-    
+
     for net_name in nets.keys():
         if any(signal in net_name.upper() for signal in ethernet_signals):
             has_ethernet = True
             break
-    
+
     # Also check for Ethernet PHY ICs
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         if re.search(r"W5500|ENC28J60|LAN87|KSZ80|DP83|RTL8|AX88", component_value, re.IGNORECASE):
             has_ethernet = True
             break
-    
+
     if has_ethernet:
         interfaces.append({
             "type": "ethernet_interface",
             "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in ethernet_signals)]
         })
-    
+
     return interfaces
 
 
 def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Identify sensor interface circuits in the schematic.
-    
+
     Args:
         components: Dictionary of components from netlist
         nets: Dictionary of nets from netlist
-        
+
     Returns:
         List of identified sensor interface circuits
     """
     sensor_interfaces = []
-    
+
     # Common sensor IC patterns
     sensor_patterns = {
         "temperature": r"LM35|DS18B20|DHT11|DHT22|BME280|BMP280|TMP\d+|MCP9808|MAX31855|MAX6675|SI7021|HTU21|SHT[0123]\d|PCT2075",
@@ -505,15 +505,15 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
         "ADC": r"ADS\d+|MCP33\d+|MCP32\d+|LTC\d+|NAU7802|HX711",
         "GPS": r"NEO-[67]M|L80|MTK\d+|SIM\d+|SAM-M8Q|MAX-M8"
     }
-    
+
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         for sensor_type, pattern in sensor_patterns.items():
             if re.search(pattern, component_value, re.IGNORECASE) or re.search(pattern, component_lib, re.IGNORECASE):
                 # Identify specific sensors
-                
+
                 # Temperature sensors
                 if sensor_type == "temperature":
                     if re.search(r"DS18B20", component_value, re.IGNORECASE):
@@ -546,7 +546,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
                             "model": component_value,
                             "component": ref
                         })
-                
+
                 # Motion sensors (accelerometer, gyroscope, etc.)
                 elif sensor_type in ["accelerometer", "gyroscope"]:
                     if re.search(r"MPU6050", component_value, re.IGNORECASE):
@@ -580,7 +580,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
                             "component": ref,
                             "measures": [sensor_type]
                         })
-                
+
                 # Light and proximity sensors
                 elif sensor_type in ["light", "proximity"]:
                     if re.search(r"APDS9960", component_value, re.IGNORECASE):
@@ -615,7 +615,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
                             "component": ref,
                             "measures": [sensor_type]
                         })
-                
+
                 # ADCs (often used for sensor interfaces)
                 elif sensor_type == "ADC":
                     if re.search(r"ADS1115", component_value, re.IGNORECASE):
@@ -642,7 +642,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
                             "model": component_value,
                             "component": ref
                         })
-                
+
                 # Other types of sensors
                 else:
                     sensor_interfaces.append({
@@ -650,10 +650,10 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
                         "model": component_value,
                         "component": ref
                     })
-                
+
                 # Once identified a component as a specific sensor, no need to check other types
                 break
-    
+
     # Look for common analog sensors
     # These often don't have specific ICs but have designators like "RT" for thermistors
     thermistor_refs = [ref for ref in components.keys() if ref.startswith('RT') or ref.startswith('TH')]
@@ -666,7 +666,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
             "value": component.get('value', ''),
             "interface": "Analog"
         })
-    
+
     # Look for photodiodes, photoresistors (LDRs)
     photosensor_refs = [ref for ref in components.keys() if ref.startswith('PD') or ref.startswith('LDR')]
     for ref in photosensor_refs:
@@ -678,7 +678,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
             "value": component.get('value', ''),
             "interface": "Analog"
         })
-    
+
     # Look for potentiometers (often used for manual sensing/control)
     pot_refs = [ref for ref in components.keys() if ref.startswith('RV') or ref.startswith('POT')]
     for ref in pot_refs:
@@ -690,21 +690,21 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
             "value": component.get('value', ''),
             "interface": "Analog"
         })
-    
+
     return sensor_interfaces
 
 
 def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Identify microcontroller circuits in the schematic.
-    
+
     Args:
         components: Dictionary of components from netlist
-        
+
     Returns:
         List of identified microcontroller circuits
     """
     microcontrollers = []
-    
+
     # Common microcontroller families
     mcu_patterns = {
         "AVR": r"ATMEGA\d+|ATTINY\d+|AT90\w+",
@@ -719,16 +719,16 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
         "ARM Cortex": r"CORTEX|ARM",
         "8051": r"8051|AT89"
     }
-    
+
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         for family, pattern in mcu_patterns.items():
             if re.search(pattern, component_value, re.IGNORECASE) or re.search(pattern, component_lib, re.IGNORECASE):
                 # Identify specific models
                 identified = False
-                
+
                 # ATmega328P (Arduino Uno/Nano)
                 if re.search(r"ATMEGA328P|ATMEGA328", component_value, re.IGNORECASE):
                     microcontrollers.append({
@@ -739,7 +739,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                         "common_usage": "Arduino Uno/Nano compatible"
                     })
                     identified = True
-                
+
                 # ATmega32U4 (Arduino Leonardo/Micro)
                 elif re.search(r"ATMEGA32U4", component_value, re.IGNORECASE):
                     microcontrollers.append({
@@ -750,7 +750,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                         "common_usage": "Arduino Leonardo/Micro compatible"
                     })
                     identified = True
-                
+
                 # ESP32
                 elif re.search(r"ESP32", component_value, re.IGNORECASE):
                     microcontrollers.append({
@@ -761,7 +761,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                         "features": "Wi-Fi & Bluetooth"
                     })
                     identified = True
-                
+
                 # ESP8266
                 elif re.search(r"ESP8266", component_value, re.IGNORECASE):
                     microcontrollers.append({
@@ -772,7 +772,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                         "features": "Wi-Fi"
                     })
                     identified = True
-                
+
                 # STM32 series
                 elif re.search(r"STM32F\d+", component_value, re.IGNORECASE):
                     model = re.search(r"(STM32F\d+)", component_value, re.IGNORECASE).group(1)
@@ -784,7 +784,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                         "features": "ARM Cortex-M"
                     })
                     identified = True
-                
+
                 # Raspberry Pi Pico (RP2040)
                 elif re.search(r"RP2040|PICO", component_value, re.IGNORECASE):
                     microcontrollers.append({
@@ -795,7 +795,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                         "common_usage": "Raspberry Pi Pico"
                     })
                     identified = True
-                
+
                 # PIC microcontrollers
                 elif re.search(r"PIC\d+", component_value, re.IGNORECASE):
                     model = re.search(r"(PIC\d+\w+)", component_value, re.IGNORECASE)
@@ -807,7 +807,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                             "component": ref
                         })
                         identified = True
-                
+
                 # MSP430 series
                 elif re.search(r"MSP430\w+", component_value, re.IGNORECASE):
                     model = re.search(r"(MSP430\w+)", component_value, re.IGNORECASE)
@@ -820,7 +820,7 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                             "features": "Ultra-low power"
                         })
                         identified = True
-                
+
                 # If not identified specifically but matches a family
                 if not identified:
                     microcontrollers.append({
@@ -829,10 +829,10 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                         "component": ref,
                         "value": component_value
                     })
-                
+
                 # Once identified a component as a microcontroller, no need to check other families
                 break
-    
+
     # Look for microcontroller development boards
     dev_board_patterns = {
         "Arduino": r"ARDUINO|UNO|NANO|MEGA|LEONARDO|DUE",
@@ -841,11 +841,11 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
         "STM32 Dev Board": r"NUCLEO|DISCOVERY|BLUEPILL",
         "Raspberry Pi": r"RASPBERRY|RPI|RPICO|PICO"
     }
-    
+
     for ref, component in components.items():
         component_value = component.get('value', '').upper()
         component_lib = component.get('lib_id', '').upper()
-        
+
         for board_type, pattern in dev_board_patterns.items():
             if re.search(pattern, component_value, re.IGNORECASE) or re.search(pattern, component_lib, re.IGNORECASE):
                 microcontrollers.append({
@@ -855,5 +855,5 @@ def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]
                     "value": component_value
                 })
                 break
-    
+
     return microcontrollers

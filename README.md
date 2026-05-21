@@ -33,7 +33,7 @@ First, let's install dependencies and set up our environment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/lamaalrajih/kicad-mcp.git
+git clone https://github.com/aldiakhou/kicad-mcp.git
 cd kicad-mcp
 
 # Install dependencies – `uv` will create a `.venv/` folder automatically
@@ -221,7 +221,7 @@ The KiCad MCP Server is organized into a modular structure:
 kicad-mcp/
 ├── README.md                       # Project documentation
 ├── main.py                         # Entry point that runs the server
-├── requirements.txt                # Python dependencies
+├── pyproject.toml                  # Project metadata and dependencies
 ├── .env.example                    # Example environment configuration
 ├── kicad_mcp/                      # Main package directory
 │   ├── __init__.py
