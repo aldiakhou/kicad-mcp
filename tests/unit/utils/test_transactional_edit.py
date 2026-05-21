@@ -11,7 +11,7 @@ from kicad_mcp.utils.transactional_edit import (
     validate_schematic_file_safely,
 )
 
-FIXTURE_PATH = Path("/home/runner/work/kicad-mcp/kicad-mcp/tests/fixtures/sample_schematic.kicad_sch")
+FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "sample_schematic.kicad_sch"
 
 
 def _copy_fixture(tmp_path: Path) -> Path:

@@ -2,9 +2,7 @@ from pathlib import Path
 
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, parse_s_expression, validate_schematic_text
 
-FIXTURE_PATH = (
-    Path("/home/runner/work/kicad-mcp/kicad-mcp/tests/fixtures/sample_schematic.kicad_sch")
-)
+FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "sample_schematic.kicad_sch"
 
 
 def test_parse_round_trip_preserves_schematic_structure():

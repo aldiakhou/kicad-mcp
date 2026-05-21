@@ -421,12 +421,14 @@ class KiCadSchematic:
                 continue
 
             position = self._parse_at(label_node)
+            moved = False
             for candidate_x, candidate_y in self._candidate_positions(position["x"], position["y"]):
                 self._set_at(label_node, candidate_x, candidate_y, position["angle"])
                 if not self._label_has_overlap(label_uuid):
                     moved_labels.append(self._label_to_dict(label_node))
+                    moved = True
                     break
-            else:
+            if not moved:
                 self._set_at(label_node, position["x"], position["y"], position["angle"])
 
         return moved_labels
@@ -663,7 +665,8 @@ def _needs_quotes(value: str) -> bool:
 def _format_number(value: float) -> str:
     if math.isclose(value, round(value), abs_tol=1e-9):
         return str(int(round(value)))
-    return f"{value:.6f}".rstrip("0").rstrip(".")
+    formatted = f"{value:.6f}".rstrip("0").rstrip(".")
+    return formatted or "0"
 
 
 def tokenize_s_expression(content: str) -> list[SExprAtom | str]:
