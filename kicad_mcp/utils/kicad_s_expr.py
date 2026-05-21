@@ -308,6 +308,46 @@ class KiCadSchematic:
         self._set_at(symbol, x, y, angle)
         return self._symbol_to_dict(symbol)
 
+    def symbol_connectivity_risk(self, reference: str) -> dict[str, Any]:
+        """Return whether moving a symbol may affect connectivity."""
+        symbol = self.get_symbol(reference)
+        if symbol is None:
+            raise KeyError(f"Symbol not found: {reference}")
+
+        symbol_box = _expand_bbox(self._symbol_bbox(symbol), 2.5)
+        attachments: list[dict[str, Any]] = []
+
+        for wire in self.list_wires():
+            for segment in _wire_segments(wire):
+                if _segment_intersects_bbox(segment["start"], segment["end"], symbol_box):
+                    attachments.append(
+                        {
+                            "type": "wire",
+                            "uuid": wire.get("uuid"),
+                            "segment": segment,
+                        }
+                    )
+
+        for label in self.list_labels():
+            if label.get("uuid") == symbol.get("uuid"):
+                continue
+            label_position = label["position"]
+            if _point_in_bbox((label_position["x"], label_position["y"]), symbol_box):
+                attachments.append(
+                    {
+                        "type": "label",
+                        "uuid": label.get("uuid"),
+                        "label_type": label.get("type"),
+                        "text": label.get("text"),
+                    }
+                )
+
+        return {
+            "attached": bool(attachments),
+            "reference": reference,
+            "attachments": attachments,
+        }
+
     def move_label(
         self, label_uuid: str, x: float, y: float, angle: float | None = None
     ) -> dict[str, Any]:
@@ -317,6 +357,47 @@ class KiCadSchematic:
             raise KeyError(f"Label not found: {label_uuid}")
         self._set_at(label, x, y, angle)
         return self._label_to_dict(label)
+
+    def label_connectivity_risk(self, label_uuid: str) -> dict[str, Any]:
+        """Return whether moving a label may affect connectivity."""
+        label = self._find_label_node(label_uuid)
+        if label is None:
+            raise KeyError(f"Label not found: {label_uuid}")
+
+        label_data = self._label_to_dict(label)
+        position = label_data["position"]
+        point = (position["x"], position["y"])
+        attachments: list[dict[str, Any]] = []
+
+        for wire in self.list_wires():
+            for segment in _wire_segments(wire):
+                if _point_on_segment(point, segment["start"], segment["end"], tolerance=0.25):
+                    attachments.append(
+                        {
+                            "type": "wire",
+                            "uuid": wire.get("uuid"),
+                            "segment": segment,
+                        }
+                    )
+
+        for symbol in self.list_symbols():
+            symbol_box = _expand_bbox(self._symbol_bbox(symbol), 2.5)
+            if _point_in_bbox(point, symbol_box):
+                attachments.append(
+                    {
+                        "type": "symbol",
+                        "reference": symbol["reference"],
+                        "uuid": symbol.get("uuid"),
+                    }
+                )
+
+        return {
+            "attached": bool(attachments),
+            "label_uuid": label_uuid,
+            "label_type": label_data.get("type"),
+            "text": label_data.get("text"),
+            "attachments": attachments,
+        }
 
     def move_symbol_property(
         self,
@@ -435,6 +516,18 @@ class KiCadSchematic:
                 self._set_at(label_node, position["x"], position["y"], position["angle"])
 
         return moved_labels
+
+    def auto_arrange_label_risks(self) -> list[dict[str, Any]]:
+        """Return overlapping labels that would be moved by auto-arrange."""
+        risks: list[dict[str, Any]] = []
+        for label_data in self.list_labels():
+            label_uuid = label_data.get("uuid")
+            if label_uuid is None or not self._label_has_overlap(label_uuid):
+                continue
+            risk = self.label_connectivity_risk(label_uuid)
+            risk["would_move"] = True
+            risks.append(risk)
+        return risks
 
     def _candidate_positions(self, x: float, y: float) -> list[tuple[float, float]]:
         offsets = []
@@ -658,6 +751,81 @@ def _expand_bbox(bbox: BoundingBox, amount: float) -> BoundingBox:
         top=bbox.top - amount,
         right=bbox.right + amount,
         bottom=bbox.bottom + amount,
+    )
+
+
+def _wire_segments(wire: dict[str, Any]) -> list[dict[str, tuple[float, float]]]:
+    points = wire.get("points", [])
+    return [
+        {
+            "start": (points[index]["x"], points[index]["y"]),
+            "end": (points[index + 1]["x"], points[index + 1]["y"]),
+        }
+        for index in range(len(points) - 1)
+    ]
+
+
+def _point_in_bbox(point: tuple[float, float], bbox: BoundingBox) -> bool:
+    x, y = point
+    return bbox.left <= x <= bbox.right and bbox.top <= y <= bbox.bottom
+
+
+def _point_on_segment(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+    *,
+    tolerance: float,
+) -> bool:
+    px, py = point
+    x1, y1 = start
+    x2, y2 = end
+
+    dx = x2 - x1
+    dy = y2 - y1
+    if math.isclose(dx, 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE) and math.isclose(
+        dy, 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE
+    ):
+        return math.dist(point, start) <= tolerance
+
+    segment_length_squared = dx * dx + dy * dy
+    projection = ((px - x1) * dx + (py - y1) * dy) / segment_length_squared
+    clamped_projection = max(0.0, min(1.0, projection))
+    closest_point = (x1 + clamped_projection * dx, y1 + clamped_projection * dy)
+    return math.dist(point, closest_point) <= tolerance
+
+
+def _segment_intersects_bbox(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    bbox: BoundingBox,
+) -> bool:
+    if _point_in_bbox(start, bbox) or _point_in_bbox(end, bbox):
+        return True
+
+    min_x = min(start[0], end[0])
+    max_x = max(start[0], end[0])
+    min_y = min(start[1], end[1])
+    max_y = max(start[1], end[1])
+    if max_x < bbox.left or min_x > bbox.right or max_y < bbox.top or min_y > bbox.bottom:
+        return False
+
+    return any(
+        _point_on_segment(corner, start, end, tolerance=0.01)
+        for corner in (
+            (bbox.left, bbox.top),
+            (bbox.left, bbox.bottom),
+            (bbox.right, bbox.top),
+            (bbox.right, bbox.bottom),
+        )
+    ) or (
+        math.isclose(start[0], end[0], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+        and bbox.left <= start[0] <= bbox.right
+        and not (max_y < bbox.top or min_y > bbox.bottom)
+    ) or (
+        math.isclose(start[1], end[1], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+        and bbox.top <= start[1] <= bbox.bottom
+        and not (max_x < bbox.left or min_x > bbox.right)
     )
 
 

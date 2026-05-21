@@ -142,11 +142,20 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
         x: float,
         y: float,
         angle: float | None = None,
+        allow_connectivity_change: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Move a symbol safely using transactional editing."""
+        """Move a symbol, optionally allowing connectivity-affecting changes."""
         if ctx:
             await ctx.info(f"Moving symbol {reference}")
+        connectivity_risk = _get_symbol_connectivity_risk(schematic_path, reference)
+        if not allow_connectivity_change and connectivity_risk["attached"]:
+            return _connectivity_refusal(
+                schematic_path,
+                f"Refused: moving {reference} alone may disconnect wires or pins. "
+                "Use allow_connectivity_change=True or use a future connectivity-preserving move tool.",
+                connectivity_risk,
+            )
         return _transactional_edit(
             schematic_path,
             lambda schematic: {"symbol": schematic.move_symbol(reference, x, y, angle)},
@@ -160,11 +169,20 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
         x: float,
         y: float,
         angle: float | None = None,
+        allow_connectivity_change: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Move a label safely using transactional editing."""
+        """Move an electrical label, optionally allowing connectivity-affecting changes."""
         if ctx:
             await ctx.info(f"Moving label {label_uuid}")
+        connectivity_risk = _get_label_connectivity_risk(schematic_path, label_uuid)
+        if not allow_connectivity_change and connectivity_risk["attached"]:
+            return _connectivity_refusal(
+                schematic_path,
+                f"Refused: moving label {label_uuid} may disconnect a wire or pin. "
+                "Use allow_connectivity_change=True or use a future connectivity-preserving move tool.",
+                connectivity_risk,
+            )
         return _transactional_edit(
             schematic_path,
             lambda schematic: {"label": schematic.move_label(label_uuid, x, y, angle)},
@@ -228,11 +246,22 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def schematic_auto_arrange_labels(
-        schematic_path: str, ctx: Context | None = None
+        schematic_path: str,
+        allow_connectivity_change: bool = False,
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Reposition overlapping labels safely."""
+        """Reposition overlapping labels, optionally allowing connectivity-affecting changes."""
         if ctx:
             await ctx.info("Auto-arranging overlapping labels")
+        schematic = _load_schematic(schematic_path)
+        connectivity_risks = schematic.auto_arrange_label_risks()
+        if not allow_connectivity_change and connectivity_risks:
+            return _connectivity_refusal(
+                schematic_path,
+                "Refused: auto-arranging electrical labels may change connectivity. "
+                "Use allow_connectivity_change=True or wait for a connectivity-preserving arrange tool.",
+                {"labels": connectivity_risks},
+            )
         return _transactional_edit(
             schematic_path,
             lambda schematic: {"labels": schematic.auto_arrange_labels()},
@@ -290,9 +319,23 @@ def _load_schematic(schematic_path: str) -> KiCadSchematic:
     return KiCadSchematic.from_file(validated_path)
 
 
-async def _report_progress(ctx: Context | None, current: int, total: int) -> None:
-    if ctx:
-        await ctx.report_progress(current, total)
+def _get_symbol_connectivity_risk(schematic_path: str, reference: str) -> dict[str, Any]:
+    schematic = _load_schematic(schematic_path)
+    return schematic.symbol_connectivity_risk(reference)
+
+
+def _get_label_connectivity_risk(schematic_path: str, label_uuid: str) -> dict[str, Any]:
+    schematic = _load_schematic(schematic_path)
+    return schematic.label_connectivity_risk(label_uuid)
+
+
+def _connectivity_refusal(schematic_path: str, message: str, risk: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "success": False,
+        "schematic_path": schematic_path,
+        "error": message,
+        "connectivity_risk": risk,
+    }
 
 
 def _transactional_edit(

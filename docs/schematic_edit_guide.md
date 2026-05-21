@@ -8,7 +8,7 @@ This workflow is focused on **safe schematic read/edit/validate/preview flows**:
 
 - Read a schematic into a structured S-expression model
 - Inspect symbols, labels, wires, sheet bounds, and obvious overlaps
-- Apply layout-safe edits such as moving symbols, labels, and symbol properties
+- Apply layout-safe edits such as moving symbol properties and editing property text
 - Create backups before writes
 - Validate syntax after writes
 - Attempt KiCad CLI SVG export validation when KiCad CLI is available
@@ -48,14 +48,21 @@ Every transactional schematic write follows this sequence:
 
 ## Layout-safe editing tools
 
-- `schematic_move_symbol(schematic_path, reference, x, y, angle=None)`
-- `schematic_move_label(schematic_path, label_uuid, x, y, angle=None)`
 - `schematic_move_symbol_property(schematic_path, reference, property_name, x, y, angle=None)`
 - `schematic_set_property(schematic_path, reference, property_name, value)`
 - `schematic_auto_arrange_symbol_properties(schematic_path, reference)`
-- `schematic_auto_arrange_labels(schematic_path)`
 
-These tools only change placement and text/property data. They do not create or delete circuit connectivity.
+These tools only change symbol property placement and text/property data. They are the layout-safe edit operations currently recommended for this branch.
+
+## Guarded connectivity-affecting tools
+
+- `schematic_move_symbol(schematic_path, reference, x, y, angle=None, allow_connectivity_change=False)`
+- `schematic_move_label(schematic_path, label_uuid, x, y, angle=None, allow_connectivity_change=False)`
+- `schematic_auto_arrange_labels(schematic_path, allow_connectivity_change=False)`
+
+These tools are **not** guaranteed to preserve connectivity yet. Moving a symbol or electrical label can disconnect wires or pins even when the schematic remains syntactically valid and still exports to SVG.
+
+By default, the tools refuse edits when they detect connectivity risk. Callers must explicitly opt in with `allow_connectivity_change=True` until a future connectivity-preserving move flow exists.
 
 ## Preview tools
 

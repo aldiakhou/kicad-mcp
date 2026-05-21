@@ -40,11 +40,29 @@ async def test_schematic_read_and_write_tools(monkeypatch: pytest.MonkeyPatch, t
     assert overlaps_result["success"] is True
     assert overlaps_result["overlaps"]
 
-    arrange_labels_result = await tools["schematic_auto_arrange_labels"].fn(str(schematic_path), None)
+    arrange_labels_refused = await tools["schematic_auto_arrange_labels"].fn(str(schematic_path), False, None)
+    assert arrange_labels_refused["success"] is False
+    assert "allow_connectivity_change=True" in arrange_labels_refused["error"]
+
+    move_refused = await tools["schematic_move_symbol"].fn(
+        str(schematic_path), "R1", 130.0, 140.0, None, False, None
+    )
+    assert move_refused["success"] is False
+    assert "allow_connectivity_change=True" in move_refused["error"]
+
+    label_refused = await tools["schematic_move_label"].fn(
+        str(schematic_path), "label-1", 130.0, 140.0, None, False, None
+    )
+    assert label_refused["success"] is False
+    assert "allow_connectivity_change=True" in label_refused["error"]
+
+    arrange_labels_result = await tools["schematic_auto_arrange_labels"].fn(str(schematic_path), True, None)
     assert arrange_labels_result["success"] is True
     assert arrange_labels_result["changed_objects"]["labels"]
 
-    move_result = await tools["schematic_move_symbol"].fn(str(schematic_path), "R1", 130.0, 140.0, None, None)
+    move_result = await tools["schematic_move_symbol"].fn(
+        str(schematic_path), "R1", 130.0, 140.0, None, True, None
+    )
     assert move_result["success"] is True
     assert move_result["changed_objects"]["symbol"]["position"]["x"] == 130.0
 
@@ -53,6 +71,12 @@ async def test_schematic_read_and_write_tools(monkeypatch: pytest.MonkeyPatch, t
     )
     assert property_result["success"] is True
     assert property_result["changed_objects"]["property"]["position"]["y"] == 136.0
+
+    label_move_result = await tools["schematic_move_label"].fn(
+        str(schematic_path), "label-1", 132.0, 142.0, None, True, None
+    )
+    assert label_move_result["success"] is True
+    assert label_move_result["changed_objects"]["label"]["position"]["x"] == 132.0
 
     set_property_result = await tools["schematic_set_property"].fn(
         str(schematic_path), "R1", "MPN", "ABC123", None

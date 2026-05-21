@@ -48,3 +48,17 @@ def test_auto_arrange_symbol_properties_positions_properties_vertically():
     assert result["properties"]["Reference"]["position"]["y"] == 96.0
     assert result["properties"]["Value"]["position"]["y"] == 104.0
     assert result["properties"]["Footprint"]["position"]["y"] == 108.0
+
+
+def test_connectivity_risk_detects_attached_symbols_and_labels():
+    schematic = KiCadSchematic.from_file(str(FIXTURE_PATH))
+
+    symbol_risk = schematic.symbol_connectivity_risk("R1")
+    label_risk = schematic.label_connectivity_risk("label-1")
+    auto_arrange_risks = schematic.auto_arrange_label_risks()
+
+    assert symbol_risk["attached"] is True
+    assert any(attachment["type"] == "wire" for attachment in symbol_risk["attachments"])
+    assert label_risk["attached"] is True
+    assert any(attachment["type"] == "wire" for attachment in label_risk["attachments"])
+    assert auto_arrange_risks
