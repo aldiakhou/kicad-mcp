@@ -276,6 +276,10 @@ def _run_server_with_config(server: FastMCP, transport_config: dict[str, Any]) -
     """
     run_signature = inspect.signature(server.run)
     accepted_args = set(run_signature.parameters)
+    accepts_var_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in run_signature.parameters.values()
+    )
     transport = transport_config["transport"]
 
     kwargs: dict[str, Any] = {}
@@ -286,7 +290,7 @@ def _run_server_with_config(server: FastMCP, transport_config: dict[str, Any]) -
 
     if transport != "stdio":
         for key in ("host", "port", "path"):
-            if key in accepted_args:
+            if key in accepted_args or accepts_var_kwargs:
                 kwargs[key] = transport_config[key]
 
     logging.info("Running KiCad MCP server with %s transport", transport)
