@@ -10,6 +10,18 @@ from kicad_mcp.utils.kicad_s_expr import (
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "block_layout_schematic.kicad_sch"
 
 
+def _write_safe_auto_spread_fixture(tmp_path: Path) -> Path:
+    schematic_path = tmp_path / "safe_block_layout_schematic.kicad_sch"
+    text = FIXTURE_PATH.read_text(encoding="utf-8")
+    text = text.replace(
+        '(pts (xy 35 100) (xy 20 100) (xy 20 115))',
+        '(pts (xy 35 100) (xy 20 100))',
+    )
+    text = text.replace('  (junction\n    (xy 135 100)\n  )\n', "")
+    schematic_path.write_text(text, encoding="utf-8")
+    return schematic_path
+
+
 def _get_block_by_symbols(schematic: KiCadSchematic, *symbols: str) -> dict:
     wanted = sorted(symbols)
     return next(block for block in schematic.find_functional_blocks() if block["symbols"] == wanted)
@@ -126,3 +138,23 @@ def test_auto_spread_blocks_raises_before_partial_mutation():
         schematic.auto_spread_blocks()
 
     assert schematic.to_text() == original_text
+
+
+def test_auto_spread_blocks_moves_the_planned_safe_blocks(tmp_path: Path):
+    schematic = KiCadSchematic.from_file(str(_write_safe_auto_spread_fixture(tmp_path)))
+    before_positions = {
+        reference: schematic.get_symbol(reference)["position"].copy()
+        for reference in ("J1", "DS1", "U1", "U2")
+    }
+
+    preview = schematic.preview_auto_spread_blocks()
+    result = schematic.auto_spread_blocks()
+    moved_symbols = [tuple(move["symbols"]) for move in result["moved_blocks"]]
+
+    assert preview["success"] is True
+    assert [tuple(move["symbols"]) for move in preview["moves"]] == [("DS1", "R2"), ("U1",), ("U2",)]
+    assert moved_symbols == [("DS1", "R2"), ("U1",), ("U2",)]
+    assert schematic.get_symbol("J1")["position"] == before_positions["J1"]
+    assert schematic.get_symbol("DS1")["position"] != before_positions["DS1"]
+    assert schematic.get_symbol("U1")["position"] != before_positions["U1"]
+    assert schematic.get_symbol("U2")["position"] != before_positions["U2"]

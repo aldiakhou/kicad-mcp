@@ -891,7 +891,7 @@ class KiCadSchematic:
             raise ValueError("; ".join(cast(list[str], preview["refusals"])))
         moved_blocks = []
         for move in cast(list[dict[str, Any]], preview["moves"]):
-            block = self._require_functional_block(move["block_id"])
+            block = self._require_functional_block_by_symbols(move["symbols"])
             plan = self._plan_block_move(block, move["dx"], move["dy"])
             moved_blocks.append(self._apply_block_move_plan(block, plan))
         return {"moved_blocks": moved_blocks, "refusals": []}
@@ -916,7 +916,7 @@ class KiCadSchematic:
         for placement in placements:
             if self._is_zero_translation(placement["dx"], placement["dy"]):
                 continue
-            block = self._require_functional_block(placement["block_id"])
+            block = self._require_functional_block_by_symbols(placement["symbols"])
             plan = self._plan_block_move(block, placement["dx"], placement["dy"])
             if plan["refusals"]:
                 refusals.extend(
@@ -926,6 +926,7 @@ class KiCadSchematic:
             moves.append(
                 {
                     "block_id": block["block_id"],
+                    "symbols": list(block["symbols"]),
                     "dx": placement["dx"],
                     "dy": placement["dy"],
                     "planned_changes": self._public_block_move_plan(plan),

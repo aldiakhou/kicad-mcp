@@ -392,7 +392,7 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
                     "preview": preview,
                 }
             before_snapshots = [
-                schematic.block_connectivity_snapshot(move["block_id"])
+                schematic.block_connectivity_snapshot(symbol_refs=move["symbols"])
                 for move in cast(list[dict[str, Any]], preview["moves"])
             ]
             return _transactional_edit(
