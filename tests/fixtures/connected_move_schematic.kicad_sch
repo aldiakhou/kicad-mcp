@@ -1,0 +1,91 @@
+(kicad_sch
+  (version 20231120)
+  (generator "kicad_mcp_test")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "sym-r1")
+    (property "Reference" "R1"
+      (at 100 96 0)
+    )
+    (property "Value" "10k"
+      (at 100 104 0)
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 200 100 0)
+    (uuid "sym-r2")
+    (property "Reference" "R2"
+      (at 200 96 0)
+    )
+    (property "Value" "1k"
+      (at 200 104 0)
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 300 100 0)
+    (uuid "sym-r3")
+    (property "Reference" "R3"
+      (at 300 96 0)
+    )
+    (property "Value" "4k7"
+      (at 300 104 0)
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 360 100 0)
+    (uuid "sym-r4")
+    (property "Reference" "R4"
+      (at 360 96 0)
+    )
+    (property "Value" "2k2"
+      (at 360 104 0)
+    )
+  )
+  (label "NET_R1"
+    (at 100 100 0)
+    (uuid "label-r1")
+  )
+  (label "SDA"
+    (at 150 100 0)
+    (uuid "label-sda")
+  )
+  (label "MID"
+    (at 240 100 0)
+    (uuid "label-mid")
+  )
+  (label "JUNC"
+    (at 300 100 0)
+    (uuid "label-junc")
+  )
+  (wire
+    (pts (xy 100 100) (xy 120 100))
+    (uuid "wire-r1")
+  )
+  (wire
+    (pts (xy 140 100) (xy 150 100))
+    (uuid "wire-sda")
+  )
+  (wire
+    (pts (xy 190 100) (xy 210 100))
+    (uuid "wire-cross")
+  )
+  (wire
+    (pts (xy 230 100) (xy 250 100))
+    (uuid "wire-mid")
+  )
+  (wire
+    (pts (xy 300 100) (xy 320 100))
+    (uuid "wire-junc")
+  )
+  (junction
+    (xy 300 100)
+  )
+  (wire
+    (pts (xy 360 100) (xy 380 100))
+  )
+)

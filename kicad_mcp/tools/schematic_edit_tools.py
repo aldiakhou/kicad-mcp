@@ -11,7 +11,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
 
 from kicad_mcp.utils.file_utils import get_project_files
-from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, compare_connectivity_snapshots
 from kicad_mcp.utils.path_validator import PathValidator
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import (
@@ -88,6 +88,30 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
                 "success": True,
                 "schematic_path": schematic_path,
                 "wires": schematic.list_wires(),
+            }
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    def schematic_connectivity_snapshot(
+        schematic_path: str,
+        target_type: str | None = None,
+        target_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return a local geometric connectivity snapshot."""
+        try:
+            schematic = _load_schematic(schematic_path)
+            snapshot = (
+                schematic.connectivity_snapshot()
+                if target_type is None or target_id is None
+                else schematic.target_connectivity_snapshot(target_type, target_id)
+            )
+            return {
+                "success": True,
+                "schematic_path": schematic_path,
+                "target_type": target_type,
+                "target_id": target_id,
+                "snapshot": snapshot,
             }
         except Exception as exc:
             return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
@@ -190,6 +214,82 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
             lambda schematic: {"label": schematic.move_label(label_uuid, x, y, angle)},
             ctx=ctx,
         )
+
+    @mcp.tool()
+    async def schematic_move_symbol_with_connections(
+        schematic_path: str,
+        reference: str,
+        x: float,
+        y: float,
+        angle: float | None = None,
+        preserve_connectivity: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Move a symbol while preserving clearly attached local connectivity."""
+        if not preserve_connectivity:
+            return {
+                "success": False,
+                "schematic_path": schematic_path,
+                "error": "This tool always preserves connectivity; use schematic_move_symbol for non-preserving moves.",
+            }
+        if ctx:
+            await ctx.info(f"Moving symbol {reference} with connected wires")
+        before_snapshot = _load_schematic(schematic_path).target_connectivity_snapshot("symbol", reference)
+        return _transactional_edit(
+            schematic_path,
+            lambda schematic: schematic.move_symbol_with_connections(reference, x, y, angle),
+            ctx=ctx,
+            post_write_validator=_build_connectivity_validator("symbol", reference, before_snapshot),
+        )
+
+    @mcp.tool()
+    async def schematic_move_label_with_wire(
+        schematic_path: str,
+        label_uuid: str,
+        x: float,
+        y: float,
+        angle: float | None = None,
+        preserve_connectivity: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Move a label with any clearly attached wire endpoints."""
+        if not preserve_connectivity:
+            return {
+                "success": False,
+                "schematic_path": schematic_path,
+                "error": "This tool always preserves connectivity; use schematic_move_label for non-preserving moves.",
+            }
+        if ctx:
+            await ctx.info(f"Moving label {label_uuid} with connected wire")
+        before_snapshot = _load_schematic(schematic_path).target_connectivity_snapshot("label", label_uuid)
+        return _transactional_edit(
+            schematic_path,
+            lambda schematic: schematic.move_label_with_wire(label_uuid, x, y, angle),
+            ctx=ctx,
+            post_write_validator=_build_connectivity_validator("label", label_uuid, before_snapshot),
+        )
+
+    @mcp.tool()
+    def schematic_preview_connectivity_move(
+        schematic_path: str,
+        target_type: str,
+        target_id: str,
+        x: float,
+        y: float,
+        angle: float | None = None,
+    ) -> dict[str, Any]:
+        """Preview a connectivity-preserving move without writing the schematic."""
+        try:
+            schematic = _load_schematic(schematic_path)
+            return {
+                "success": True,
+                "schematic_path": schematic_path,
+                "target_type": target_type,
+                "target_id": target_id,
+                "preview": schematic.preview_connectivity_move(target_type, target_id, x, y, angle),
+            }
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
 
     @mcp.tool()
     async def schematic_move_symbol_property(
@@ -345,6 +445,7 @@ def _transactional_edit(
     mutator: Any,
     *,
     ctx: Context | None = None,
+    post_write_validator: Any | None = None,
 ) -> dict[str, Any]:
     if ctx:
         logger.info("Running transactional schematic edit for %s", schematic_path)
@@ -352,8 +453,28 @@ def _transactional_edit(
         schematic_path,
         mutator,
         run_cli_validation=True,
+        post_write_validator=post_write_validator,
     )
     return result
+
+
+def _build_connectivity_validator(
+    target_type: str,
+    target_id: str,
+    before_snapshot: dict[str, Any],
+) -> Any:
+    def validator(schematic_path: str) -> dict[str, Any]:
+        after_snapshot = _load_schematic(schematic_path).target_connectivity_snapshot(target_type, target_id)
+        comparison = compare_connectivity_snapshots(target_type, before_snapshot, after_snapshot)
+        return {
+            "success": comparison["preserved"],
+            "reason": comparison["reason"],
+            "connectivity_snapshot": "preserved" if comparison["preserved"] else "changed",
+            "before": before_snapshot,
+            "after": after_snapshot,
+        }
+
+    return validator
 
 
 def _export_schematic_svg(schematic_path: str, output_path: str | None) -> dict[str, Any]:

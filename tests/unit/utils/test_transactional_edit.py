@@ -75,6 +75,28 @@ def test_apply_transactional_schematic_edit_rolls_back_on_failed_validation(
     assert schematic_path.read_text(encoding="utf-8") == original_text
 
 
+def test_apply_transactional_schematic_edit_rolls_back_on_failed_post_write_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    schematic_path = _copy_fixture(tmp_path)
+    original_text = schematic_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        "kicad_mcp.utils.transactional_edit.validate_schematic_with_cli_export",
+        lambda path: {"success": True, "skipped": True, "reason": "test"},
+    )
+
+    result = apply_transactional_schematic_edit(
+        str(schematic_path),
+        lambda schematic: {"symbol": schematic.move_symbol("R1", 160.0, 170.0)},
+        post_write_validator=lambda path: {"success": False, "reason": "post-write failure"},
+    )
+
+    assert result["success"] is False
+    assert result["rolled_back"] is True
+    assert "post-write failure" in result["error"]
+    assert schematic_path.read_text(encoding="utf-8") == original_text
+
+
 def test_backup_project_files_and_restore_backup_manifest(tmp_path: Path):
     project_path = tmp_path / "demo.kicad_pro"
     schematic_path = tmp_path / "demo.kicad_sch"
