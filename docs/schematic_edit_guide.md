@@ -62,6 +62,8 @@ These tools only change symbol property placement and text/property data. They a
 
 These tools are **not** guaranteed to preserve connectivity yet. Moving a symbol or electrical label can disconnect wires or pins even when the schematic remains syntactically valid and still exports to SVG.
 
+For example, moving a resistor symbol away from a wire endpoint without also moving the attached wire leaves the schematic readable and exportable, but the pin is no longer electrically connected to that wire. The same applies to moving a net label off the wire or pin it was naming.
+
 By default, the tools refuse edits when they detect connectivity risk. Callers must explicitly opt in with `allow_connectivity_change=True` until a future connectivity-preserving move flow exists.
 
 ## Preview tools

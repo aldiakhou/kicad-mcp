@@ -59,6 +59,7 @@ SExprNode: TypeAlias = SExprAtom | SExprList
 LABEL_ARRANGE_OFFSET_STEPS_MM = (3.0, 6.0, 9.0, 12.0, 15.0)
 S_EXPRESSION_SPECIAL_CHARS = '()"'
 FLOAT_COMPARISON_TOLERANCE = 1e-9
+TEXT_CHAR_WIDTH_MM = 0.9
 
 
 @dataclass(frozen=True)
@@ -530,6 +531,7 @@ class KiCadSchematic:
         return risks
 
     def _candidate_positions(self, x: float, y: float) -> list[tuple[float, float]]:
+        """Generate nearby candidate offsets in an expanding pattern for overlap resolution."""
         offsets = []
         for step in LABEL_ARRANGE_OFFSET_STEPS_MM:
             offsets.extend(
@@ -715,7 +717,7 @@ class KiCadSchematic:
 
     def _label_bbox(self, label: dict[str, Any]) -> BoundingBox:
         position = label["position"]
-        width = max(3.0, len(label["text"]) * 0.9)
+        width = max(3.0, len(label["text"]) * TEXT_CHAR_WIDTH_MM)
         height = 1.8
         return BoundingBox(
             left=position["x"],
@@ -727,7 +729,7 @@ class KiCadSchematic:
     def _property_bbox(self, property_name: str, property_data: dict[str, Any]) -> BoundingBox:
         position = property_data["position"]
         text = property_data.get("text") or property_name
-        width = max(4.0, len(text) * 0.9)
+        width = max(4.0, len(text) * TEXT_CHAR_WIDTH_MM)
         height = 1.8
         return BoundingBox(
             left=position["x"],

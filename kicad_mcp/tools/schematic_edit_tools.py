@@ -153,7 +153,7 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
             return _connectivity_refusal(
                 schematic_path,
                 f"Refused: moving {reference} alone may disconnect wires or pins. "
-                "Use allow_connectivity_change=True or use a future connectivity-preserving move tool.",
+                "Use allow_connectivity_change=True only if you intentionally accept that connectivity may change.",
                 connectivity_risk,
             )
         return _transactional_edit(
@@ -180,7 +180,7 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
             return _connectivity_refusal(
                 schematic_path,
                 f"Refused: moving label {label_uuid} may disconnect a wire or pin. "
-                "Use allow_connectivity_change=True or use a future connectivity-preserving move tool.",
+                "Use allow_connectivity_change=True only if you intentionally accept that connectivity may change.",
                 connectivity_risk,
             )
         return _transactional_edit(

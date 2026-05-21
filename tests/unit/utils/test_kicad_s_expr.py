@@ -40,7 +40,7 @@ def test_find_overlaps_reports_label_and_property_conflicts():
     assert "property-vs-symbol" in overlap_types
 
 
-def test_auto_arrange_symbol_properties_positions_properties_vertically():
+def test_auto_arrange_symbol_properties_arranges_properties_vertically():
     schematic = KiCadSchematic.from_file(str(FIXTURE_PATH))
 
     result = schematic.auto_arrange_symbol_properties("R1")

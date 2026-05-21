@@ -30,7 +30,7 @@ class TransactionalEditError(RuntimeError):
 def validate_local_path(file_path: str, file_type: str, must_exist: bool = True) -> str:
     """Validate a KiCad file path using the file's own directory as the trusted root."""
     expanded = os.path.realpath(os.path.expanduser(file_path))
-    trusted_root = expanded if os.path.isdir(expanded) else os.path.dirname(expanded) or expanded
+    trusted_root = expanded if os.path.isdir(expanded) else os.path.dirname(expanded)
     validator = PathValidator(trusted_roots={trusted_root})
     return validator.validate_kicad_file(expanded, file_type, must_exist=must_exist)
 
