@@ -374,7 +374,8 @@ def _export_schematic_svg(schematic_path: str, output_path: str | None) -> dict[
         output_path = os.path.join(schematic_dir, f"{Path(schematic_path).stem}_schematic.svg")
     output_path = os.path.realpath(os.path.expanduser(output_path))
 
-    output_dir = os.path.dirname(output_path) if os.path.dirname(output_path) else schematic_dir
+    output_dir_name = os.path.dirname(output_path)
+    output_dir = output_dir_name if output_dir_name else schematic_dir
     validator = PathValidator(trusted_roots={schematic_dir, output_dir})
     runner = SecureSubprocessRunner(path_validator=validator)
     result = runner.run_kicad_command(

@@ -14,7 +14,7 @@ This workflow is focused on **safe schematic read/edit/validate/preview flows**:
 - Attempt KiCad CLI SVG export validation when KiCad CLI is available
 - Roll back automatically if a transactional edit fails validation
 
-Electrical connectivity edits and PCB routing changes are intentionally out of scope for this phase.
+Electrical connectivity edits and PCB routing changes are intentionally out of scope on this branch.
 
 ## Safety guarantees
 
