@@ -58,6 +58,7 @@ class SExprList:
 SExprNode: TypeAlias = SExprAtom | SExprList
 LABEL_ARRANGE_OFFSET_STEPS_MM = (3.0, 6.0, 9.0, 12.0, 15.0)
 S_EXPRESSION_SPECIAL_CHARS = '()"'
+FLOAT_COMPARISON_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
@@ -665,7 +666,7 @@ def _needs_quotes(value: str) -> bool:
 
 
 def _format_number(value: float) -> str:
-    if math.isclose(value, round(value), abs_tol=1e-9):
+    if math.isclose(value, round(value), abs_tol=FLOAT_COMPARISON_TOLERANCE):
         return str(int(round(value)))
     formatted = f"{value:.6f}".rstrip("0").rstrip(".")
     return formatted or "0"
@@ -741,7 +742,8 @@ def parse_s_expression(content: str) -> SExprList:
 
         if not node_stack:
             raise SExpressionError("Atom found outside S-expression list")
-        assert isinstance(token, SExprAtom), f"Expected SExprAtom but got {type(token).__name__}"
+        if not isinstance(token, SExprAtom):
+            raise SExpressionError(f"Expected SExprAtom but got {type(token).__name__}")
         node_stack[-1].append(token)
 
     if node_stack:

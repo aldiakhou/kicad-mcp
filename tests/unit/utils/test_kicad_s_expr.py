@@ -5,7 +5,7 @@ from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, parse_s_expression, val
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "sample_schematic.kicad_sch"
 
 
-def test_parse_round_trip_preserves_schematic_structure():
+def test_schematic_parse_and_serialize_round_trip_preserves_structure():
     content = FIXTURE_PATH.read_text(encoding="utf-8")
 
     root = parse_s_expression(content)
@@ -40,7 +40,7 @@ def test_find_overlaps_reports_label_and_property_conflicts():
     assert "property-vs-symbol" in overlap_types
 
 
-def test_auto_arrange_symbol_properties_moves_reference_block():
+def test_auto_arrange_symbol_properties_positions_properties_vertically():
     schematic = KiCadSchematic.from_file(str(FIXTURE_PATH))
 
     result = schematic.auto_arrange_symbol_properties("R1")
