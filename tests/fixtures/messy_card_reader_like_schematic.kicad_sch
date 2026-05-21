@@ -1,0 +1,138 @@
+(kicad_sch
+  (version 20231120)
+  (generator "kicad_mcp_test")
+  (paper "A4")
+  (symbol
+    (lib_id "Display:LCD")
+    (at 40 40 0)
+    (uuid "sym-ds1")
+    (property "Reference" "DS1"
+      (at 40 40 0)
+    )
+    (property "Value" "LCD"
+      (at 40 40 0)
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 60 40 0)
+    (uuid "sym-r2")
+    (property "Reference" "R2"
+      (at 60 40 0)
+    )
+    (property "Value" "10k"
+      (at 60 40 0)
+    )
+  )
+  (label "D4"
+    (at 45 40 0)
+    (uuid "label-lcd-d4")
+  )
+  (label "RS"
+    (at 55 40 0)
+    (uuid "label-lcd-rs")
+  )
+  (wire
+    (pts (xy 45 40) (xy 55 40))
+    (uuid "wire-lcd-internal")
+  )
+  (symbol
+    (lib_id "Regulator_Linear:LDO")
+    (at 100 40 0)
+    (uuid "sym-u3")
+    (property "Reference" "U3"
+      (at 100 40 0)
+    )
+    (property "Value" "LDO_3V3"
+      (at 100 40 0)
+    )
+  )
+  (label "3V3"
+    (at 85 40 0)
+    (uuid "label-3v3")
+  )
+  (wire
+    (pts (xy 95 40) (xy 85 40))
+    (uuid "wire-power-boundary")
+  )
+  (symbol
+    (lib_id "MCU:ESP32-S3")
+    (at 130 40 0)
+    (uuid "sym-u1")
+    (property "Reference" "U1"
+      (at 130 40 0)
+    )
+    (property "Value" "ESP32-S3"
+      (at 130 40 0)
+    )
+  )
+  (label "TX"
+    (at 115 40 0)
+    (uuid "label-mcu-tx")
+  )
+  (wire
+    (pts (xy 125 40) (xy 115 40))
+    (uuid "wire-mcu-boundary")
+  )
+  (symbol
+    (lib_id "Connector:USB_C_Receptacle")
+    (at 160 40 0)
+    (uuid "sym-j1")
+    (property "Reference" "J1"
+      (at 160 40 0)
+    )
+    (property "Value" "USB_C"
+      (at 160 40 0)
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 180 40 0)
+    (uuid "sym-r1")
+    (property "Reference" "R1"
+      (at 180 40 0)
+    )
+    (property "Value" "5k1"
+      (at 180 40 0)
+    )
+  )
+  (label "USB_D+"
+    (at 165 40 0)
+    (uuid "label-usb-dp")
+  )
+  (label "CC1"
+    (at 175 40 0)
+    (uuid "label-cc1")
+  )
+  (label "VBUS"
+    (at 140 40 0)
+    (uuid "label-vbus-ext")
+  )
+  (wire
+    (pts (xy 165 40) (xy 175 40))
+    (uuid "wire-usb-internal")
+  )
+  (wire
+    (pts (xy 155 40) (xy 140 40))
+    (uuid "wire-usb-boundary")
+  )
+  (symbol
+    (lib_id "RFID:PN532")
+    (at 220 40 0)
+    (uuid "sym-u2")
+    (property "Reference" "U2"
+      (at 220 40 0)
+    )
+    (property "Value" "PN532"
+      (at 220 40 0)
+    )
+  )
+  (label "IRQ"
+    (at 205 40 0)
+    (uuid "label-nfc-irq")
+  )
+  (wire
+    (pts (xy 215 40) (xy 205 40))
+    (uuid "wire-nfc-boundary")
+  )
+)

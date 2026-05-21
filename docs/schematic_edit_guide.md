@@ -51,8 +51,31 @@ Every transactional schematic write follows this sequence:
 - `schematic_move_symbol_property(schematic_path, reference, property_name, x, y, angle=None)`
 - `schematic_set_property(schematic_path, reference, property_name, value)`
 - `schematic_auto_arrange_symbol_properties(schematic_path, reference)`
+- `schematic_cleanup_report(schematic_path, layout_style="left_to_right", spacing_x=35.0, spacing_y=25.0, arrange_properties=True, preserve_connectivity=True)`
+- `schematic_preview_cleanup(schematic_path, layout_style="left_to_right", spacing_x=35.0, spacing_y=25.0, arrange_properties=True, preserve_connectivity=True)`
+- `schematic_apply_cleanup(schematic_path, layout_style="left_to_right", spacing_x=35.0, spacing_y=25.0, arrange_properties=True, preserve_connectivity=True, output_path=None)`
 
-These tools only change symbol property placement and text/property data. They are the layout-safe edit operations currently recommended for this branch.
+These are the recommended schematic cleanup tools for this branch. They keep writes conservative by limiting automatic edits to safe block translations plus symbol property arrangement.
+
+## Cleanup workflow
+
+The high-level cleanup flow is:
+
+1. `schematic_cleanup_report(...)`
+2. `schematic_preview_cleanup(...)`
+3. `schematic_apply_cleanup(...)`
+
+The workflow is intentionally conservative:
+
+- block detection is heuristic
+- only connectivity-preserving block moves are allowed
+- labels are not rearranged on their own
+- labels only move when they are part of a safe block move
+- symbol properties can be re-arranged across the whole schematic
+
+`schematic_preview_cleanup(...)` is read-only and returns the proposed block moves, property moves, overlaps, refusals, and label limitations. If any block move is unsafe, the preview returns `success: false`.
+
+`schematic_apply_cleanup(...)` performs backup, validation, safe cleanup, post-write connectivity checks for moved blocks, SVG export, and diff generation in one transactional flow.
 
 ## Guarded connectivity-affecting tools
 
@@ -72,3 +95,11 @@ By default, the tools refuse edits when they detect connectivity risk. Callers m
 - `export_schematic_preview(project_path)`
 
 These tools use `kicad-cli` through the repository’s secure subprocess wrapper and return an SVG path plus preview content when export succeeds.
+
+## Current limitations
+
+- No PCB routing changes
+- No automatic symbol rotation with attached wires
+- No complex multi-segment boundary wire movement
+- No mid-segment label movement
+- Block detection is geometric and heuristic, not ERC/netlist-aware

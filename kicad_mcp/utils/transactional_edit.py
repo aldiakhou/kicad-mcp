@@ -15,7 +15,12 @@ from typing import Any, cast
 
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
-from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExpressionError, validate_schematic_text
+from kicad_mcp.utils.kicad_s_expr import (
+    KiCadSchematic,
+    SExpressionError,
+    compare_block_connectivity_snapshots,
+    validate_schematic_text,
+)
 from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessRunner
 
@@ -219,6 +224,40 @@ def validate_schematic_with_cli_export(schematic_path: str) -> dict[str, Any]:
     }
 
 
+def export_schematic_svg_file(schematic_path: str, output_path: str | None = None) -> dict[str, Any]:
+    """Export a schematic SVG to disk."""
+    validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
+    schematic_dir = os.path.dirname(validated_path) or validated_path
+    if output_path is None:
+        output_path = os.path.join(schematic_dir, f"{Path(validated_path).stem}_schematic.svg")
+    output_path = os.path.realpath(os.path.expanduser(output_path))
+
+    output_dir_name = os.path.dirname(output_path)
+    output_dir = output_dir_name if output_dir_name else schematic_dir
+    validator = PathValidator(trusted_roots={schematic_dir, output_dir})
+    runner = SecureSubprocessRunner(path_validator=validator)
+    result = runner.run_kicad_command(
+        ["sch", "export", "svg", validated_path, "-o", output_path],
+        input_files=[validated_path],
+        output_files=[output_path],
+        working_dir=schematic_dir,
+    )
+    if result.returncode != 0:
+        return {
+            "success": False,
+            "schematic_path": validated_path,
+            "svg_path": output_path,
+            "error": result.stderr or result.stdout or "KiCad CLI export failed",
+        }
+    return {
+        "success": True,
+        "schematic_path": validated_path,
+        "svg_path": output_path,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
 def apply_transactional_schematic_edit(
     schematic_path: str,
     mutator: Callable[[KiCadSchematic], dict[str, Any]],
@@ -269,6 +308,133 @@ def apply_transactional_schematic_edit(
                 "cli": cli_validation,
                 "post_write": post_write_validation,
             },
+            "rolled_back": False,
+            "diff": diff_result["diff"],
+        }
+    except Exception as exc:
+        restore_result = restore_backup_manifest(backup["backup_path"])
+        return {
+            "success": False,
+            "schematic_path": validated_path,
+            "backup_path": backup["backup_path"],
+            "error": str(exc),
+            "rolled_back": restore_result.get("success", False),
+            "restore_result": restore_result,
+        }
+
+
+def validate_block_connectivity_snapshots(
+    schematic_path: str, before_snapshots: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Validate block connectivity snapshots after a write."""
+    if not before_snapshots:
+        return {"success": True, "skipped": True, "reason": "No block moves planned", "block_connectivity": "preserved"}
+    schematic = KiCadSchematic.from_file(schematic_path)
+    comparisons = []
+    failures = []
+    for before_snapshot in before_snapshots:
+        after_snapshot = schematic.block_connectivity_snapshot(
+            symbol_refs=before_snapshot["internal_symbols"]
+        )
+        comparison = compare_block_connectivity_snapshots(before_snapshot, after_snapshot)
+        comparisons.append(
+            {
+                "block_id": before_snapshot["block_id"],
+                "before": before_snapshot,
+                "after": after_snapshot,
+                "reason": comparison["reason"],
+                "success": comparison["preserved"],
+            }
+        )
+        if not comparison["preserved"]:
+            failures.append(f"{before_snapshot['block_id']}: {comparison['reason']}")
+    return {
+        "success": not failures,
+        "reason": "block connectivity preserved" if not failures else "; ".join(failures),
+        "block_connectivity": "preserved" if not failures else "changed",
+        "blocks": comparisons,
+    }
+
+
+def apply_transactional_schematic_cleanup(
+    schematic_path: str,
+    *,
+    layout_style: str = "left_to_right",
+    spacing_x: float = 35.0,
+    spacing_y: float = 25.0,
+    arrange_properties: bool = True,
+    preserve_connectivity: bool = True,
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    """Apply the high-level cleanup workflow transactionally."""
+    validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
+    original_text = Path(validated_path).read_text(encoding="utf-8")
+    backup = create_file_backup(validated_path)
+    try:
+        before_validation = validate_schematic_text(original_text)
+        schematic = KiCadSchematic.from_text(original_text)
+        preview = schematic.preview_cleanup(
+            layout_style=layout_style,
+            spacing_x=spacing_x,
+            spacing_y=spacing_y,
+            arrange_properties=arrange_properties,
+            preserve_connectivity=preserve_connectivity,
+        )
+        cleanup_plan = cast(dict[str, Any], preview["cleanup_plan"])
+        if not preview["success"]:
+            return {
+                "success": False,
+                "schematic_path": validated_path,
+                "backup_path": backup["backup_path"],
+                "error": preview.get("error", "Cleanup preview failed"),
+                "cleanup_plan": cleanup_plan,
+                "rolled_back": False,
+            }
+
+        before_snapshots = [
+            schematic.block_connectivity_snapshot(symbol_refs=move["symbols"])
+            for move in cast(list[dict[str, Any]], cleanup_plan["block_moves"])
+        ]
+        changed_objects = schematic.apply_cleanup(
+            layout_style=layout_style,
+            spacing_x=spacing_x,
+            spacing_y=spacing_y,
+            arrange_properties=arrange_properties,
+            preserve_connectivity=preserve_connectivity,
+        )
+        updated_text = schematic.to_text()
+        after_validation = validate_schematic_text(updated_text)
+        Path(validated_path).write_text(updated_text, encoding="utf-8")
+
+        cli_validation = validate_schematic_with_cli_export(validated_path)
+        if not cli_validation["success"]:
+            raise TransactionalEditError(cli_validation.get("stderr") or "CLI validation failed")
+
+        connectivity_validation = validate_block_connectivity_snapshots(validated_path, before_snapshots)
+        if not connectivity_validation["success"]:
+            raise TransactionalEditError(cast(str, connectivity_validation["reason"]))
+
+        export_result = export_schematic_svg_file(validated_path, output_path)
+        if not export_result["success"]:
+            raise TransactionalEditError(cast(str, export_result["error"]))
+
+        diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
+        return {
+            "success": True,
+            "schematic_path": validated_path,
+            "backup_path": backup["backup_path"],
+            "cleanup_plan": cleanup_plan,
+            "changed_objects": changed_objects,
+            "validation": {
+                "before": before_validation,
+                "after": after_validation,
+                "cli": cli_validation,
+                "post_write": connectivity_validation,
+                "syntax": "ok",
+                "cli_export": "ok",
+                "connectivity": "preserved",
+            },
+            "svg_preview": export_result["svg_path"],
             "rolled_back": False,
             "diff": diff_result["diff"],
         }

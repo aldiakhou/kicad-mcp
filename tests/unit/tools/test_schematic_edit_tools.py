@@ -92,28 +92,24 @@ async def test_export_schematic_svg_uses_secure_cli_runner(monkeypatch: pytest.M
     server = create_server()
     tools = await server.get_tools()
 
-    def fake_run(
-        runner,
-        command_args,
-        input_files=None,
-        output_files=None,
-        working_dir=None,
-        timeout=None,
-        capture_output=True,
-    ):
-        assert runner is not None
-        assert command_args[:3] == ["sch", "export", "svg"]
-        assert output_files == [str(output_path)]
+    def fake_export(schematic_path: str, requested_output: str | None = None):
+        assert requested_output == str(output_path)
         output_path.write_text("<svg/>", encoding="utf-8")
-        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return {
+            "success": True,
+            "schematic_path": schematic_path,
+            "svg_path": str(output_path),
+            "stdout": "",
+            "stderr": "",
+        }
 
     monkeypatch.setattr(
         "kicad_mcp.tools.schematic_edit_tools.validate_schematic_with_cli_export",
         lambda path: {"success": True, "skipped": False, "stdout": "", "stderr": ""},
     )
     monkeypatch.setattr(
-        "kicad_mcp.tools.schematic_edit_tools.SecureSubprocessRunner.run_kicad_command",
-        fake_run,
+        "kicad_mcp.tools.schematic_edit_tools.export_schematic_svg_file",
+        fake_export,
     )
 
     result = await tools["export_schematic_svg"].fn(str(schematic_path), str(output_path), None)

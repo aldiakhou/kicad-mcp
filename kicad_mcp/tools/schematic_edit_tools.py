@@ -16,11 +16,11 @@ from kicad_mcp.utils.kicad_s_expr import (
     compare_block_connectivity_snapshots,
     compare_connectivity_snapshots,
 )
-from kicad_mcp.utils.path_validator import PathValidator
-from kicad_mcp.utils.secure_subprocess import SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import (
+    apply_transactional_schematic_cleanup,
     apply_transactional_schematic_edit,
     backup_project_files,
+    export_schematic_svg_file,
     get_file_diff_against_backup,
     restore_backup_manifest,
     validate_local_path,
@@ -486,6 +486,84 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
+    def schematic_cleanup_report(
+        schematic_path: str,
+        layout_style: str = "left_to_right",
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        arrange_properties: bool = True,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Return a read-only cleanup diagnosis."""
+        try:
+            schematic = _load_schematic(schematic_path)
+            report = schematic.schematic_cleanup_report(
+                layout_style=layout_style,
+                spacing_x=spacing_x,
+                spacing_y=spacing_y,
+                arrange_properties=arrange_properties,
+                preserve_connectivity=preserve_connectivity,
+            )
+            return {"schematic_path": schematic_path, **report}
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    def schematic_preview_cleanup(
+        schematic_path: str,
+        layout_style: str = "left_to_right",
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        arrange_properties: bool = True,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Preview a full cleanup workflow without writing the schematic."""
+        try:
+            schematic = _load_schematic(schematic_path)
+            preview = schematic.preview_cleanup(
+                layout_style=layout_style,
+                spacing_x=spacing_x,
+                spacing_y=spacing_y,
+                arrange_properties=arrange_properties,
+                preserve_connectivity=preserve_connectivity,
+            )
+            return {"schematic_path": schematic_path, **preview}
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    async def schematic_apply_cleanup(
+        schematic_path: str,
+        layout_style: str = "left_to_right",
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        arrange_properties: bool = True,
+        preserve_connectivity: bool = True,
+        output_path: str | None = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Apply the high-level cleanup workflow transactionally."""
+        try:
+            if ctx:
+                await ctx.info("Applying schematic cleanup workflow")
+            result = apply_transactional_schematic_cleanup(
+                schematic_path,
+                layout_style=layout_style,
+                spacing_x=spacing_x,
+                spacing_y=spacing_y,
+                arrange_properties=arrange_properties,
+                preserve_connectivity=preserve_connectivity,
+                output_path=output_path,
+            )
+            if not result.get("success"):
+                return result
+            svg_path = result["svg_preview"]
+            result["preview"] = Image(data=Path(svg_path).read_bytes(), format="svg")
+            return result
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
     async def export_schematic_svg(
         schematic_path: str,
         output_path: str | None = None,
@@ -654,33 +732,13 @@ def _export_schematic_svg(schematic_path: str, output_path: str | None) -> dict[
             "error": cli_validation.get("stderr") or "KiCad CLI export validation failed",
         }
 
-    schematic_dir = os.path.dirname(schematic_path) or schematic_path
-    if output_path is None:
-        output_path = os.path.join(schematic_dir, f"{Path(schematic_path).stem}_schematic.svg")
-    output_path = os.path.realpath(os.path.expanduser(output_path))
-
-    output_dir_name = os.path.dirname(output_path)
-    output_dir = output_dir_name if output_dir_name else schematic_dir
-    validator = PathValidator(trusted_roots={schematic_dir, output_dir})
-    runner = SecureSubprocessRunner(path_validator=validator)
-    result = runner.run_kicad_command(
-        ["sch", "export", "svg", schematic_path, "-o", output_path],
-        input_files=[schematic_path],
-        output_files=[output_path],
-        working_dir=schematic_dir,
-    )
-    if result.returncode != 0:
-        return {
-            "success": False,
-            "schematic_path": schematic_path,
-            "svg_path": output_path,
-            "error": result.stderr or result.stdout or "KiCad CLI export failed",
-        }
-
-    preview_bytes = Path(output_path).read_bytes()
+    export_result = export_schematic_svg_file(schematic_path, output_path)
+    if not export_result["success"]:
+        return export_result
+    preview_bytes = Path(export_result["svg_path"]).read_bytes()
     return {
         "success": True,
         "schematic_path": schematic_path,
-        "svg_path": output_path,
+        "svg_path": export_result["svg_path"],
         "preview": Image(data=preview_bytes, format="svg"),
     }

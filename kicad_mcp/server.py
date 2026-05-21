@@ -33,10 +33,10 @@ from kicad_mcp.tools.drc_tools import register_drc_tools
 from kicad_mcp.tools.export_tools import register_export_tools
 from kicad_mcp.tools.netlist_tools import register_netlist_tools
 from kicad_mcp.tools.pattern_tools import register_pattern_tools
-from kicad_mcp.tools.schematic_edit_tools import register_schematic_edit_tools
 
 # Import tool handlers
 from kicad_mcp.tools.project_tools import register_project_tools
+from kicad_mcp.tools.schematic_edit_tools import register_schematic_edit_tools
 
 # Track cleanup handlers
 cleanup_handlers = []
