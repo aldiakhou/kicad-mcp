@@ -56,9 +56,10 @@ class SExprList:
 
 
 SExprNode: TypeAlias = SExprAtom | SExprList
-LABEL_ARRANGE_OFFSET_STEPS_MM = (3.0, 6.0, 9.0, 12.0, 15.0)
+LABEL_OVERLAP_RESOLUTION_OFFSETS_MM = (3.0, 6.0, 9.0, 12.0, 15.0)
 S_EXPRESSION_SPECIAL_CHARS = '()"'
 FLOAT_COMPARISON_TOLERANCE = 1e-9
+# Approximate character width used only for rough label/property overlap bounding boxes.
 TEXT_CHAR_WIDTH_MM = 0.9
 
 
@@ -533,7 +534,7 @@ class KiCadSchematic:
     def _candidate_positions(self, x: float, y: float) -> list[tuple[float, float]]:
         """Generate nearby candidate offsets in an expanding pattern for overlap resolution."""
         offsets = []
-        for step in LABEL_ARRANGE_OFFSET_STEPS_MM:
+        for step in LABEL_OVERLAP_RESOLUTION_OFFSETS_MM:
             offsets.extend(
                 [
                     (step, 0.0),
@@ -706,6 +707,7 @@ class KiCadSchematic:
         return self._symbol_bbox_from_position(symbol["position"])
 
     def _symbol_bbox_from_position(self, position: dict[str, float]) -> BoundingBox:
+        # Approximate default symbol footprint for coarse overlap/connectivity risk detection.
         half_width = 5.0
         half_height = 4.0
         return BoundingBox(

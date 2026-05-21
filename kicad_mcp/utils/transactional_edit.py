@@ -63,6 +63,7 @@ def create_backup_manifest(
     """Create a timestamped backup directory with a manifest."""
     validate_local_directory(backup_root, must_exist=True)
 
+    # Include fractional seconds to avoid backup directory collisions during rapid successive edits.
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     backup_dir = os.path.join(backup_root, BACKUP_DIR_NAME, f"{backup_type}_{timestamp}")
     os.makedirs(backup_dir, exist_ok=False)

@@ -3,6 +3,9 @@ from pathlib import Path
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, parse_s_expression, validate_schematic_text
 
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "sample_schematic.kicad_sch"
+EXPECTED_REFERENCE_Y = 96.0
+EXPECTED_VALUE_Y = 104.0
+EXPECTED_FOOTPRINT_Y = 108.0
 
 
 def test_schematic_parse_and_serialize_round_trip_preserves_structure():
@@ -45,9 +48,9 @@ def test_auto_arrange_symbol_properties_arranges_properties_vertically():
 
     result = schematic.auto_arrange_symbol_properties("R1")
 
-    assert result["properties"]["Reference"]["position"]["y"] == 96.0
-    assert result["properties"]["Value"]["position"]["y"] == 104.0
-    assert result["properties"]["Footprint"]["position"]["y"] == 108.0
+    assert result["properties"]["Reference"]["position"]["y"] == EXPECTED_REFERENCE_Y
+    assert result["properties"]["Value"]["position"]["y"] == EXPECTED_VALUE_Y
+    assert result["properties"]["Footprint"]["position"]["y"] == EXPECTED_FOOTPRINT_Y
 
 
 def test_connectivity_risk_detects_attached_symbols_and_labels():
