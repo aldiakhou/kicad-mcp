@@ -1147,7 +1147,7 @@ class KiCadSchematic:
             raise ValueError("; ".join(cast(list[str], plan["refusals"])))
         moved_blocks = []
         for move in cast(list[dict[str, Any]], plan["safe_block_moves"]):
-            block = self._require_functional_block(move["block_id"])
+            block = self._require_functional_block_by_symbols(move["symbols"])
             moved_blocks.append(self._apply_block_move_plan(block, move["raw_plan"]))
         property_result = (
             self.auto_arrange_symbol_properties_all()
@@ -1800,7 +1800,7 @@ class KiCadSchematic:
 
         preview_model = KiCadSchematic.from_text(self.to_text())
         for move in safe_block_moves:
-            block = preview_model._require_functional_block(move["block_id"])
+            block = preview_model._require_functional_block_by_symbols(move["symbols"])
             preview_model._apply_block_move_plan(block, move["raw_plan"])
         property_preview = (
             preview_model.preview_auto_arrange_symbol_properties_all()

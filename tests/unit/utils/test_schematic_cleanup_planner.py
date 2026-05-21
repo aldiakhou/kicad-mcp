@@ -68,3 +68,16 @@ def test_auto_arrange_symbol_properties_all_moves_reference_and_value():
     )
     assert j1_reference["to"]["y"] < schematic.get_symbol("J1")["position"]["y"]
     assert j1_value["to"]["y"] > schematic.get_symbol("J1")["position"]["y"]
+
+
+def test_apply_cleanup_uses_preview_move_symbols_without_block_id_drift():
+    schematic = KiCadSchematic.from_file(str(FIXTURE_PATH))
+
+    preview = schematic.preview_cleanup()
+    result = schematic.apply_cleanup()
+
+    assert preview["success"] is True
+    assert [tuple(move["symbols"]) for move in preview["cleanup_plan"]["block_moves"]] == [
+        tuple(move["symbols"]) for move in result["blocks_moved"]
+    ]
+    assert ("J1", "R1") not in [tuple(move["symbols"]) for move in result["blocks_moved"]]
