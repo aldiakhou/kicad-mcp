@@ -1,6 +1,6 @@
 (kicad_sch
   (version 20231120)
-  (generator "pytest")
+  (generator "kicad_mcp_test")
   (paper "A4")
   (symbol
     (lib_id "Device:R")

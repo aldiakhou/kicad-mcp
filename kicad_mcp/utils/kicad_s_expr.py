@@ -59,7 +59,8 @@ SExprNode: TypeAlias = SExprAtom | SExprList
 LABEL_OVERLAP_RESOLUTION_OFFSETS_MM = (3.0, 6.0, 9.0, 12.0, 15.0)
 S_EXPRESSION_SPECIAL_CHARS = '()"'
 FLOAT_COMPARISON_TOLERANCE = 1e-9
-# Approximate average character width used only for rough text bounding boxes in overlap detection.
+# Approximate average character width heuristic for rough text bounding boxes in overlap detection.
+# This is intentionally coarse and assumes typical KiCad default text sizing, not exact font metrics.
 TEXT_CHAR_WIDTH_MM = 0.9
 DEFAULT_SYMBOL_HALF_WIDTH_MM = 5.0
 DEFAULT_SYMBOL_HALF_HEIGHT_MM = 4.0

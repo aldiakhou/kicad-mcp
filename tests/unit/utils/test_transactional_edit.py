@@ -89,4 +89,4 @@ def test_backup_project_files_and_restore_backup_manifest(tmp_path: Path):
 
     assert restore_result["success"] is True
     restored = schematic_path.read_text(encoding="utf-8")
-    assert "pytest" in restored
+    assert "kicad_mcp_test" in restored
