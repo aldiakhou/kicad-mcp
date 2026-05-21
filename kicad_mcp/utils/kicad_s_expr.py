@@ -73,6 +73,13 @@ JUNCTION_MARKER_HALF_SIZE_MM = 0.6
 BLOCK_CONFIDENCE_HIGH_THRESHOLD = 3
 BLOCK_CONFIDENCE_MEDIUM_THRESHOLD = 1
 SUPPORTED_CLEANUP_LAYOUT_STYLES = {"left_to_right"}
+BLOCK_LAYOUT_PRIORITY_USB = 0
+BLOCK_LAYOUT_PRIORITY_POWER = 1
+BLOCK_LAYOUT_PRIORITY_MCU = 2
+BLOCK_LAYOUT_PRIORITY_NFC = 3
+BLOCK_LAYOUT_PRIORITY_DISPLAY = 4
+BLOCK_LAYOUT_PRIORITY_HEADERS = 5
+BLOCK_LAYOUT_PRIORITY_OTHER = 6
 
 
 @dataclass(frozen=True)
@@ -1692,11 +1699,7 @@ class KiCadSchematic:
         spacing_y: float,
         layout_style: str | None = None,
     ) -> list[dict[str, Any]]:
-        sorted_blocks = (
-            self._sort_blocks_for_layout(blocks, layout_style)
-            if layout_style in SUPPORTED_CLEANUP_LAYOUT_STYLES
-            else sorted(blocks, key=lambda block: (block["bounds"]["top"], block["bounds"]["left"]))
-        )
+        sorted_blocks = self._sort_blocks_for_layout(blocks, layout_style)
         placements: list[dict[str, Any]] = []
         current_row_top = 0.0
         current_row_bottom = 0.0
@@ -2077,14 +2080,12 @@ class KiCadSchematic:
 
     def _sort_blocks_for_layout(self, blocks: list[dict[str, Any]], layout_style: str | None) -> list[dict[str, Any]]:
         if layout_style != "left_to_right":
-            return sorted(blocks, key=lambda block: (block["bounds"]["top"], block["bounds"]["left"]))
+            return sorted(blocks, key=self._default_block_sort_key)
         return sorted(
             blocks,
             key=lambda block: (
                 self._block_layout_priority(block),
-                block["bounds"]["top"],
-                block["bounds"]["left"],
-                tuple(block["symbols"]),
+                *self._default_block_sort_key(block),
             ),
         )
 
@@ -2098,20 +2099,23 @@ class KiCadSchematic:
                 label_texts.append(cast(str, self._label_to_dict(label)["text"]).upper())
         haystack = " ".join(refs + label_texts).upper()
         if name_hint == "USB-C / Connector block":
-            return 0
+            return BLOCK_LAYOUT_PRIORITY_USB
         if name_hint == "Power block":
-            return 1
+            return BLOCK_LAYOUT_PRIORITY_POWER
         if name_hint == "MCU block":
-            return 2
+            return BLOCK_LAYOUT_PRIORITY_MCU
         if name_hint == "NFC block":
-            return 3
+            return BLOCK_LAYOUT_PRIORITY_NFC
         if name_hint == "Display block":
-            return 4
+            return BLOCK_LAYOUT_PRIORITY_DISPLAY
         if any(reference.startswith(("J", "P", "H")) for reference in refs) or any(
             term in haystack for term in ("HEADER", "DEBUG", "SWD", "UART", "EXP")
         ):
-            return 5
-        return 6
+            return BLOCK_LAYOUT_PRIORITY_HEADERS
+        return BLOCK_LAYOUT_PRIORITY_OTHER
+
+    def _default_block_sort_key(self, block: dict[str, Any]) -> tuple[float, float, tuple[str, ...]]:
+        return (block["bounds"]["top"], block["bounds"]["left"], tuple(block["symbols"]))
 
     def _plan_symbol_property_arrangement(self, reference: str) -> list[dict[str, Any]]:
         symbol = self.get_symbol(reference)

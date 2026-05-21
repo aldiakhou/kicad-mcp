@@ -18,6 +18,12 @@ from .server import (
 __version__ = "0.1.0"
 __author__ = "Lama Al Rajih"
 __description__ = "Model Context Protocol server for KiCad on Mac, Windows, and Linux"
+_DELEGATED_PUBLIC_NAMES = {
+    name: getattr(module, name)
+    for module in (_server, _config, _context)
+    for name in dir(module)
+    if not name.startswith("_")
+}
 
 __all__ = [
     # Package metadata
@@ -39,18 +45,11 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     """Preserve package-level access to public names from legacy re-exports."""
-    for module in (_server, _config, _context):
-        if hasattr(module, name):
-            return getattr(module, name)
+    if name in _DELEGATED_PUBLIC_NAMES:
+        return _DELEGATED_PUBLIC_NAMES[name]
     raise AttributeError(f"module 'kicad_mcp' has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
     """Expose delegated public names for interactive discovery."""
-    delegated_names = {
-        name
-        for module in (_server, _config, _context)
-        for name in dir(module)
-        if not name.startswith("_")
-    }
-    return sorted(set(__all__) | delegated_names)
+    return sorted(set(__all__) | set(_DELEGATED_PUBLIC_NAMES))
