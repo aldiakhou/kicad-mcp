@@ -1,0 +1,122 @@
+(kicad_sch
+  (version 20231120)
+  (generator "kicad_mcp_test")
+  (paper "A4")
+  (symbol
+    (lib_id "Connector:USB_C_Receptacle")
+    (at 40 40 0)
+    (uuid "sym-j1")
+    (property "Reference" "J1"
+      (at 40 36 0)
+    )
+    (property "Value" "USB_C"
+      (at 40 44 0)
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 60 40 0)
+    (uuid "sym-r1")
+    (property "Reference" "R1"
+      (at 60 36 0)
+    )
+    (property "Value" "5k1"
+      (at 60 44 0)
+    )
+  )
+  (label "USB_D+"
+    (at 45 40 0)
+    (uuid "label-usb-dp")
+  )
+  (label "CC1"
+    (at 55 40 0)
+    (uuid "label-cc1")
+  )
+  (label "VBUS"
+    (at 20 40 0)
+    (uuid "label-vbus-ext")
+  )
+  (wire
+    (pts (xy 45 40) (xy 55 40))
+    (uuid "wire-usb-internal")
+  )
+  (wire
+    (pts (xy 35 40) (xy 20 40))
+    (uuid "wire-usb-boundary")
+  )
+  (symbol
+    (lib_id "Display:LCD")
+    (at 140 40 0)
+    (uuid "sym-ds1")
+    (property "Reference" "DS1"
+      (at 140 36 0)
+    )
+    (property "Value" "LCD"
+      (at 140 44 0)
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 160 40 0)
+    (uuid "sym-r2")
+    (property "Reference" "R2"
+      (at 160 36 0)
+    )
+    (property "Value" "10k"
+      (at 160 44 0)
+    )
+  )
+  (label "D4"
+    (at 145 40 0)
+    (uuid "label-lcd-d4")
+  )
+  (label "RS"
+    (at 155 40 0)
+    (uuid "label-lcd-rs")
+  )
+  (wire
+    (pts (xy 145 40) (xy 155 40))
+    (uuid "wire-lcd-internal")
+  )
+  (symbol
+    (lib_id "MCU:ESP32-S3")
+    (at 40 100 0)
+    (uuid "sym-u1")
+    (property "Reference" "U1"
+      (at 40 96 0)
+    )
+    (property "Value" "ESP32-S3"
+      (at 40 104 0)
+    )
+  )
+  (label "TX"
+    (at 20 115 0)
+    (uuid "label-mcu-tx")
+  )
+  (wire
+    (pts (xy 35 100) (xy 20 100) (xy 20 115))
+    (uuid "wire-mcu-boundary")
+  )
+  (symbol
+    (lib_id "RFID:PN532")
+    (at 140 100 0)
+    (uuid "sym-u2")
+    (property "Reference" "U2"
+      (at 140 96 0)
+    )
+    (property "Value" "PN532"
+      (at 140 104 0)
+    )
+  )
+  (label "IRQ"
+    (at 120 100 0)
+    (uuid "label-nfc-irq")
+  )
+  (wire
+    (pts (xy 135 100) (xy 120 100))
+    (uuid "wire-nfc-boundary")
+  )
+  (junction
+    (xy 135 100)
+  )
+)
