@@ -8,7 +8,7 @@ _temp_dirs: List[str] = []
 
 def register_temp_dir(temp_dir: str) -> None:
     """Register a temporary directory for cleanup.
-    
+
     Args:
         temp_dir: Path to the temporary directory
     """
@@ -17,7 +17,7 @@ def register_temp_dir(temp_dir: str) -> None:
 
 def get_temp_dirs() -> List[str]:
     """Get all registered temporary directories.
-    
+
     Returns:
         List of temporary directory paths
     """

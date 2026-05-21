@@ -1,16 +1,17 @@
 """
 Prompt templates for KiCad interactions.
 """
-from mcp.server.fastmcp import FastMCP
+
+from fastmcp import FastMCP
 
 
 def register_prompts(mcp: FastMCP) -> None:
     """Register prompt templates with the MCP server.
-    
+
     Args:
         mcp: The FastMCP server instance
     """
-    
+
     @mcp.prompt()
     def create_new_component() -> str:
         """Prompt for creating a new KiCad component."""
@@ -24,7 +25,7 @@ def register_prompts(mcp: FastMCP) -> None:
 
         Please provide step-by-step instructions on how to create a new component in KiCad.
         """
-        
+
         return prompt
 
     @mcp.prompt()
@@ -40,7 +41,7 @@ def register_prompts(mcp: FastMCP) -> None:
 
         Please provide a systematic approach to identifying and fixing these issues in KiCad.
         """
-        
+
         return prompt
 
     @mcp.prompt()
@@ -57,3 +58,5 @@ def register_prompts(mcp: FastMCP) -> None:
 
         Please provide a detailed checklist I can follow to ensure my design is ready for manufacturing.
         """
+
+        return prompt
