@@ -1294,19 +1294,19 @@ class KiCadSchematic:
         enriched_blocks: list[dict[str, Any]] = []
         for block in merged_blocks:
             for symbol_ref in cast(set[str], block["symbols"]):
-                symbol = self.get_symbol(symbol_ref)
-                if symbol is None:
+                symbol_data = self.get_symbol(symbol_ref)
+                if symbol_data is None:
                     continue
-                cast(set[str], block["symbol_properties"]).update(self._attached_property_ids(symbol))
+                cast(set[str], block["symbol_properties"]).update(self._attached_property_ids(symbol_data))
             for wire_uuid, claimed_indices in cast(dict[str, set[int]], block["wire_claims"]).items():
-                wire = self._get_wire_by_uuid(wire_uuid)
-                if wire is None:
+                wire_data = self._get_wire_by_uuid(wire_uuid)
+                if wire_data is None:
                     continue
                 endpoint_indices = set(claimed_indices)
-                if endpoint_indices and 0 in endpoint_indices and len(wire["points"]) - 1 in endpoint_indices:
-                    endpoint_indices = {0, len(wire["points"]) - 1}
+                if endpoint_indices and 0 in endpoint_indices and len(wire_data["points"]) - 1 in endpoint_indices:
+                    endpoint_indices = {0, len(wire_data["points"]) - 1}
                 for endpoint_index in endpoint_indices:
-                    point = wire["points"][endpoint_index]
+                    point = wire_data["points"][endpoint_index]
                     for label in self._labels_touching_point(point["x"], point["y"]):
                         label_uuid = label.get("uuid")
                         if label_uuid is not None:
