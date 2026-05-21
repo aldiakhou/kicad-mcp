@@ -198,6 +198,28 @@ Detailed documentation for each feature is available in the `docs/` directory:
 - [Circuit Pattern Recognition](docs/pattern_guide.md)
 - [Prompt Templates](docs/prompt_guide.md)
 - [Safe Schematic Editing](docs/schematic_edit_guide.md)
+- [ChatGPT Desktop MCP Setup](docs/chatgpt_desktop_setup.md)
+
+## Safe editing guarantees and limitations
+
+The schematic cleanup workflow is designed around a conservative sequence:
+
+1. inspect the schematic
+2. create a backup before any write
+3. preview block/property cleanup
+4. refuse unsafe block moves
+5. validate syntax after writes
+6. validate CLI SVG export when KiCad CLI is available
+7. export a final SVG preview
+8. roll back automatically if validation fails
+
+Current limitations:
+
+- No PCB routing edits yet
+- No automatic symbol rotation with attached wires
+- No complex multi-segment boundary wire movement yet
+- No mid-segment label movement yet
+- Block detection is geometric and heuristic, not full ERC/netlist-aware
 
 ## Configuration
 

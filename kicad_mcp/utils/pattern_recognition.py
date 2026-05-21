@@ -3,10 +3,15 @@ Circuit pattern recognition functions for KiCad schematics.
 """
 
 import re
-from typing import Dict, List, Any
-from kicad_mcp.utils.component_utils import extract_voltage_from_regulator, extract_frequency_from_value
+from typing import Any
 
-def identify_power_supplies(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
+from kicad_mcp.utils.component_utils import (
+    extract_frequency_from_value,
+    extract_voltage_from_regulator,
+)
+
+
+def identify_power_supplies(components: dict[str, Any], nets: dict[str, Any]) -> list[dict[str, Any]]:
     """Identify power supply circuits in the schematic.
 
     Args:
@@ -75,7 +80,7 @@ def identify_power_supplies(components: Dict[str, Any], nets: Dict[str, Any]) ->
     return power_supplies
 
 
-def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
+def identify_amplifiers(components: dict[str, Any], nets: dict[str, Any]) -> list[dict[str, Any]]:
     """Identify amplifier circuits in the schematic.
 
     Args:
@@ -133,7 +138,7 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
                     })
 
     # Look for transistor amplifiers
-    transistor_refs = [ref for ref in components.keys() if ref.startswith('Q')]
+    transistor_refs = [ref for ref in components if ref.startswith('Q')]
 
     for ref in transistor_refs:
         component = components[ref]
@@ -143,13 +148,13 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
         if 'BJT' in component_lib or 'NPN' in component_lib or 'PNP' in component_lib:
             # Look for resistors connected to transistor (biasing network)
             has_biasing = False
-            for net_name, pins in nets.items():
+            for pins in nets.values():
                 # Check if this net connects to our transistor
-                if any(pin.get('component') == ref for pin in pins):
-                    # Check if the net also connects to resistors
-                    if any(pin.get('component', '').startswith('R') for pin in pins):
-                        has_biasing = True
-                        break
+                if any(pin.get('component') == ref for pin in pins) and any(
+                    pin.get('component', '').startswith('R') for pin in pins
+                ):
+                    has_biasing = True
+                    break
 
             if has_biasing:
                 amplifiers.append({
@@ -162,11 +167,12 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
         elif 'FET' in component_lib or 'MOSFET' in component_lib or 'JFET' in component_lib:
             # Similar check for FET amplifiers
             has_biasing = False
-            for net_name, pins in nets.items():
-                if any(pin.get('component') == ref for pin in pins):
-                    if any(pin.get('component', '').startswith('R') for pin in pins):
-                        has_biasing = True
-                        break
+            for pins in nets.values():
+                if any(pin.get('component') == ref for pin in pins) and any(
+                    pin.get('component', '').startswith('R') for pin in pins
+                ):
+                    has_biasing = True
+                    break
 
             if has_biasing:
                 amplifiers.append({
@@ -196,7 +202,7 @@ def identify_amplifiers(components: Dict[str, Any], nets: Dict[str, Any]) -> Lis
     return amplifiers
 
 
-def identify_filters(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
+def identify_filters(components: dict[str, Any], nets: dict[str, Any]) -> list[dict[str, Any]]:
     """Identify filter circuits in the schematic.
 
     Args:
@@ -210,9 +216,7 @@ def identify_filters(components: Dict[str, Any], nets: Dict[str, Any]) -> List[D
 
     # Look for RC low-pass filters
     # These typically have a resistor followed by a capacitor to ground
-    resistor_refs = [ref for ref in components.keys() if ref.startswith('R')]
-    capacitor_refs = [ref for ref in components.keys() if ref.startswith('C')]
-
+    resistor_refs = [ref for ref in components if ref.startswith('R')]
     for r_ref in resistor_refs:
         r_nets = []
         # Find which nets this resistor is connected to
@@ -266,7 +270,7 @@ def identify_filters(components: Dict[str, Any], nets: Dict[str, Any]) -> List[D
         has_feedback_r = False
         has_feedback_c = False
 
-        for net_name, pins in nets.items():
+        for pins in nets.values():
             # If this net connects to our op-amp
             if any(pin.get('component') == op_ref for pin in pins):
                 # Check if it also connects to resistors and capacitors
@@ -307,7 +311,7 @@ def identify_filters(components: Dict[str, Any], nets: Dict[str, Any]) -> List[D
     return filters
 
 
-def identify_oscillators(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
+def identify_oscillators(components: dict[str, Any], nets: dict[str, Any]) -> list[dict[str, Any]]:
     """Identify oscillator circuits in the schematic.
 
     Args:
@@ -373,7 +377,7 @@ def identify_oscillators(components: Dict[str, Any], nets: Dict[str, Any]) -> Li
     return oscillators
 
 
-def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
+def identify_digital_interfaces(components: dict[str, Any], nets: dict[str, Any]) -> list[dict[str, Any]]:
     """Identify digital interface circuits in the schematic.
 
     Args:
@@ -389,7 +393,7 @@ def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]
     i2c_signals = {"SCL", "SDA", "I2C_SCL", "I2C_SDA"}
     has_i2c = False
 
-    for net_name in nets.keys():
+    for net_name in nets:
         if any(signal in net_name.upper() for signal in i2c_signals):
             has_i2c = True
             break
@@ -397,14 +401,14 @@ def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]
     if has_i2c:
         interfaces.append({
             "type": "i2c_interface",
-            "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in i2c_signals)]
+            "signals_found": [net for net in nets if any(signal in net.upper() for signal in i2c_signals)]
         })
 
     # SPI interface detection
     spi_signals = {"MOSI", "MISO", "SCK", "SS", "SPI_MOSI", "SPI_MISO", "SPI_SCK", "SPI_CS"}
     has_spi = False
 
-    for net_name in nets.keys():
+    for net_name in nets:
         if any(signal in net_name.upper() for signal in spi_signals):
             has_spi = True
             break
@@ -412,14 +416,14 @@ def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]
     if has_spi:
         interfaces.append({
             "type": "spi_interface",
-            "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in spi_signals)]
+            "signals_found": [net for net in nets if any(signal in net.upper() for signal in spi_signals)]
         })
 
     # UART interface detection
     uart_signals = {"TX", "RX", "TXD", "RXD", "UART_TX", "UART_RX"}
     has_uart = False
 
-    for net_name in nets.keys():
+    for net_name in nets:
         if any(signal in net_name.upper() for signal in uart_signals):
             has_uart = True
             break
@@ -427,20 +431,20 @@ def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]
     if has_uart:
         interfaces.append({
             "type": "uart_interface",
-            "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in uart_signals)]
+            "signals_found": [net for net in nets if any(signal in net.upper() for signal in uart_signals)]
         })
 
     # USB interface detection
     usb_signals = {"USB_D+", "USB_D-", "USB_DP", "USB_DM", "D+", "D-", "DP", "DM", "VBUS"}
     has_usb = False
 
-    for net_name in nets.keys():
+    for net_name in nets:
         if any(signal in net_name.upper() for signal in usb_signals):
             has_usb = True
             break
 
     # Also check for USB interface ICs
-    for ref, component in components.items():
+    for component in components.values():
         component_value = component.get('value', '').upper()
         if re.search(r"FT232|CH340|CP210|MCP2200|TUSB|FT231|FT201", component_value, re.IGNORECASE):
             has_usb = True
@@ -449,20 +453,20 @@ def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]
     if has_usb:
         interfaces.append({
             "type": "usb_interface",
-            "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in usb_signals)]
+            "signals_found": [net for net in nets if any(signal in net.upper() for signal in usb_signals)]
         })
 
     # Ethernet interface detection
     ethernet_signals = {"TX+", "TX-", "RX+", "RX-", "MDI", "MDIO", "ETH"}
     has_ethernet = False
 
-    for net_name in nets.keys():
+    for net_name in nets:
         if any(signal in net_name.upper() for signal in ethernet_signals):
             has_ethernet = True
             break
 
     # Also check for Ethernet PHY ICs
-    for ref, component in components.items():
+    for component in components.values():
         component_value = component.get('value', '').upper()
         if re.search(r"W5500|ENC28J60|LAN87|KSZ80|DP83|RTL8|AX88", component_value, re.IGNORECASE):
             has_ethernet = True
@@ -471,13 +475,13 @@ def identify_digital_interfaces(components: Dict[str, Any], nets: Dict[str, Any]
     if has_ethernet:
         interfaces.append({
             "type": "ethernet_interface",
-            "signals_found": [net for net in nets.keys() if any(signal in net.upper() for signal in ethernet_signals)]
+            "signals_found": [net for net in nets if any(signal in net.upper() for signal in ethernet_signals)]
         })
 
     return interfaces
 
 
-def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any]) -> List[Dict[str, Any]]:
+def identify_sensor_interfaces(components: dict[str, Any], nets: dict[str, Any]) -> list[dict[str, Any]]:
     """Identify sensor interface circuits in the schematic.
 
     Args:
@@ -656,7 +660,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
 
     # Look for common analog sensors
     # These often don't have specific ICs but have designators like "RT" for thermistors
-    thermistor_refs = [ref for ref in components.keys() if ref.startswith('RT') or ref.startswith('TH')]
+    thermistor_refs = [ref for ref in components if ref.startswith('RT') or ref.startswith('TH')]
     for ref in thermistor_refs:
         component = components[ref]
         sensor_interfaces.append({
@@ -668,7 +672,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
         })
 
     # Look for photodiodes, photoresistors (LDRs)
-    photosensor_refs = [ref for ref in components.keys() if ref.startswith('PD') or ref.startswith('LDR')]
+    photosensor_refs = [ref for ref in components if ref.startswith('PD') or ref.startswith('LDR')]
     for ref in photosensor_refs:
         component = components[ref]
         sensor_interfaces.append({
@@ -680,7 +684,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
         })
 
     # Look for potentiometers (often used for manual sensing/control)
-    pot_refs = [ref for ref in components.keys() if ref.startswith('RV') or ref.startswith('POT')]
+    pot_refs = [ref for ref in components if ref.startswith('RV') or ref.startswith('POT')]
     for ref in pot_refs:
         component = components[ref]
         sensor_interfaces.append({
@@ -694,7 +698,7 @@ def identify_sensor_interfaces(components: Dict[str, Any], nets: Dict[str, Any])
     return sensor_interfaces
 
 
-def identify_microcontrollers(components: Dict[str, Any]) -> List[Dict[str, Any]]:
+def identify_microcontrollers(components: dict[str, Any]) -> list[dict[str, Any]]:
     """Identify microcontroller circuits in the schematic.
 
     Args:

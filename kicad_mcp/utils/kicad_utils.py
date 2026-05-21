@@ -1,18 +1,18 @@
 """
 KiCad-specific utility functions.
 """
+import logging  # Import logging
 import os
-import logging # Import logging
 import subprocess
-import sys # Add sys import
-from typing import Dict, List, Any
+import sys  # Add sys import
+from typing import Any
 
 from kicad_mcp import config
 
 # Get PID for logging - Removed, handled by logging config
 # _PID = os.getpid()
 
-def find_kicad_projects() -> List[Dict[str, Any]]:
+def find_kicad_projects() -> list[dict[str, Any]]:
     """Find KiCad projects in the user's directory.
 
     Returns:
@@ -85,7 +85,7 @@ def get_project_name_from_path(project_path: str) -> str:
     return basename[:-len(config.KICAD_EXTENSIONS["project"])]
 
 
-def open_kicad_project(project_path: str) -> Dict[str, Any]:
+def open_kicad_project(project_path: str) -> dict[str, Any]:
     """Open a KiCad project using the KiCad application.
 
     Args:

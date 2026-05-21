@@ -1,11 +1,11 @@
 """
 Environment variable handling for KiCad MCP Server.
 """
-import os
 import logging
-from typing import Dict, Optional
+import os
 
-def load_dotenv(env_file: str = ".env") -> Dict[str, str]:
+
+def load_dotenv(env_file: str = ".env") -> dict[str, str]:
     """Load environment variables from .env file.
 
     Args:
@@ -27,7 +27,7 @@ def load_dotenv(env_file: str = ".env") -> Dict[str, str]:
     logging.info(f"Found .env file at: {env_path}")
 
     try:
-        with open(env_path, 'r') as f:
+        with open(env_path) as f:
             logging.info(f"Successfully opened {env_path} for reading.")
             line_num = 0
             for line in f:
@@ -47,9 +47,7 @@ def load_dotenv(env_file: str = ".env") -> Dict[str, str]:
                     logging.debug(f"Parsed line {line_num}: Key='{key}', RawValue='{value}'")
 
                     # Remove quotes if present
-                    if value.startswith('"') and value.endswith('"'):
-                        value = value[1:-1]
-                    elif value.startswith("'") and value.endswith("'"):
+                    if value.startswith('"') and value.endswith('"') or value.startswith("'") and value.endswith("'"):
                         value = value[1:-1]
 
                     # Expand ~ to user's home directory
@@ -67,14 +65,14 @@ def load_dotenv(env_file: str = ".env") -> Dict[str, str]:
                     logging.warning(f"Skipping line {line_num} (no '=' found): {line}")
             logging.info(f"Finished processing {env_path}")
 
-    except Exception as e:
+    except Exception:
         # Use logging.exception to include traceback
         logging.exception(f"Error loading .env file '{env_path}'")
 
     logging.info(f"load_dotenv returning: {env_vars}")
     return env_vars
 
-def find_env_file(filename: str = ".env") -> Optional[str]:
+def find_env_file(filename: str = ".env") -> str | None:
     """Find a .env file in the current directory or parent directories.
 
     Args:

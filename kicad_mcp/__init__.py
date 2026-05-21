@@ -3,9 +3,14 @@ KiCad MCP Server.
 
 A Model Context Protocol (MCP) server for KiCad electronic design automation (EDA) files.
 """
-from .server import *
-from .config import *
-from .context import *
+
+from .context import KiCadAppContext, kicad_lifespan
+from .server import (
+    add_cleanup_handler,
+    create_server,
+    run_cleanup_handlers,
+    shutdown_server,
+)
 
 __version__ = "0.1.0"
 __author__ = "Lama Al Rajih"

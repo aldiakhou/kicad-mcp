@@ -2,7 +2,8 @@
 Utility functions for working with KiCad component values and properties.
 """
 import re
-from typing import Any, Optional, Tuple, Union, Dict
+from typing import Any
+
 
 def extract_voltage_from_regulator(value: str) -> str:
     """Extract output voltage from a voltage regulator part number or description.
@@ -144,7 +145,7 @@ def extract_frequency_from_value(value: str) -> str:
     return "unknown"
 
 
-def extract_resistance_value(value: str) -> Tuple[Optional[float], Optional[str]]:
+def extract_resistance_value(value: str) -> tuple[float | None, str | None]:
     """Extract resistance value and unit from component value.
 
     Args:
@@ -185,7 +186,7 @@ def extract_resistance_value(value: str) -> Tuple[Optional[float], Optional[str]
     return None, None
 
 
-def extract_capacitance_value(value: str) -> Tuple[Optional[float], Optional[str]]:
+def extract_capacitance_value(value: str) -> tuple[float | None, str | None]:
     """Extract capacitance value and unit from component value.
 
     Args:
@@ -240,7 +241,7 @@ def extract_capacitance_value(value: str) -> Tuple[Optional[float], Optional[str
     return None, None
 
 
-def extract_inductance_value(value: str) -> Tuple[Optional[float], Optional[str]]:
+def extract_inductance_value(value: str) -> tuple[float | None, str | None]:
     """Extract inductance value and unit from component value.
 
     Args:
@@ -394,7 +395,7 @@ def get_component_type_from_reference(reference: str) -> str:
     return ""
 
 
-def is_power_component(component: Dict[str, Any]) -> bool:
+def is_power_component(component: dict[str, Any]) -> bool:
     """Check if a component is likely a power-related component.
 
     Args:
@@ -426,8 +427,4 @@ def is_power_component(component: Dict[str, Any]) -> bool:
         r"MCP\d{4}",  # MCP1700, etc.
     ]
 
-    if any(re.search(pattern, value, re.IGNORECASE) for pattern in regulator_patterns):
-        return True
-
-    # Not identified as a power component
-    return False
+    return any(re.search(pattern, value, re.IGNORECASE) for pattern in regulator_patterns)
