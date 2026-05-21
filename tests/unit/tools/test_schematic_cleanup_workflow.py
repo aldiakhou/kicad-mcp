@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 import shutil
 
@@ -27,12 +28,11 @@ def patch_cli_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.mark.asyncio
-async def test_cleanup_workflow_preview_is_read_only(patch_cli_validation: None, tmp_path: Path):
+def test_cleanup_workflow_preview_is_read_only(patch_cli_validation: None, tmp_path: Path):
     schematic_path = _copy_fixture(tmp_path)
     original_text = schematic_path.read_text(encoding="utf-8")
     server = create_server()
-    tools = await server.get_tools()
+    tools = asyncio.run(server.get_tools())
 
     result = tools["schematic_preview_cleanup"].fn(str(schematic_path))
 
@@ -41,11 +41,10 @@ async def test_cleanup_workflow_preview_is_read_only(patch_cli_validation: None,
     assert schematic_path.read_text(encoding="utf-8") == original_text
 
 
-@pytest.mark.asyncio
-async def test_cleanup_workflow_refuses_unsafe_moves(patch_cli_validation: None, tmp_path: Path):
+def test_cleanup_workflow_refuses_unsafe_moves(patch_cli_validation: None, tmp_path: Path):
     schematic_path = _copy_fixture(tmp_path, UNSAFE_FIXTURE_PATH)
     server = create_server()
-    tools = await server.get_tools()
+    tools = asyncio.run(server.get_tools())
 
     result = tools["schematic_preview_cleanup"].fn(str(schematic_path))
 

@@ -27,7 +27,7 @@ def load_dotenv(env_file: str = ".env") -> dict[str, str]:
     logging.info(f"Found .env file at: {env_path}")
 
     try:
-        with open(env_path) as f:
+        with open(env_path, encoding="utf-8") as f:
             logging.info(f"Successfully opened {env_path} for reading.")
             line_num = 0
             for line in f:
