@@ -104,3 +104,25 @@ def test_move_block_refuses_when_preview_is_unsafe():
 
     with pytest.raises(ValueError, match="straight 2-point wire"):
         schematic.move_block(mcu_block["block_id"], 10.0, 0.0)
+
+
+def test_preview_auto_spread_blocks_refuses_partial_spread_without_mutation():
+    schematic = KiCadSchematic.from_file(str(FIXTURE_PATH))
+    original_text = schematic.to_text()
+
+    preview = schematic.preview_auto_spread_blocks()
+
+    assert preview["success"] is False
+    assert any("block_003" in refusal for refusal in preview["refusals"])
+    assert any("block_004" in refusal for refusal in preview["refusals"])
+    assert schematic.to_text() == original_text
+
+
+def test_auto_spread_blocks_raises_before_partial_mutation():
+    schematic = KiCadSchematic.from_file(str(FIXTURE_PATH))
+    original_text = schematic.to_text()
+
+    with pytest.raises(ValueError, match="block_003"):
+        schematic.auto_spread_blocks()
+
+    assert schematic.to_text() == original_text

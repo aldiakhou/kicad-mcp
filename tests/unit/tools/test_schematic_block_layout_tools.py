@@ -14,6 +14,18 @@ def _copy_fixture(tmp_path: Path) -> Path:
     return schematic_path
 
 
+def _copy_safe_auto_spread_fixture(tmp_path: Path) -> Path:
+    schematic_path = _copy_fixture(tmp_path)
+    text = schematic_path.read_text(encoding="utf-8")
+    text = text.replace(
+        '(pts (xy 35 100) (xy 20 100) (xy 20 115))',
+        '(pts (xy 35 100) (xy 20 100))',
+    )
+    text = text.replace('  (junction\n    (xy 135 100)\n  )\n', "")
+    schematic_path.write_text(text, encoding="utf-8")
+    return schematic_path
+
+
 def _get_block_by_symbols(blocks: list[dict], *symbols: str) -> dict:
     wanted = sorted(symbols)
     return next(block for block in blocks if block["symbols"] == wanted)
@@ -90,4 +102,44 @@ async def test_block_tools_refuse_unsafe_moves_and_roll_back(
     assert rollback_result["success"] is False
     assert rollback_result["rolled_back"] is True
     assert "forced block validation failure" in rollback_result["error"]
+    assert schematic_path.read_text(encoding="utf-8") == original_text
+
+
+@pytest.mark.asyncio
+async def test_auto_spread_tool_refuses_partial_spreads(
+    patch_cli_validation: None, tmp_path: Path
+):
+    schematic_path = _copy_fixture(tmp_path)
+    original_text = schematic_path.read_text(encoding="utf-8")
+    server = create_server()
+    tools = await server.get_tools()
+
+    result = await tools["schematic_auto_spread_blocks"].fn(str(schematic_path), 35.0, 25.0, True, None)
+
+    assert result["success"] is False
+    assert any("block_003" in refusal for refusal in result["refusals"])
+    assert schematic_path.read_text(encoding="utf-8") == original_text
+
+
+@pytest.mark.asyncio
+async def test_auto_spread_tool_rolls_back_on_forced_validation_failure(
+    monkeypatch: pytest.MonkeyPatch, patch_cli_validation: None, tmp_path: Path
+):
+    schematic_path = _copy_safe_auto_spread_fixture(tmp_path)
+    original_text = schematic_path.read_text(encoding="utf-8")
+    server = create_server()
+    tools = await server.get_tools()
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.schematic_edit_tools._build_multi_block_validator",
+        lambda *args, **kwargs: (
+            lambda path: {"success": False, "reason": "forced auto-spread validation failure"}
+        ),
+    )
+
+    result = await tools["schematic_auto_spread_blocks"].fn(str(schematic_path), 35.0, 25.0, True, None)
+
+    assert result["success"] is False
+    assert result["rolled_back"] is True
+    assert "forced auto-spread validation failure" in result["error"]
     assert schematic_path.read_text(encoding="utf-8") == original_text

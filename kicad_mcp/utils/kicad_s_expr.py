@@ -886,22 +886,52 @@ class KiCadSchematic:
         """Spread functional blocks using translation-only moves."""
         if not preserve_connectivity:
             raise ValueError("Only connectivity-preserving block spreading is supported.")
+        preview = self.preview_auto_spread_blocks(spacing_x, spacing_y, preserve_connectivity)
+        if preview["refusals"]:
+            raise ValueError("; ".join(cast(list[str], preview["refusals"])))
+        moved_blocks = []
+        for move in cast(list[dict[str, Any]], preview["moves"]):
+            block = self._require_functional_block(move["block_id"])
+            plan = self._plan_block_move(block, move["dx"], move["dy"])
+            moved_blocks.append(self._apply_block_move_plan(block, plan))
+        return {"moved_blocks": moved_blocks, "refusals": []}
+
+    def preview_auto_spread_blocks(
+        self,
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Preview a translation-only block spread without mutating."""
+        if not preserve_connectivity:
+            return {
+                "success": False,
+                "moves": [],
+                "refusals": ["Only connectivity-preserving block spreading is supported."],
+            }
         blocks = self._discover_functional_blocks()
         placements = self._plan_block_spread(blocks, spacing_x, spacing_y)
-        moved_blocks: list[dict[str, Any]] = []
+        moves: list[dict[str, Any]] = []
         refusals: list[str] = []
         for placement in placements:
             if self._is_zero_translation(placement["dx"], placement["dy"]):
                 continue
-            block = self._require_functional_block_by_symbols(placement["symbols"])
+            block = self._require_functional_block(placement["block_id"])
             plan = self._plan_block_move(block, placement["dx"], placement["dy"])
             if plan["refusals"]:
                 refusals.extend(
                     f"{block['block_id']}: {refusal}" for refusal in cast(list[str], plan["refusals"])
                 )
                 continue
-            moved_blocks.append(self._apply_block_move_plan(block, plan))
-        return {"moved_blocks": moved_blocks, "refusals": refusals}
+            moves.append(
+                {
+                    "block_id": block["block_id"],
+                    "dx": placement["dx"],
+                    "dy": placement["dy"],
+                    "planned_changes": self._public_block_move_plan(plan),
+                }
+            )
+        return {"success": not refusals, "moves": moves, "refusals": refusals}
 
     def move_symbol_property(
         self,
