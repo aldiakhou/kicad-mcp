@@ -11,7 +11,11 @@ from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
 
 from kicad_mcp.utils.file_utils import get_project_files
-from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, compare_connectivity_snapshots
+from kicad_mcp.utils.kicad_s_expr import (
+    KiCadSchematic,
+    compare_block_connectivity_snapshots,
+    compare_connectivity_snapshots,
+)
 from kicad_mcp.utils.path_validator import PathValidator
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import (
@@ -292,6 +296,99 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
             return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
 
     @mcp.tool()
+    def schematic_find_functional_blocks(schematic_path: str) -> dict[str, Any]:
+        """Return conservative functional block candidates."""
+        try:
+            schematic = _load_schematic(schematic_path)
+            return {
+                "success": True,
+                "schematic_path": schematic_path,
+                "blocks": schematic.find_functional_blocks(),
+            }
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    def schematic_get_block(schematic_path: str, block_id: str) -> dict[str, Any]:
+        """Return one functional block candidate by block id."""
+        try:
+            schematic = _load_schematic(schematic_path)
+            return {
+                "success": True,
+                "schematic_path": schematic_path,
+                "block": schematic.get_functional_block(block_id),
+            }
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    def schematic_preview_block_move(
+        schematic_path: str,
+        block_id: str,
+        dx: float,
+        dy: float,
+    ) -> dict[str, Any]:
+        """Preview a block translation without mutating the schematic."""
+        try:
+            schematic = _load_schematic(schematic_path)
+            preview = schematic.preview_block_move(block_id, dx, dy)
+            return {"schematic_path": schematic_path, **preview}
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    async def schematic_move_block(
+        schematic_path: str,
+        block_id: str,
+        dx: float,
+        dy: float,
+        preserve_connectivity: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Move a functional block transactionally."""
+        try:
+            if ctx:
+                await ctx.info(f"Moving block {block_id}")
+            schematic = _load_schematic(schematic_path)
+            preview = schematic.preview_block_move(block_id, dx, dy, preserve_connectivity)
+            if not preview["success"]:
+                return {
+                    "success": False,
+                    "schematic_path": schematic_path,
+                    "block_id": block_id,
+                    "error": "; ".join(preview["planned_changes"]["refusals"]),
+                    "refusals": preview["planned_changes"]["refusals"],
+                }
+            before_snapshot = schematic.block_connectivity_snapshot(block_id)
+            return _transactional_edit(
+                schematic_path,
+                lambda loaded: loaded.move_block(block_id, dx, dy, preserve_connectivity),
+                ctx=ctx,
+                post_write_validator=_build_block_validator(before_snapshot),
+            )
+        except Exception as exc:
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    async def schematic_auto_spread_blocks(
+        schematic_path: str,
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        preserve_connectivity: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Spread functional blocks transactionally."""
+        if ctx:
+            await ctx.info("Auto-spreading blocks")
+        return _transactional_edit(
+            schematic_path,
+            lambda schematic: {
+                "auto_spread": schematic.auto_spread_blocks(spacing_x, spacing_y, preserve_connectivity)
+            },
+            ctx=ctx,
+        )
+
+    @mcp.tool()
     async def schematic_move_symbol_property(
         schematic_path: str,
         reference: str,
@@ -470,6 +567,24 @@ def _build_connectivity_validator(
             "success": comparison["preserved"],
             "reason": comparison["reason"],
             "connectivity_snapshot": "preserved" if comparison["preserved"] else "changed",
+            "before": before_snapshot,
+            "after": after_snapshot,
+        }
+
+    return validator
+
+
+def _build_block_validator(before_snapshot: dict[str, Any]) -> Any:
+    symbol_refs = before_snapshot["internal_symbols"]
+
+    def validator(schematic_path: str) -> dict[str, Any]:
+        schematic = _load_schematic(schematic_path)
+        after_snapshot = schematic.block_connectivity_snapshot(symbol_refs=symbol_refs)
+        comparison = compare_block_connectivity_snapshots(before_snapshot, after_snapshot)
+        return {
+            "success": comparison["preserved"],
+            "reason": comparison["reason"],
+            "block_connectivity": "preserved" if comparison["preserved"] else "changed",
             "before": before_snapshot,
             "after": after_snapshot,
         }

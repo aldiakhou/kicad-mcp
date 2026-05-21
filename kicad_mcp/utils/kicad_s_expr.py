@@ -66,6 +66,8 @@ SYMBOL_CONNECTION_SEARCH_PADDING_MM = 2.5
 TEXT_CHAR_WIDTH_MM = 0.9
 DEFAULT_SYMBOL_HALF_WIDTH_MM = 5.0
 DEFAULT_SYMBOL_HALF_HEIGHT_MM = 4.0
+BLOCK_PROPERTY_ATTACHMENT_PADDING_MM = 12.0
+JUNCTION_MARKER_HALF_SIZE_MM = 0.6
 
 
 @dataclass(frozen=True)
@@ -807,6 +809,98 @@ class KiCadSchematic:
             "changed_objects": changed_objects,
         }
 
+    def find_functional_blocks(self) -> list[dict[str, Any]]:
+        """Return conservative functional block candidates."""
+        return [self._public_block(block) for block in self._discover_functional_blocks()]
+
+    def get_functional_block(self, block_id: str) -> dict[str, Any]:
+        """Return one functional block candidate by block id."""
+        return self._public_block(self._require_functional_block(block_id))
+
+    def block_connectivity_snapshot(
+        self,
+        block_id: str | None = None,
+        *,
+        symbol_refs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return a coarse snapshot for one functional block."""
+        block = (
+            self._require_functional_block(block_id)
+            if block_id is not None
+            else self._require_functional_block_by_symbols(symbol_refs)
+        )
+        return self._block_connectivity_snapshot_from_block(block)
+
+    def preview_block_move(
+        self,
+        block_id: str,
+        dx: float,
+        dy: float,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Preview a translation-only functional block move without mutating."""
+        if not preserve_connectivity:
+            return {
+                "success": False,
+                "block_id": block_id,
+                "dx": dx,
+                "dy": dy,
+                "planned_changes": {"refusals": ["Only connectivity-preserving block moves are supported."]},
+            }
+        block = self._require_functional_block(block_id)
+        plan = self._plan_block_move(block, dx, dy)
+        return {
+            "success": not plan["refusals"],
+            "block_id": block_id,
+            "dx": dx,
+            "dy": dy,
+            "planned_changes": self._public_block_move_plan(plan),
+        }
+
+    def move_block(
+        self,
+        block_id: str,
+        dx: float,
+        dy: float,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Move a functional block conservatively while preserving local connectivity."""
+        if not preserve_connectivity:
+            raise ValueError("Only connectivity-preserving block moves are supported.")
+        block = self._require_functional_block(block_id)
+        plan = self._plan_block_move(block, dx, dy)
+        if plan["refusals"]:
+            raise ValueError("; ".join(plan["refusals"]))
+        return self._apply_block_move_plan(block, plan)
+
+    def auto_spread_blocks(
+        self,
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Spread functional blocks using translation-only moves."""
+        if not preserve_connectivity:
+            raise ValueError("Only connectivity-preserving block spreading is supported.")
+        blocks = self._discover_functional_blocks()
+        placements = self._plan_block_spread(blocks, spacing_x, spacing_y)
+        moved_blocks: list[dict[str, Any]] = []
+        refusals: list[str] = []
+        for placement in placements:
+            if math.isclose(placement["dx"], 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE) and math.isclose(
+                placement["dy"], 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE
+            ):
+                continue
+            block = self._require_functional_block_by_symbols(placement["symbols"])
+            plan = self._plan_block_move(block, placement["dx"], placement["dy"])
+            if plan["refusals"]:
+                refusals.extend(
+                    f"{block['block_id']}: {refusal}" for refusal in cast(list[str], plan["refusals"])
+                )
+                continue
+            moved_blocks.append(self._apply_block_move_plan(block, plan))
+        return {"moved_blocks": moved_blocks, "refusals": refusals}
+
     def move_symbol_property(
         self,
         reference: str,
@@ -1142,6 +1236,525 @@ class KiCadSchematic:
                 ]
             )
         return [(x + dx, y + dy) for dx, dy in offsets]
+
+    def _discover_functional_blocks(self) -> list[dict[str, Any]]:
+        seeds: list[dict[str, Any]] = []
+        for symbol in self.list_symbols():
+            symbol_ref = cast(str, symbol["reference"])
+            wire_claims: dict[str, set[int]] = {}
+            label_ids: set[str] = set()
+            junction_ids: set[str] = set()
+            for wire in self.find_wires_intersecting_symbol(symbol_ref):
+                wire_uuid = wire.get("uuid")
+                if wire_uuid is None:
+                    continue
+                attached_endpoints = [endpoint for endpoint in wire["endpoints"] if endpoint["inside_symbol"]]
+                if not attached_endpoints:
+                    continue
+                claimed_endpoints = wire_claims.setdefault(wire_uuid, set())
+                for endpoint in attached_endpoints:
+                    claimed_endpoints.add(endpoint["endpoint_index"])
+                    for label in self._labels_touching_point(endpoint["point"]["x"], endpoint["point"]["y"]):
+                        label_uuid = label.get("uuid")
+                        if label_uuid is not None:
+                            label_ids.add(cast(str, label_uuid))
+                    for junction in self.find_junctions_touching_point(
+                        endpoint["point"]["x"], endpoint["point"]["y"]
+                    ):
+                        junction_ids.add(self._junction_identifier(junction))
+            seeds.append(
+                {
+                    "symbols": {symbol_ref},
+                    "symbol_properties": set(self._attached_property_ids(symbol)),
+                    "labels": label_ids,
+                    "junctions": junction_ids,
+                    "wire_claims": wire_claims,
+                }
+            )
+
+        merged_blocks = [self._copy_block_seed(seed) for seed in seeds]
+        changed = True
+        while changed:
+            changed = False
+            new_blocks: list[dict[str, Any]] = []
+            while merged_blocks:
+                current = merged_blocks.pop(0)
+                index = 0
+                while index < len(merged_blocks):
+                    other = merged_blocks[index]
+                    if self._blocks_should_merge(current, other):
+                        current = self._merge_block_members(current, other)
+                        merged_blocks.pop(index)
+                        changed = True
+                        continue
+                    index += 1
+                new_blocks.append(current)
+            merged_blocks = new_blocks
+
+        enriched_blocks: list[dict[str, Any]] = []
+        for block in merged_blocks:
+            for symbol_ref in cast(set[str], block["symbols"]):
+                symbol = self.get_symbol(symbol_ref)
+                if symbol is None:
+                    continue
+                cast(set[str], block["symbol_properties"]).update(self._attached_property_ids(symbol))
+            for wire_uuid, claimed_indices in cast(dict[str, set[int]], block["wire_claims"]).items():
+                wire = self._get_wire_by_uuid(wire_uuid)
+                if wire is None:
+                    continue
+                endpoint_indices = set(claimed_indices)
+                if endpoint_indices and 0 in endpoint_indices and len(wire["points"]) - 1 in endpoint_indices:
+                    endpoint_indices = {0, len(wire["points"]) - 1}
+                for endpoint_index in endpoint_indices:
+                    point = wire["points"][endpoint_index]
+                    for label in self._labels_touching_point(point["x"], point["y"]):
+                        label_uuid = label.get("uuid")
+                        if label_uuid is not None:
+                            cast(set[str], block["labels"]).add(cast(str, label_uuid))
+                    for junction in self.find_junctions_touching_point(point["x"], point["y"]):
+                        cast(set[str], block["junctions"]).add(self._junction_identifier(junction))
+            enriched_blocks.append(self._finalize_block(block))
+
+        sorted_blocks = sorted(
+            enriched_blocks,
+            key=lambda block: (
+                block["bounds"]["top"],
+                block["bounds"]["left"],
+                tuple(block["symbols"]),
+            ),
+        )
+        for index, block in enumerate(sorted_blocks, start=1):
+            block["block_id"] = f"block_{index:03d}"
+        return sorted_blocks
+
+    def _finalize_block(self, block: dict[str, Any]) -> dict[str, Any]:
+        symbol_refs = sorted(cast(set[str], block["symbols"]))
+        label_ids = sorted(cast(set[str], block["labels"]))
+        property_ids = sorted(cast(set[str], block["symbol_properties"]))
+        junction_ids = sorted(cast(set[str], block["junctions"]))
+        wire_claims = {
+            wire_uuid: sorted(endpoint_indices)
+            for wire_uuid, endpoint_indices in sorted(cast(dict[str, set[int]], block["wire_claims"]).items())
+        }
+        wire_ids = sorted(wire_claims)
+        finalized = {
+            "symbols": symbol_refs,
+            "labels": label_ids,
+            "symbol_properties": property_ids,
+            "junctions": junction_ids,
+            "wire_claims": wire_claims,
+            "wires": wire_ids,
+        }
+        finalized["bounds"] = self._block_bounds(finalized)
+        finalized["external_connections"] = self._block_external_connections(finalized)
+        finalized["name_hint"], finalized["confidence"] = self._classify_block(finalized)
+        return finalized
+
+    def _public_block(self, block: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "block_id": block["block_id"],
+            "name_hint": block["name_hint"],
+            "bounds": block["bounds"],
+            "symbols": block["symbols"],
+            "symbol_properties": block["symbol_properties"],
+            "labels": block["labels"],
+            "wires": block["wires"],
+            "junctions": block["junctions"],
+            "external_connections": block["external_connections"],
+            "confidence": block["confidence"],
+        }
+
+    def _plan_block_move(self, block: dict[str, Any], dx: float, dy: float) -> dict[str, Any]:
+        plan: dict[str, Any] = {
+            "block_id": block["block_id"],
+            "dx": dx,
+            "dy": dy,
+            "symbols": list(block["symbols"]),
+            "labels": list(block["labels"]),
+            "symbol_properties": list(block["symbol_properties"]),
+            "translated_junctions": list(block["junctions"]),
+            "translated_wires": [],
+            "moved_wire_endpoints": [],
+            "refusals": [],
+        }
+        for wire_uuid in cast(list[str], block["wires"]):
+            wire = self._get_wire_by_uuid(wire_uuid)
+            if wire is None:
+                cast(list[str], plan["refusals"]).append(f"Wire {wire_uuid} is missing from the schematic.")
+                continue
+            point_count = len(wire["points"])
+            claimed_indices = set(cast(list[int], block["wire_claims"].get(wire_uuid, [])))
+            if point_count >= 2 and 0 in claimed_indices and point_count - 1 in claimed_indices:
+                cast(list[str], plan["translated_wires"]).append(wire_uuid)
+                continue
+            if len(claimed_indices) != 1:
+                cast(list[str], plan["refusals"]).append(
+                    f"Cannot move block {block['block_id']} safely: wire {wire_uuid} has ambiguous block attachment."
+                )
+                continue
+            if point_count != 2:
+                cast(list[str], plan["refusals"]).append(
+                    f"Cannot move block {block['block_id']} safely: boundary wire {wire_uuid} must be a straight 2-point wire."
+                )
+                continue
+            inside_endpoint = next(iter(claimed_indices))
+            outside_endpoint = 1 - inside_endpoint
+            inside_point = wire["points"][inside_endpoint]
+            outside_point = wire["points"][outside_endpoint]
+            if self.find_junctions_touching_point(inside_point["x"], inside_point["y"]) or self.find_junctions_touching_point(
+                outside_point["x"], outside_point["y"]
+            ):
+                cast(list[str], plan["refusals"]).append(
+                    f"Cannot move block {block['block_id']} safely: boundary wire {wire_uuid} touches a junction."
+                )
+                continue
+            cast(list[dict[str, Any]], plan["moved_wire_endpoints"]).append(
+                {
+                    "wire_uuid": wire_uuid,
+                    "endpoint_index": inside_endpoint,
+                    "old_point": dict(inside_point),
+                    "new_point": {"x": inside_point["x"] + dx, "y": inside_point["y"] + dy},
+                }
+            )
+        return plan
+
+    def _public_block_move_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "symbols": plan["symbols"],
+            "labels": plan["labels"],
+            "translated_wires": plan["translated_wires"],
+            "moved_wire_endpoints": [
+                f"{endpoint['wire_uuid']}:{endpoint['endpoint_index']}"
+                for endpoint in cast(list[dict[str, Any]], plan["moved_wire_endpoints"])
+            ],
+            "refusals": plan["refusals"],
+        }
+
+    def _apply_block_move_plan(self, block: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+        moved_symbols = []
+        for symbol_ref in cast(list[str], block["symbols"]):
+            symbol = self.get_symbol(symbol_ref)
+            if symbol is None:
+                raise KeyError(f"Symbol not found: {symbol_ref}")
+            moved_symbols.append(
+                self.move_symbol(
+                    symbol_ref,
+                    symbol["position"]["x"] + plan["dx"],
+                    symbol["position"]["y"] + plan["dy"],
+                    symbol["position"]["angle"],
+                )
+            )
+
+        moved_properties = []
+        for property_id in cast(list[str], block["symbol_properties"]):
+            reference, property_name = property_id.split(":", maxsplit=1)
+            symbol = self.get_symbol(reference)
+            if symbol is None:
+                raise KeyError(f"Symbol not found: {reference}")
+            property_data = cast(dict[str, Any], symbol["properties"][property_name])
+            moved_properties.append(
+                self.move_symbol_property(
+                    reference,
+                    property_name,
+                    property_data["position"]["x"] + plan["dx"],
+                    property_data["position"]["y"] + plan["dy"],
+                    property_data["position"]["angle"],
+                )
+            )
+
+        moved_labels = []
+        for label_uuid in cast(list[str], block["labels"]):
+            label = self._find_label_node(label_uuid)
+            if label is None:
+                raise KeyError(f"Label not found: {label_uuid}")
+            current_position = self._parse_at(label)
+            moved_labels.append(
+                self.move_label(
+                    label_uuid,
+                    current_position["x"] + plan["dx"],
+                    current_position["y"] + plan["dy"],
+                    current_position["angle"],
+                )
+            )
+
+        translated_wires = [self.translate_wire(wire_uuid, plan["dx"], plan["dy"]) for wire_uuid in plan["translated_wires"]]
+        moved_wire_endpoints = [
+            self.move_wire_endpoint(
+                endpoint["wire_uuid"],
+                endpoint["old_point"]["x"],
+                endpoint["old_point"]["y"],
+                endpoint["new_point"]["x"],
+                endpoint["new_point"]["y"],
+            )
+            for endpoint in cast(list[dict[str, Any]], plan["moved_wire_endpoints"])
+        ]
+
+        moved_junctions = []
+        for junction_id in cast(list[str], block["junctions"]):
+            junction = self._get_junction_by_identifier(junction_id)
+            if junction is None:
+                continue
+            position = junction["position"]
+            moved_junctions.append(
+                self.move_junction(
+                    position["x"],
+                    position["y"],
+                    position["x"] + plan["dx"],
+                    position["y"] + plan["dy"],
+                )
+            )
+
+        return {
+            "block_id": block["block_id"],
+            "symbols": [symbol["reference"] for symbol in moved_symbols],
+            "labels": [label["uuid"] for label in moved_labels],
+            "symbol_properties": list(block["symbol_properties"]),
+            "translated_wires": [wire["uuid"] for wire in translated_wires],
+            "moved_wire_endpoints": [
+                f"{endpoint['uuid']}:{endpoint['endpoint_index']}" for endpoint in moved_wire_endpoints
+            ],
+            "translated_junctions": list(block["junctions"]),
+        }
+
+    def _plan_block_spread(
+        self, blocks: list[dict[str, Any]], spacing_x: float, spacing_y: float
+    ) -> list[dict[str, Any]]:
+        sorted_blocks = sorted(blocks, key=lambda block: (block["bounds"]["top"], block["bounds"]["left"]))
+        placements: list[dict[str, Any]] = []
+        current_row_top = 0.0
+        current_row_bottom = 0.0
+        next_left = 0.0
+        row_started = False
+        for block in sorted_blocks:
+            bounds = block["bounds"]
+            width = bounds["right"] - bounds["left"]
+            height = bounds["bottom"] - bounds["top"]
+            if not row_started:
+                current_row_top = bounds["top"]
+                current_row_bottom = bounds["bottom"]
+                next_left = bounds["left"]
+                row_started = True
+            elif bounds["top"] > current_row_bottom + spacing_y:
+                current_row_top = current_row_bottom + spacing_y
+                current_row_bottom = current_row_top + height
+                next_left = bounds["left"]
+            target_left = next_left
+            target_top = current_row_top
+            placements.append(
+                {
+                    "block_id": block["block_id"],
+                    "symbols": list(block["symbols"]),
+                    "dx": target_left - bounds["left"],
+                    "dy": target_top - bounds["top"],
+                }
+            )
+            next_left = target_left + width + spacing_x
+            current_row_bottom = max(current_row_bottom, target_top + height)
+        return placements
+
+    def _block_connectivity_snapshot_from_block(self, block: dict[str, Any]) -> dict[str, Any]:
+        boundary_wires = []
+        for wire_uuid, claimed_indices in block["wire_claims"].items():
+            wire = self._get_wire_by_uuid(wire_uuid)
+            if wire is None:
+                continue
+            point_count = len(wire["points"])
+            claimed_set = set(claimed_indices)
+            if point_count >= 2 and 0 in claimed_set and point_count - 1 in claimed_set:
+                continue
+            boundary_wires.append(wire_uuid)
+        label_texts = []
+        for label_uuid in block["labels"]:
+            label = self._find_label_node(label_uuid)
+            if label is None:
+                continue
+            label_texts.append(self._label_to_dict(label)["text"])
+        return {
+            "block_id": block["block_id"],
+            "internal_symbols": list(block["symbols"]),
+            "external_connections": list(block["external_connections"]),
+            "boundary_wire_count": len(boundary_wires),
+            "labels": list(block["labels"]),
+            "wires": list(block["wires"]),
+            "label_texts": sorted(label_texts),
+        }
+
+    def _require_functional_block(self, block_id: str) -> dict[str, Any]:
+        for block in self._discover_functional_blocks():
+            if block["block_id"] == block_id:
+                return block
+        raise KeyError(f"Functional block not found: {block_id}")
+
+    def _require_functional_block_by_symbols(self, symbol_refs: list[str] | None) -> dict[str, Any]:
+        if not symbol_refs:
+            raise KeyError("Functional block symbol set not provided.")
+        symbol_set = sorted(symbol_refs)
+        for block in self._discover_functional_blocks():
+            if block["symbols"] == symbol_set:
+                return block
+        raise KeyError(f"Functional block not found for symbols: {', '.join(symbol_set)}")
+
+    def _copy_block_seed(self, seed: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "symbols": set(cast(set[str], seed["symbols"])),
+            "symbol_properties": set(cast(set[str], seed["symbol_properties"])),
+            "labels": set(cast(set[str], seed["labels"])),
+            "junctions": set(cast(set[str], seed["junctions"])),
+            "wire_claims": {
+                wire_uuid: set(endpoint_indices)
+                for wire_uuid, endpoint_indices in cast(dict[str, set[int]], seed["wire_claims"]).items()
+            },
+        }
+
+    def _blocks_should_merge(self, left: dict[str, Any], right: dict[str, Any]) -> bool:
+        return bool(
+            set(cast(dict[str, Any], left["wire_claims"])).intersection(cast(dict[str, Any], right["wire_claims"]))
+            or cast(set[str], left["labels"]).intersection(cast(set[str], right["labels"]))
+            or cast(set[str], left["junctions"]).intersection(cast(set[str], right["junctions"]))
+        )
+
+    def _merge_block_members(self, left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+        merged = self._copy_block_seed(left)
+        cast(set[str], merged["symbols"]).update(cast(set[str], right["symbols"]))
+        cast(set[str], merged["symbol_properties"]).update(cast(set[str], right["symbol_properties"]))
+        cast(set[str], merged["labels"]).update(cast(set[str], right["labels"]))
+        cast(set[str], merged["junctions"]).update(cast(set[str], right["junctions"]))
+        for wire_uuid, endpoint_indices in cast(dict[str, set[int]], right["wire_claims"]).items():
+            cast(dict[str, set[int]], merged["wire_claims"]).setdefault(wire_uuid, set()).update(endpoint_indices)
+        return merged
+
+    def _labels_touching_point(self, x: float, y: float) -> list[dict[str, Any]]:
+        return [
+            label
+            for label in self.list_labels()
+            if math.dist((x, y), (label["position"]["x"], label["position"]["y"])) <= CONNECTIVITY_TOLERANCE_MM
+        ]
+
+    def _attached_property_ids(self, symbol: dict[str, Any]) -> list[str]:
+        symbol_box = self._symbol_bbox(symbol)
+        attached_property_ids = []
+        for property_name, property_data in symbol.get("properties", {}).items():
+            if self._property_bbox(property_name, property_data).intersects(
+                _expand_bbox(symbol_box, BLOCK_PROPERTY_ATTACHMENT_PADDING_MM)
+            ):
+                attached_property_ids.append(f"{symbol['reference']}:{property_name}")
+        return attached_property_ids
+
+    def _get_wire_by_uuid(self, wire_uuid: str) -> dict[str, Any] | None:
+        for wire in self.list_wires():
+            if wire.get("uuid") == wire_uuid:
+                return wire
+        return None
+
+    def _junction_identifier(self, junction: dict[str, Any]) -> str:
+        junction_uuid = junction.get("uuid")
+        if junction_uuid is not None:
+            return cast(str, junction_uuid)
+        position = junction["position"]
+        return f"junction@{_format_number(position['x'])},{_format_number(position['y'])}"
+
+    def _get_junction_by_identifier(self, junction_id: str) -> dict[str, Any] | None:
+        for junction in self.list_junctions():
+            if self._junction_identifier(junction) == junction_id:
+                return junction
+        return None
+
+    def _block_bounds(self, block: dict[str, Any]) -> dict[str, float]:
+        boxes: list[BoundingBox] = []
+        for symbol_ref in cast(list[str], block["symbols"]):
+            symbol = self.get_symbol(symbol_ref)
+            if symbol is not None:
+                boxes.append(self._symbol_bbox(symbol))
+        for property_id in cast(list[str], block["symbol_properties"]):
+            reference, property_name = property_id.split(":", maxsplit=1)
+            symbol = self.get_symbol(reference)
+            if symbol is None or property_name not in symbol["properties"]:
+                continue
+            boxes.append(self._property_bbox(property_name, cast(dict[str, Any], symbol["properties"][property_name])))
+        for label_uuid in cast(list[str], block["labels"]):
+            label = self._find_label_node(label_uuid)
+            if label is not None:
+                boxes.append(self._label_bbox(self._label_to_dict(label)))
+        for wire_uuid in cast(list[str], block["wires"]):
+            wire = self._get_wire_by_uuid(wire_uuid)
+            if wire is None or not wire["points"]:
+                continue
+            xs = [point["x"] for point in wire["points"]]
+            ys = [point["y"] for point in wire["points"]]
+            boxes.append(BoundingBox(left=min(xs), top=min(ys), right=max(xs), bottom=max(ys)))
+        for junction_id in cast(list[str], block["junctions"]):
+            junction = self._get_junction_by_identifier(junction_id)
+            if junction is None:
+                continue
+            position = junction["position"]
+            boxes.append(
+                BoundingBox(
+                    left=position["x"] - JUNCTION_MARKER_HALF_SIZE_MM,
+                    top=position["y"] - JUNCTION_MARKER_HALF_SIZE_MM,
+                    right=position["x"] + JUNCTION_MARKER_HALF_SIZE_MM,
+                    bottom=position["y"] + JUNCTION_MARKER_HALF_SIZE_MM,
+                )
+            )
+        if not boxes:
+            return self._bbox_to_dict(BoundingBox(0.0, 0.0, 0.0, 0.0))
+        return self._bbox_to_dict(
+            BoundingBox(
+                left=min(box.left for box in boxes),
+                top=min(box.top for box in boxes),
+                right=max(box.right for box in boxes),
+                bottom=max(box.bottom for box in boxes),
+            )
+        )
+
+    def _block_external_connections(self, block: dict[str, Any]) -> list[str]:
+        connections: set[str] = set()
+        for wire_uuid, claimed_indices in block["wire_claims"].items():
+            wire = self._get_wire_by_uuid(wire_uuid)
+            if wire is None or len(wire["points"]) < 2:
+                continue
+            claimed_set = set(claimed_indices)
+            if 0 in claimed_set and len(wire["points"]) - 1 in claimed_set:
+                continue
+            if len(claimed_set) != 1 or len(wire["points"]) != 2:
+                continue
+            outside_index = 1 - next(iter(claimed_set))
+            outside_point = wire["points"][outside_index]
+            for label in self._labels_touching_point(outside_point["x"], outside_point["y"]):
+                label_text = label.get("text")
+                if label_text:
+                    connections.add(cast(str, label_text))
+        return sorted(connections)
+
+    def _classify_block(self, block: dict[str, Any]) -> tuple[str, str]:
+        symbols = [self.get_symbol(reference) for reference in cast(list[str], block["symbols"])]
+        refs = [cast(str, symbol["reference"]) for symbol in symbols if symbol is not None]
+        values = [cast(str, symbol["value"]) for symbol in symbols if symbol is not None]
+        label_texts = []
+        for label_uuid in cast(list[str], block["labels"]):
+            label = self._find_label_node(label_uuid)
+            if label is not None:
+                label_texts.append(cast(str, self._label_to_dict(label)["text"]))
+        haystack = " ".join(refs + values + label_texts).upper()
+        rules = [
+            ("USB-C / Connector block", ("USB", "USB_C", "TYPE-C", "VBUS", "USB_D+", "USB_D-", "CC1", "CC2")),
+            ("MCU block", ("ESP32", "MCU", "MICROCONTROLLER", "GPIO", "EN", "BOOT", "TX", "RX", "SDA", "SCL")),
+            ("NFC block", ("PN532", "NFC", "RFID", "ANT", "IRQ")),
+            ("Display block", ("LCD", "OLED", "DISPLAY", "RS", "D4", "D5", "D6", "D7")),
+            ("Power block", ("LDO", "REGULATOR", "BUCK", "5V", "3V3", "VIN", "VOUT", "GND")),
+        ]
+        best_name = "Functional block"
+        best_score = 0
+        for name, terms in rules:
+            score = sum(1 for term in terms if term in haystack)
+            if name == "USB-C / Connector block" and any(reference.startswith("J") for reference in refs):
+                score += 1
+            if name == "MCU block" and any(reference.startswith("U") for reference in refs):
+                score += 1
+            if score > best_score:
+                best_name = name
+                best_score = score
+        confidence = "high" if best_score >= 3 else "medium" if best_score >= 1 else "low"
+        return best_name, confidence
 
     def _label_has_overlap(self, label_uuid: str) -> bool:
         return any(label_uuid in overlap["objects"] for overlap in self.find_overlaps())
@@ -1513,6 +2126,19 @@ def compare_connectivity_snapshots(
         }
 
     raise ValueError(f"Unsupported connectivity comparison target type: {target_type}")
+
+
+def compare_block_connectivity_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Compare two coarse block connectivity snapshots."""
+    preserved = (
+        sorted(before.get("external_connections", [])) == sorted(after.get("external_connections", []))
+        and before.get("boundary_wire_count") == after.get("boundary_wire_count")
+        and sorted(before.get("internal_symbols", [])) == sorted(after.get("internal_symbols", []))
+        and sorted(before.get("labels", [])) == sorted(after.get("labels", []))
+        and sorted(before.get("wires", [])) == sorted(after.get("wires", []))
+    )
+    reason = "block connectivity preserved" if preserved else "block connectivity changed"
+    return {"preserved": preserved, "reason": reason, "before": before, "after": after}
 
 
 def _point_key(x: float, y: float) -> tuple[float, float]:
