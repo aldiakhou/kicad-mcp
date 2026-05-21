@@ -956,7 +956,10 @@ class KiCadSchematic:
         for wire in self.find_wires_intersecting_symbol(reference):
             wire_uuid = wire.get("uuid")
             if wire_uuid is None:
-                raise ValueError(f"Cannot move {reference} safely: attached wire has no UUID.")
+                raise ValueError(
+                    f"Cannot move {reference} safely: attached wire has no UUID. "
+                    "Please ensure all attached wires have UUIDs before attempting this operation."
+                )
             if wire["point_count"] != 2:
                 raise ValueError(
                     f"Cannot move {reference} safely: wire {wire_uuid} must be a straight 2-point wire."
@@ -983,7 +986,8 @@ class KiCadSchematic:
             abs_tol=FLOAT_COMPARISON_TOLERANCE,
         ):
             raise ValueError(
-                f"Cannot rotate {reference} safely with attached wires: rotation-aware pin mapping is not implemented yet."
+                f"Cannot rotate {reference} safely with attached wires: rotation with attached wires is not supported yet. "
+                "Disconnect the wires first, rotate the symbol, then reconnect them."
             )
 
         self._refuse_junctions_at_points(
@@ -1024,7 +1028,10 @@ class KiCadSchematic:
         for wire in touching_wires:
             wire_uuid = wire.get("uuid")
             if wire_uuid is None:
-                raise ValueError(f"Cannot move label {label_uuid} safely: attached wire has no UUID.")
+                raise ValueError(
+                    f"Cannot move label {label_uuid} safely: attached wire has no UUID. "
+                    "Please ensure all attached wires have UUIDs before attempting this operation."
+                )
             if wire["point_count"] != 2:
                 raise ValueError(
                     f"Cannot move label {label_uuid} safely: wire {wire_uuid} must be a straight 2-point wire."
@@ -1057,7 +1064,8 @@ class KiCadSchematic:
             abs_tol=FLOAT_COMPARISON_TOLERANCE,
         ):
             raise ValueError(
-                f"Cannot rotate label {label_uuid} safely with attached wires: rotation-aware pin mapping is not implemented yet."
+                f"Cannot rotate label {label_uuid} safely with attached wires: rotation with attached wires is not supported yet. "
+                "Disconnect the wires first, rotate the label, then reconnect them."
             )
 
         self._refuse_junctions_at_points(
