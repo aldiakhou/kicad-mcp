@@ -72,6 +72,7 @@ BLOCK_PROPERTY_ATTACHMENT_PADDING_MM = 12.0
 JUNCTION_MARKER_HALF_SIZE_MM = 0.6
 BLOCK_CONFIDENCE_HIGH_THRESHOLD = 3
 BLOCK_CONFIDENCE_MEDIUM_THRESHOLD = 1
+SUPPORTED_CLEANUP_LAYOUT_STYLES = {"left_to_right"}
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1026,145 @@ class KiCadSchematic:
             raise KeyError(f"Symbol not found: {reference}")
         return arranged_symbol
 
+    def preview_auto_arrange_symbol_properties_all(self) -> dict[str, Any]:
+        """Plan safe symbol property arrangement for the whole schematic."""
+        property_moves: list[dict[str, Any]] = []
+        for symbol in self.list_symbols():
+            property_moves.extend(self._plan_symbol_property_arrangement(symbol["reference"]))
+        return {
+            "success": True,
+            "property_moves": property_moves,
+            "symbols_considered": [symbol["reference"] for symbol in self.list_symbols()],
+        }
+
+    def auto_arrange_symbol_properties_all(self) -> dict[str, Any]:
+        """Arrange symbol properties for all symbols using planned positions."""
+        preview = self.preview_auto_arrange_symbol_properties_all()
+        arranged_properties = []
+        for move in cast(list[dict[str, Any]], preview["property_moves"]):
+            arranged_properties.append(
+                self.move_symbol_property(
+                    move["reference"],
+                    move["property_name"],
+                    move["to"]["x"],
+                    move["to"]["y"],
+                    move["to"]["angle"],
+                )
+            )
+        return {
+            "symbols": sorted({move["reference"] for move in cast(list[dict[str, Any]], preview["property_moves"])}),
+            "properties_arranged": cast(list[dict[str, Any]], preview["property_moves"]),
+            "arranged_count": len(arranged_properties),
+        }
+
+    def schematic_cleanup_report(
+        self,
+        layout_style: str = "left_to_right",
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        arrange_properties: bool = True,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Return a read-only cleanup diagnosis for a schematic."""
+        preview = self.preview_cleanup(
+            layout_style=layout_style,
+            spacing_x=spacing_x,
+            spacing_y=spacing_y,
+            arrange_properties=arrange_properties,
+            preserve_connectivity=preserve_connectivity,
+        )
+        blocks = cast(list[dict[str, Any]], preview["cleanup_plan"]["blocks"])
+        overlaps = self.find_overlaps()
+        recommendations: list[str] = []
+        if arrange_properties and preview["cleanup_plan"]["property_moves"]:
+            recommendations.append("Auto-arrange symbol properties")
+        if preview["cleanup_plan"]["block_moves"]:
+            recommendations.append("Move blocks into left-to-right layout")
+        if overlaps:
+            recommendations.append("Review overlaps before applying cleanup")
+        recommendations.append("Export SVG preview")
+        return {
+            "success": True,
+            "symbols": len(self.list_symbols()),
+            "labels": len(self.list_labels()),
+            "wires": len(self.list_wires()),
+            "blocks": blocks,
+            "overlaps": overlaps,
+            "unsafe_moves": preview["cleanup_plan"]["refusals"],
+            "label_limitations": preview["cleanup_plan"]["label_refusals"],
+            "recommendations": recommendations,
+        }
+
+    def preview_cleanup(
+        self,
+        layout_style: str = "left_to_right",
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        arrange_properties: bool = True,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Plan a full cleanup workflow without mutating the schematic."""
+        plan = self._build_cleanup_plan(
+            layout_style=layout_style,
+            spacing_x=spacing_x,
+            spacing_y=spacing_y,
+            arrange_properties=arrange_properties,
+            preserve_connectivity=preserve_connectivity,
+        )
+        cleanup_plan = self._public_cleanup_plan(plan)
+        if not plan["success"]:
+            return {
+                "success": False,
+                "error": "; ".join(cast(list[str], plan["refusals"])),
+                "cleanup_plan": cleanup_plan,
+            }
+        return {"success": True, "cleanup_plan": cleanup_plan}
+
+    def apply_cleanup(
+        self,
+        layout_style: str = "left_to_right",
+        spacing_x: float = 35.0,
+        spacing_y: float = 25.0,
+        arrange_properties: bool = True,
+        preserve_connectivity: bool = True,
+    ) -> dict[str, Any]:
+        """Apply a full cleanup plan to the schematic."""
+        plan = self._build_cleanup_plan(
+            layout_style=layout_style,
+            spacing_x=spacing_x,
+            spacing_y=spacing_y,
+            arrange_properties=arrange_properties,
+            preserve_connectivity=preserve_connectivity,
+        )
+        if not plan["success"]:
+            raise ValueError("; ".join(cast(list[str], plan["refusals"])))
+        moved_blocks = []
+        for move in cast(list[dict[str, Any]], plan["safe_block_moves"]):
+            block = self._require_functional_block(move["block_id"])
+            moved_blocks.append(self._apply_block_move_plan(block, move["raw_plan"]))
+        property_result = (
+            self.auto_arrange_symbol_properties_all()
+            if arrange_properties
+            else {"symbols": [], "properties_arranged": [], "arranged_count": 0}
+        )
+        labels_moved = sorted(
+            {label_uuid for move in moved_blocks for label_uuid in cast(list[str], move["labels"])}
+        )
+        return {
+            "blocks_moved": [
+                {
+                    "block_id": move["block_id"],
+                    "symbols": move["symbols"],
+                    "labels": move["labels"],
+                    "translated_wires": move["translated_wires"],
+                    "moved_wire_endpoints": move["moved_wire_endpoints"],
+                }
+                for move in moved_blocks
+            ],
+            "properties_arranged": property_result["properties_arranged"],
+            "labels_moved": labels_moved,
+        }
+
     def auto_arrange_labels(self) -> list[dict[str, Any]]:
         """Move overlapping labels to nearby free positions."""
         moved_labels: list[dict[str, Any]] = []
@@ -1546,9 +1686,17 @@ class KiCadSchematic:
         }
 
     def _plan_block_spread(
-        self, blocks: list[dict[str, Any]], spacing_x: float, spacing_y: float
+        self,
+        blocks: list[dict[str, Any]],
+        spacing_x: float,
+        spacing_y: float,
+        layout_style: str | None = None,
     ) -> list[dict[str, Any]]:
-        sorted_blocks = sorted(blocks, key=lambda block: (block["bounds"]["top"], block["bounds"]["left"]))
+        sorted_blocks = (
+            self._sort_blocks_for_layout(blocks, layout_style)
+            if layout_style in SUPPORTED_CLEANUP_LAYOUT_STYLES
+            else sorted(blocks, key=lambda block: (block["bounds"]["top"], block["bounds"]["left"]))
+        )
         placements: list[dict[str, Any]] = []
         current_row_top = 0.0
         current_row_bottom = 0.0
@@ -1580,6 +1728,133 @@ class KiCadSchematic:
             next_left = target_left + width + spacing_x
             current_row_bottom = max(current_row_bottom, target_top + height)
         return placements
+
+    def _build_cleanup_plan(
+        self,
+        *,
+        layout_style: str,
+        spacing_x: float,
+        spacing_y: float,
+        arrange_properties: bool,
+        preserve_connectivity: bool,
+    ) -> dict[str, Any]:
+        blocks = self._discover_functional_blocks()
+        overlaps = self.find_overlaps()
+        refusals: list[str] = []
+        if layout_style not in SUPPORTED_CLEANUP_LAYOUT_STYLES:
+            refusals.append(f"Unsupported layout_style: {layout_style}")
+        if not preserve_connectivity:
+            refusals.append("Only connectivity-preserving cleanup is supported.")
+        placements = (
+            self._plan_block_spread(blocks, spacing_x, spacing_y, layout_style=layout_style)
+            if not refusals
+            else []
+        )
+        block_entries: list[dict[str, Any]] = []
+        safe_block_moves: list[dict[str, Any]] = []
+        for placement in placements:
+            block = self._require_functional_block_by_symbols(placement["symbols"])
+            if self._is_zero_translation(placement["dx"], placement["dy"]):
+                block_entries.append(
+                    {
+                        "block_id": block["block_id"],
+                        "name_hint": block["name_hint"],
+                        "symbols": list(block["symbols"]),
+                        "bounds": block["bounds"],
+                        "dx": placement["dx"],
+                        "dy": placement["dy"],
+                        "safe_to_move": True,
+                        "refusals": [],
+                    }
+                )
+                continue
+            raw_plan = self._plan_block_move(block, placement["dx"], placement["dy"])
+            block_entry = {
+                "block_id": block["block_id"],
+                "name_hint": block["name_hint"],
+                "symbols": list(block["symbols"]),
+                "bounds": block["bounds"],
+                "dx": placement["dx"],
+                "dy": placement["dy"],
+                "safe_to_move": not raw_plan["refusals"],
+                "refusals": list(raw_plan["refusals"]),
+            }
+            block_entries.append(block_entry)
+            if raw_plan["refusals"]:
+                refusals.extend(f"{block['block_id']}: {refusal}" for refusal in raw_plan["refusals"])
+                continue
+            safe_block_moves.append(
+                {
+                    "block_id": block["block_id"],
+                    "name_hint": block["name_hint"],
+                    "symbols": list(block["symbols"]),
+                    "dx": placement["dx"],
+                    "dy": placement["dy"],
+                    "raw_plan": raw_plan,
+                    "public_plan": self._public_block_move_plan(raw_plan),
+                }
+            )
+
+        preview_model = KiCadSchematic.from_text(self.to_text())
+        for move in safe_block_moves:
+            block = preview_model._require_functional_block(move["block_id"])
+            preview_model._apply_block_move_plan(block, move["raw_plan"])
+        property_preview = (
+            preview_model.preview_auto_arrange_symbol_properties_all()
+            if arrange_properties
+            else {"success": True, "property_moves": [], "symbols_considered": []}
+        )
+        if arrange_properties:
+            preview_model.auto_arrange_symbol_properties_all()
+        projected_overlaps = preview_model.find_overlaps()
+        label_refusals = self._cleanup_label_refusals(overlaps, safe_block_moves)
+        requires_user_review = bool(
+            overlaps
+            or projected_overlaps
+            or property_preview["property_moves"]
+            or safe_block_moves
+            or label_refusals
+        )
+        return {
+            "success": not refusals,
+            "layout_style": layout_style,
+            "spacing_x": spacing_x,
+            "spacing_y": spacing_y,
+            "arrange_properties": arrange_properties,
+            "blocks": block_entries,
+            "safe_block_moves": safe_block_moves,
+            "property_preview": property_preview,
+            "refusals": refusals,
+            "label_refusals": label_refusals,
+            "overlaps": overlaps,
+            "projected_overlaps": projected_overlaps,
+            "requires_user_review": requires_user_review,
+        }
+
+    def _public_cleanup_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "layout_style": plan["layout_style"],
+            "spacing_x": plan["spacing_x"],
+            "spacing_y": plan["spacing_y"],
+            "blocks": plan["blocks"],
+            "block_moves": [
+                {
+                    "block_id": move["block_id"],
+                    "name_hint": move["name_hint"],
+                    "symbols": move["symbols"],
+                    "dx": move["dx"],
+                    "dy": move["dy"],
+                    "planned_changes": move["public_plan"],
+                }
+                for move in cast(list[dict[str, Any]], plan["safe_block_moves"])
+            ],
+            "property_moves": plan["property_preview"]["property_moves"],
+            "refusals": plan["refusals"],
+            "label_refusals": plan["label_refusals"],
+            "overlaps": plan["overlaps"],
+            "projected_overlaps": plan["projected_overlaps"],
+            "requires_user_review": plan["requires_user_review"],
+        }
 
     def _block_connectivity_snapshot_from_block(self, block: dict[str, Any]) -> dict[str, Any]:
         boundary_wires = []
@@ -1799,6 +2074,151 @@ class KiCadSchematic:
             else "medium" if best_score >= BLOCK_CONFIDENCE_MEDIUM_THRESHOLD else "low"
         )
         return best_name, confidence
+
+    def _sort_blocks_for_layout(self, blocks: list[dict[str, Any]], layout_style: str | None) -> list[dict[str, Any]]:
+        if layout_style != "left_to_right":
+            return sorted(blocks, key=lambda block: (block["bounds"]["top"], block["bounds"]["left"]))
+        return sorted(
+            blocks,
+            key=lambda block: (
+                self._block_layout_priority(block),
+                block["bounds"]["top"],
+                block["bounds"]["left"],
+                tuple(block["symbols"]),
+            ),
+        )
+
+    def _block_layout_priority(self, block: dict[str, Any]) -> int:
+        name_hint = cast(str, block["name_hint"])
+        refs = cast(list[str], block["symbols"])
+        label_texts = []
+        for label_uuid in cast(list[str], block["labels"]):
+            label = self._find_label_node(label_uuid)
+            if label is not None:
+                label_texts.append(cast(str, self._label_to_dict(label)["text"]).upper())
+        haystack = " ".join(refs + label_texts).upper()
+        if name_hint == "USB-C / Connector block":
+            return 0
+        if name_hint == "Power block":
+            return 1
+        if name_hint == "MCU block":
+            return 2
+        if name_hint == "NFC block":
+            return 3
+        if name_hint == "Display block":
+            return 4
+        if any(reference.startswith(("J", "P", "H")) for reference in refs) or any(
+            term in haystack for term in ("HEADER", "DEBUG", "SWD", "UART", "EXP")
+        ):
+            return 5
+        return 6
+
+    def _plan_symbol_property_arrangement(self, reference: str) -> list[dict[str, Any]]:
+        symbol = self.get_symbol(reference)
+        if symbol is None:
+            raise KeyError(f"Symbol not found: {reference}")
+        planned_boxes = [
+            self._property_bbox(name, cast(dict[str, Any], property_data))
+            for name, property_data in symbol["properties"].items()
+        ]
+        symbol_boxes = [
+            self._symbol_bbox(other_symbol)
+            for other_symbol in self.list_symbols()
+            if other_symbol["reference"] != reference
+        ]
+        moves: list[dict[str, Any]] = []
+        for property_name, property_data in symbol["properties"].items():
+            current = cast(dict[str, Any], property_data)
+            current_box = self._property_bbox(property_name, current)
+            if current_box in planned_boxes:
+                planned_boxes.remove(current_box)
+            target = self._choose_property_position(reference, property_name, current, symbol_boxes, planned_boxes)
+            planned_boxes.append(self._property_bbox(property_name, {"text": current.get("text"), "position": target}))
+            if not (
+                math.isclose(current["position"]["x"], target["x"], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+                and math.isclose(current["position"]["y"], target["y"], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+                and math.isclose(current["position"]["angle"], target["angle"], abs_tol=FLOAT_COMPARISON_TOLERANCE)
+            ):
+                moves.append(
+                    {
+                        "reference": reference,
+                        "property_name": property_name,
+                        "from": dict(current["position"]),
+                        "to": target,
+                    }
+                )
+        return moves
+
+    def _choose_property_position(
+        self,
+        reference: str,
+        property_name: str,
+        property_data: dict[str, Any],
+        symbol_boxes: list[BoundingBox],
+        planned_boxes: list[BoundingBox],
+    ) -> dict[str, float]:
+        symbol = self.get_symbol(reference)
+        if symbol is None:
+            raise KeyError(f"Symbol not found: {reference}")
+        symbol_position = symbol["position"]
+        for dx, dy in self._property_candidate_offsets(property_name):
+            candidate = {"x": symbol_position["x"] + dx, "y": symbol_position["y"] + dy, "angle": 0.0}
+            candidate_box = self._property_bbox(
+                property_name,
+                {
+                    "text": property_data.get("text"),
+                    "position": candidate,
+                },
+            )
+            if any(candidate_box.intersects(box, padding=0.5) for box in symbol_boxes):
+                continue
+            if any(candidate_box.intersects(box, padding=0.25) for box in planned_boxes):
+                continue
+            return candidate
+        return {
+            "x": symbol_position["x"],
+            "y": symbol_position["y"] + self._property_candidate_offsets(property_name)[0][1],
+            "angle": 0.0,
+        }
+
+    def _property_candidate_offsets(self, property_name: str) -> list[tuple[float, float]]:
+        defaults = {
+            "Reference": [(0.0, -4.0), (0.0, -8.0), (-8.0, -4.0), (8.0, -4.0)],
+            "Value": [(0.0, 4.0), (0.0, 8.0), (-8.0, 4.0), (8.0, 4.0)],
+            "Footprint": [(0.0, 8.0), (0.0, 12.0), (-8.0, 8.0), (8.0, 8.0)],
+            "Datasheet": [(0.0, 12.0), (0.0, 16.0), (-8.0, 12.0), (8.0, 12.0)],
+        }
+        if property_name in defaults:
+            return defaults[property_name]
+        return [(0.0, 16.0), (0.0, 20.0), (-8.0, 16.0), (8.0, 16.0)]
+
+    def _cleanup_label_refusals(
+        self, overlaps: list[dict[str, Any]], safe_block_moves: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        moved_labels = {
+            label_uuid
+            for move in safe_block_moves
+            for label_uuid in cast(list[str], move["raw_plan"]["labels"])
+        }
+        refused_labels = []
+        seen: set[str] = set()
+        for label in self.list_labels():
+            label_uuid = label.get("uuid")
+            if label_uuid is None or label_uuid in moved_labels or label_uuid in seen:
+                continue
+            if any(label_uuid in overlap["objects"] for overlap in overlaps):
+                seen.add(cast(str, label_uuid))
+                refused_labels.append(
+                    {
+                        "label_uuid": label_uuid,
+                        "text": label["text"],
+                        "reason": (
+                            "Standalone label cleanup is not applied automatically; "
+                            "labels only move when they are part of a safe block move."
+                        ),
+                    }
+                )
+        return refused_labels
 
     def _label_has_overlap(self, label_uuid: str) -> bool:
         return any(label_uuid in overlap["objects"] for overlap in self.find_overlaps())
