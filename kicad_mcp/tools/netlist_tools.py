@@ -96,6 +96,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 "analysis": analysis_results,
                 "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
                 "netlist_quality": netlist_data.get("netlist_quality", "partial"),
+                "connectivity_complete": False,
             }
 
             # Complete progress
@@ -284,6 +285,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 "analysis": analysis,
                 "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
                 "netlist_quality": netlist_data.get("netlist_quality", "partial"),
+                "connectivity_complete": False,
             }
 
             # Complete progress
@@ -453,14 +455,16 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 "connected_nets": connected_nets,
                 "pin_functions": pin_functions,
                 "total_connections": len(connections),
+                "inferred_connection_count": len(connections),
                 "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
                 "netlist_quality": netlist_data.get("netlist_quality", "partial"),
+                "connectivity_complete": False,
             }
 
             if ctx:
                 await ctx.report_progress(100, 100)
                 await ctx.info(
-                    f"Found {len(connections)} connections for component {component_ref}"
+                    f"Inferred {len(connections)} possible connections for component {component_ref}; full connectivity tracing is not yet available."
                 )
 
             return result

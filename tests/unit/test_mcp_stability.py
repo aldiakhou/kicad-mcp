@@ -4,15 +4,18 @@ Tests for MCP startup and stdout-safe behavior.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 import runpy
 
 import pytest
 
+import kicad_mcp.config as config
+import kicad_mcp.server as server_module
 from kicad_mcp.server import create_server
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.utils.kicad_api_detection import check_for_cli_api
-from kicad_mcp.utils.kicad_cli import KiCadCLIError
+from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
 from kicad_mcp.utils.netlist_parser import extract_netlist
 
 
@@ -42,6 +45,10 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "run_drc_check" in tools
     assert "kicad://netlist/{schematic_path}" in resource_templates
     assert "kicad://drc/{project_path}" in resource_templates
+    assert server_module._server_instance is server
+
+    server_module.shutdown_server()
+    assert server_module._server_instance is None
 
 
 def test_main_entrypoint_calls_blocking_server_main(monkeypatch):
@@ -112,3 +119,67 @@ def test_check_for_cli_api_uses_shared_cli_detector(monkeypatch):
 
     monkeypatch.setattr("kicad_mcp.utils.kicad_api_detection.is_kicad_cli_available", lambda: False)
     assert check_for_cli_api() is False
+
+
+def test_config_honors_environment_overrides(monkeypatch):
+    """Config paths should respect KICAD_USER_DIR and KICAD_APP_PATH overrides."""
+    original_user_dir = config.KICAD_USER_DIR
+    original_app_path = config.KICAD_APP_PATH
+
+    monkeypatch.setenv("KICAD_USER_DIR", "~/CustomKiCadProjects")
+    monkeypatch.setenv("KICAD_APP_PATH", "~/Applications/KiCadCustom.app")
+
+    reloaded = importlib.reload(config)
+
+    assert str(Path("~/CustomKiCadProjects").expanduser()) == reloaded.KICAD_USER_DIR
+    assert str(Path("~/Applications/KiCadCustom.app").expanduser()) == reloaded.KICAD_APP_PATH
+
+    monkeypatch.setenv("KICAD_USER_DIR", original_user_dir)
+    monkeypatch.setenv("KICAD_APP_PATH", original_app_path)
+    importlib.reload(config)
+
+
+def test_get_kicad_cli_path_can_return_none_when_not_required(monkeypatch):
+    """Optional KiCad CLI lookups should return None instead of raising."""
+    monkeypatch.setattr(
+        "kicad_mcp.utils.kicad_cli.get_cli_manager",
+        lambda: type("Manager", (), {"get_cli_path": staticmethod(lambda required=True: None)})(),
+    )
+
+    assert get_kicad_cli_path(required=False) is None
+
+
+@pytest.mark.asyncio
+async def test_find_component_connections_marks_results_as_inferred(monkeypatch):
+    """Connection lookup should expose incomplete connectivity explicitly."""
+    server = create_server()
+    tools = await server.get_tools()
+    fake_ctx = FakeContext()
+    project_path = Path("/tmp/test-project.kicad_pro")
+    project_path.write_text("{}")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.netlist_tools.get_project_files",
+        lambda path: {"schematic": "/tmp/demo.kicad_sch"},
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.tools.netlist_tools.extract_netlist",
+        lambda path: {
+            "components": {
+                "R1": {"pins": [{"num": "1", "name": "A"}, {"num": "2", "name": "B"}]},
+                "U1": {"pins": [{"num": "1", "name": "IN"}]},
+            },
+            "nets": {"NET1": [{"component": "R1", "pin": "1"}, {"component": "U1", "pin": "1"}]},
+            "component_count": 2,
+            "net_count": 1,
+            "limitations": ["partial connectivity"],
+            "netlist_quality": "partial",
+        },
+    )
+
+    result = await tools["find_component_connections"].fn(str(project_path), "R1", fake_ctx)
+
+    assert result["success"] is True
+    assert result["connectivity_complete"] is False
+    assert result["inferred_connection_count"] == 1
+    assert fake_ctx.info_messages[-1].startswith("Inferred 1 possible connections")

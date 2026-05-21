@@ -68,7 +68,7 @@ class KiCadCLIManager:
         logger.warning("KiCad CLI not found on this system")
         return None
 
-    def get_cli_path(self, required: bool = True) -> str:
+    def get_cli_path(self, required: bool = True) -> str | None:
         """
         Get KiCad CLI path, raising exception if not found and required.
 
@@ -76,7 +76,7 @@ class KiCadCLIManager:
             required: Whether to raise exception if CLI not found
 
         Returns:
-            Path to kicad-cli executable
+            Path to kicad-cli executable, or None when not found and required=False
 
         Raises:
             KiCadCLIError: If CLI not found and required=True
@@ -226,7 +226,7 @@ def find_kicad_cli(force_refresh: bool = False) -> str | None:
     return get_cli_manager().find_kicad_cli(force_refresh)
 
 
-def get_kicad_cli_path(required: bool = True) -> str:
+def get_kicad_cli_path(required: bool = True) -> str | None:
     """Convenience function to get KiCad CLI path."""
     return get_cli_manager().get_cli_path(required)
 
