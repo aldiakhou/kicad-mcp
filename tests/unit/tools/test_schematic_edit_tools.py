@@ -68,7 +68,16 @@ async def test_export_schematic_svg_uses_secure_cli_runner(monkeypatch: pytest.M
     server = create_server()
     tools = await server.get_tools()
 
-    def fake_run(self, command_args, input_files=None, output_files=None, working_dir=None, timeout=None, capture_output=True):
+    def fake_run(
+        runner,
+        command_args,
+        input_files=None,
+        output_files=None,
+        working_dir=None,
+        timeout=None,
+        capture_output=True,
+    ):
+        assert runner is not None
         assert command_args[:3] == ["sch", "export", "svg"]
         assert output_files == [str(output_path)]
         output_path.write_text("<svg/>", encoding="utf-8")

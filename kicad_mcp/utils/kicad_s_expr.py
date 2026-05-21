@@ -56,6 +56,8 @@ class SExprList:
 
 
 SExprNode: TypeAlias = SExprAtom | SExprList
+LABEL_ARRANGE_STEPS = (3.0, 6.0, 9.0, 12.0, 15.0)
+S_EXPRESSION_SPECIAL_CHARS = '()"'
 
 
 @dataclass(frozen=True)
@@ -435,7 +437,7 @@ class KiCadSchematic:
 
     def _candidate_positions(self, x: float, y: float) -> list[tuple[float, float]]:
         offsets = []
-        for step in (3.0, 6.0, 9.0, 12.0, 15.0):
+        for step in LABEL_ARRANGE_STEPS:
             offsets.extend(
                 [
                     (step, 0.0),
@@ -659,7 +661,7 @@ def _expand_bbox(bbox: BoundingBox, amount: float) -> BoundingBox:
 
 
 def _needs_quotes(value: str) -> bool:
-    return value == "" or any(char.isspace() or char in '()"' for char in value)
+    return value == "" or any(char.isspace() or char in S_EXPRESSION_SPECIAL_CHARS for char in value)
 
 
 def _format_number(value: float) -> str:
