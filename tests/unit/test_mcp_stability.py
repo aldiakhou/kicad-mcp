@@ -12,7 +12,7 @@ import pytest
 
 import kicad_mcp.config as config
 import kicad_mcp.server as server_module
-from kicad_mcp.server import create_server
+from kicad_mcp.server import create_server, get_transport_config
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.utils.kicad_api_detection import check_for_cli_api
 from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
@@ -31,6 +31,26 @@ class FakeContext:
 
     async def report_progress(self, current: int, total: int) -> None:
         self.progress_updates.append((current, total))
+
+
+class FakeRunnableServer:
+    """Minimal FastMCP-like server double for transport tests."""
+
+    def __init__(self) -> None:
+        self.run_kwargs: dict[str, object] | None = None
+
+    def run(self, *, transport: str = "stdio", host: str | None = None, port: int | None = None, path: str | None = None) -> None:
+        self.run_kwargs = {"transport": transport, "host": host, "port": port, "path": path}
+
+
+class FakeKwargsRunnableServer:
+    """FastMCP-like server double that accepts transport kwargs via **kwargs."""
+
+    def __init__(self) -> None:
+        self.run_kwargs: dict[str, object] | None = None
+
+    def run(self, *, transport: str = "stdio", **transport_kwargs: object) -> None:
+        self.run_kwargs = {"transport": transport, **transport_kwargs}
 
 
 @pytest.mark.asyncio
@@ -68,6 +88,69 @@ def test_main_entrypoint_calls_blocking_server_main(monkeypatch):
     runpy.run_path(str(main_path), run_name="__main__")
 
     assert called == [True]
+
+
+def test_transport_config_defaults_to_stdio(monkeypatch):
+    """Default transport should preserve the historical stdio behavior."""
+    monkeypatch.delenv("KICAD_MCP_TRANSPORT", raising=False)
+    monkeypatch.delenv("KICAD_MCP_HOST", raising=False)
+    monkeypatch.delenv("KICAD_MCP_PORT", raising=False)
+    monkeypatch.delenv("KICAD_MCP_PATH", raising=False)
+
+    assert get_transport_config() == {
+        "transport": "stdio",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "path": "/mcp",
+    }
+
+
+def test_transport_config_supports_sse_for_chatgpt_desktop(monkeypatch):
+    """SSE transport should be selectable for ChatGPT Desktop style local HTTP use."""
+    monkeypatch.setenv("KICAD_MCP_TRANSPORT", "sse")
+    monkeypatch.setenv("KICAD_MCP_HOST", "127.0.0.1")
+    monkeypatch.setenv("KICAD_MCP_PORT", "8765")
+
+    assert get_transport_config() == {
+        "transport": "sse",
+        "host": "127.0.0.1",
+        "port": 8765,
+        "path": "/sse",
+    }
+
+
+def test_run_server_passes_sse_transport_arguments():
+    """Run wrapper should pass transport arguments only when supported by FastMCP.run."""
+    fake_server = FakeRunnableServer()
+
+    server_module._run_server_with_config(
+        fake_server,
+        {"transport": "sse", "host": "127.0.0.1", "port": 8765, "path": "/sse"},
+    )
+
+    assert fake_server.run_kwargs == {
+        "transport": "sse",
+        "host": "127.0.0.1",
+        "port": 8765,
+        "path": "/sse",
+    }
+
+
+def test_run_server_passes_sse_transport_arguments_via_var_kwargs():
+    """Run wrapper should forward SSE options when FastMCP.run uses **transport_kwargs."""
+    fake_server = FakeKwargsRunnableServer()
+
+    server_module._run_server_with_config(
+        fake_server,
+        {"transport": "sse", "host": "127.0.0.1", "port": 8765, "path": "/sse"},
+    )
+
+    assert fake_server.run_kwargs == {
+        "transport": "sse",
+        "host": "127.0.0.1",
+        "port": 8765,
+        "path": "/sse",
+    }
 
 
 def test_extract_netlist_does_not_write_stdout(tmp_path: Path, capsys: pytest.CaptureFixture[str]):

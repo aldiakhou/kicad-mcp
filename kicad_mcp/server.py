@@ -5,9 +5,11 @@ MCP server creation and configuration.
 import atexit
 from collections.abc import Callable
 import functools
+import inspect
 import logging
 import os
 import signal
+from typing import Any
 
 from fastmcp import FastMCP
 
@@ -46,6 +48,13 @@ _shutting_down = False
 
 # Store server instance for clean shutdown
 _server_instance = None
+
+SUPPORTED_TRANSPORTS = {"stdio", "sse", "streamable-http", "http"}
+DEFAULT_TRANSPORT = "stdio"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
+DEFAULT_SSE_PATH = "/sse"
+DEFAULT_HTTP_PATH = "/mcp"
 
 
 def add_cleanup_handler(handler: Callable) -> None:
@@ -223,16 +232,89 @@ def setup_logging() -> None:
     )
 
 
+def _normalize_transport(value: str | None) -> str:
+    """Normalize and validate the configured MCP transport."""
+    transport = (value or DEFAULT_TRANSPORT).strip().lower().replace("_", "-")
+    if transport not in SUPPORTED_TRANSPORTS:
+        raise ValueError(
+            f"Unsupported MCP transport '{value}'. Supported values: {', '.join(sorted(SUPPORTED_TRANSPORTS))}"
+        )
+    return transport
+
+
+def _coerce_port(value: str | None) -> int:
+    """Parse a port value from the environment."""
+    if value in (None, ""):
+        return DEFAULT_PORT
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise ValueError(f"KICAD_MCP_PORT must be an integer, got: {value}") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"KICAD_MCP_PORT must be between 1 and 65535, got: {port}")
+    return port
+
+
+def get_transport_config() -> dict[str, Any]:
+    """Read MCP transport configuration from environment variables."""
+    transport = _normalize_transport(os.getenv("KICAD_MCP_TRANSPORT"))
+    default_path = DEFAULT_SSE_PATH if transport == "sse" else DEFAULT_HTTP_PATH
+    return {
+        "transport": transport,
+        "host": os.getenv("KICAD_MCP_HOST", DEFAULT_HOST),
+        "port": _coerce_port(os.getenv("KICAD_MCP_PORT")),
+        "path": os.getenv("KICAD_MCP_PATH", default_path),
+    }
+
+
+def _run_server_with_config(server: FastMCP, transport_config: dict[str, Any]) -> None:
+    """Run the FastMCP server with the configured transport.
+
+    The installed FastMCP version owns the actual transport implementation. This wrapper only
+    passes arguments supported by the local FastMCP.run signature, so stdio users keep the old
+    behavior while ChatGPT Desktop users can opt into SSE/HTTP transports.
+    """
+    run_signature = inspect.signature(server.run)
+    accepted_args = set(run_signature.parameters)
+    accepts_var_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in run_signature.parameters.values()
+    )
+    transport = transport_config["transport"]
+
+    kwargs: dict[str, Any] = {}
+    if "transport" in accepted_args:
+        kwargs["transport"] = transport
+    elif transport != "stdio":
+        raise RuntimeError("Installed FastMCP version does not expose transport selection in run().")
+
+    if transport != "stdio":
+        for key in ("host", "port", "path"):
+            if key in accepted_args or accepts_var_kwargs:
+                kwargs[key] = transport_config[key]
+
+    logging.info("Running KiCad MCP server with %s transport", transport)
+    if transport != "stdio":
+        logging.info(
+            "KiCad MCP HTTP endpoint: http://%s:%s%s",
+            transport_config["host"],
+            transport_config["port"],
+            transport_config["path"],
+        )
+    server.run(**kwargs)
+
+
 def main() -> None:
     """Start the KiCad MCP server (blocking)."""
     global _server_instance
     setup_logging()
+    transport_config = get_transport_config()
     logging.info("Starting KiCad MCP server...")
 
     server = create_server()
 
     try:
-        server.run()  # FastMCP manages its own event loop
+        _run_server_with_config(server, transport_config)
     except KeyboardInterrupt:
         logging.info("Server interrupted by user")
     except Exception as e:

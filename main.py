@@ -9,7 +9,7 @@ import os
 
 # Must import config BEFORE env potentially overrides it via os.environ
 from kicad_mcp import config
-from kicad_mcp.server import main as server_main
+from kicad_mcp.server import get_transport_config, main as server_main
 from kicad_mcp.utils.env import load_dotenv
 
 # --- Setup Logging ---
@@ -72,7 +72,17 @@ if __name__ == "__main__":
         else:
             logging.info("No additional search paths configured")
 
-        logging.info("Running server with stdio transport")
+        transport_config = get_transport_config()
+        logging.info(
+            "Running server with %s transport", transport_config["transport"]
+        )
+        if transport_config["transport"] != "stdio":
+            logging.info(
+                "MCP endpoint: http://%s:%s%s",
+                transport_config["host"],
+                transport_config["port"],
+                transport_config["path"],
+            )
         server_main()
     except Exception:
         logging.exception("Unhandled exception in main")
