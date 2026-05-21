@@ -9,6 +9,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 
 from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.native_netlist import export_native_netlist
 from kicad_mcp.utils.netlist_parser import (
     NETLIST_LIMITATIONS,
     analyze_netlist,
@@ -39,7 +40,13 @@ async def _extract_schematic_netlist_impl(
             await ctx.report_progress(20, 100)
             await ctx.info("Parsing schematic structure...")
 
-        netlist_data = extract_netlist(schematic_path)
+        native_netlist = export_native_netlist(schematic_path)
+        if native_netlist.get("success") and (
+            native_netlist.get("component_count", 0) > 0 or native_netlist.get("net_count", 0) > 0
+        ):
+            netlist_data = native_netlist
+        else:
+            netlist_data = extract_netlist(schematic_path)
 
         if "error" in netlist_data:
             logger.info(f"Error extracting netlist: {netlist_data['error']}")
@@ -53,7 +60,9 @@ async def _extract_schematic_netlist_impl(
                 f"Extracted {netlist_data['component_count']} components and {netlist_data['net_count']} nets"
             )
             await ctx.info(
-                "Note: net connectivity is currently partial and inferred from labels and power symbols."
+                "Native KiCad connectivity was used."
+                if netlist_data.get("connectivity_complete")
+                else "Note: net connectivity is currently partial and inferred from labels and power symbols."
             )
 
         if ctx:
@@ -75,8 +84,10 @@ async def _extract_schematic_netlist_impl(
             "analysis": analysis_results,
             "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
             "netlist_quality": netlist_data.get("netlist_quality", "partial"),
-            "connectivity_complete": False,
+            "connectivity_complete": bool(netlist_data.get("connectivity_complete", False)),
         }
+        if native_netlist.get("success") is False:
+            result["native_netlist_error"] = native_netlist.get("error")
 
         if ctx:
             await ctx.report_progress(100, 100)

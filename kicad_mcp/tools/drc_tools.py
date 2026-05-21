@@ -11,6 +11,7 @@ from fastmcp import Context, FastMCP
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.utils.drc_history import compare_with_previous, get_drc_history, save_drc_result
 from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.native_netlist import run_erc_via_cli
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,30 @@ def register_drc_tools(mcp: FastMCP) -> None:
             "entry_count": len(history_entries),
             "trend": trend,
         }
+
+    @mcp.tool()
+    async def run_erc_check(
+        project_path: str, ctx: Context | None, timeout_seconds: float | None = None
+    ) -> dict[str, Any]:
+        """Run an Electrical Rule Check on a KiCad schematic or project."""
+        logger.info("Running ERC check for: %s", project_path)
+        if not os.path.exists(project_path):
+            return {"success": False, "error": f"Path not found: {project_path}"}
+        schematic_path = project_path
+        if project_path.endswith(".kicad_pro"):
+            files = get_project_files(project_path)
+            if "schematic" not in files:
+                return {"success": False, "project_path": project_path, "error": "Schematic file not found in project"}
+            schematic_path = files["schematic"]
+        if ctx:
+            await ctx.report_progress(10, 100)
+            await ctx.info(f"Starting ERC check on {os.path.basename(schematic_path)}")
+        result = run_erc_via_cli(schematic_path, timeout_seconds=timeout_seconds)
+        if ctx:
+            await ctx.report_progress(100, 100)
+        if project_path.endswith(".kicad_pro"):
+            result["project_path"] = project_path
+        return result
 
     @mcp.tool()
     async def run_drc_check(

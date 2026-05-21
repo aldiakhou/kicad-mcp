@@ -23,6 +23,14 @@ def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     (property "Reference" "R" (at 0 0 0))
     (property "Value" "R" (at 0 2.54 0))
     (property "Footprint" "" (at 0 5.08 0))
+    (pin passive line (at -2.54 0 180) (length 2.54)
+      (name "~" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27))))
+    )
+    (pin passive line (at 2.54 0 0) (length 2.54)
+      (name "~" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27))))
+    )
   )
 )
 """,
@@ -74,6 +82,8 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         "schematic_add_wire",
         "schematic_add_label",
         "schematic_connect_points",
+        "schematic_get_pin_map",
+        "schematic_attach_net_to_pin",
         "schematic_delete_item",
         "pcb_add_footprint",
         "pcb_move_footprint",
@@ -81,6 +91,10 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         "pcb_add_track",
         "pcb_add_via",
         "pcb_generate_basic_layout",
+        "pcb_sync_from_schematic",
+        "pcb_apply_functional_placement",
+        "pcb_get_ratsnest",
+        "pcb_route_net_manhattan",
         "list_symbol_libraries",
         "list_footprint_libraries",
         "resolve_symbol",
@@ -156,6 +170,10 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         len(segment["points"]) == 2
         for segment in connection["changed_objects"]["connection"]["segments"]
     )
+    pin_map = tools["schematic_get_pin_map"].fn(schematic_path, "R1")
+    assert pin_map["success"] is True
+    assert {pin["number"] for pin in pin_map["pins"]} == {"1", "2"}
+
     deleted = await tools["schematic_delete_item"].fn(
         schematic_path,
         "label",
@@ -191,6 +209,136 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
     assert track["success"] is True
     via = await tools["pcb_add_via"].fn(pcb_path, "NET1", 35.0, 25.0, 0.3, 0.6, None)
     assert via["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_attach_net_to_pin_and_sync_from_native_netlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "sync_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+    pcb_path = project["created_files"]["pcb"]
+
+    symbol = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        30.0,
+        30.0,
+        0.0,
+        "Resistor_SMD:R_0603_1608Metric",
+        None,
+        None,
+    )
+    assert symbol["success"] is True
+
+    def fake_native_netlist(path: str):
+        return {
+            "success": True,
+            "components": {
+                "R1": {
+                    "reference": "R1",
+                    "value": "10k",
+                    "footprint": "Resistor_SMD:R_0603_1608Metric",
+                }
+            },
+            "nets": {
+                "NET1": {
+                    "name": "NET1",
+                    "nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1", "pintype": "passive"}],
+                },
+                "NET2": {
+                    "name": "NET2",
+                    "nodes": [{"ref": "R1", "pin": "2", "pinfunction": "~_2", "pintype": "passive"}],
+                },
+            },
+            "component_count": 1,
+            "net_count": 2,
+            "connectivity_complete": True,
+            "netlist_quality": "native",
+        }
+
+    monkeypatch.setattr("kicad_mcp.utils.schematic_pins.export_native_netlist", fake_native_netlist)
+    attach = await tools["schematic_attach_net_to_pin"].fn(
+        schematic_path,
+        "R1",
+        "1",
+        "NET1",
+        "global",
+        5.08,
+        False,
+        None,
+    )
+    assert attach["success"] is True
+    assert attach["validation"]["post_write"]["success"] is True
+
+    monkeypatch.setattr("kicad_mcp.tools.creation_tools.export_native_netlist", fake_native_netlist)
+    sync = await tools["pcb_sync_from_schematic"].fn(
+        project["project_path"],
+        60.0,
+        40.0,
+        "functional",
+        True,
+        None,
+    )
+    assert sync["success"] is True
+    pcb_text = Path(pcb_path).read_text(encoding="utf-8")
+    assert '(net 1 "NET1")' in pcb_text
+    assert '(net 2 "NET2")' in pcb_text
+    assert '(net 1 "NET1")' in pcb_text
+    assert '(net 2 "NET2")' in pcb_text
+
+    ratsnest = tools["pcb_get_ratsnest"].fn(project["project_path"])
+    assert ratsnest["success"] is True
+    assert ratsnest["connection_count"] == 0
+
+    route = await tools["pcb_route_net_manhattan"].fn(
+        pcb_path,
+        "NET1",
+        [{"x": 10.0, "y": 10.0}, {"x": 20.0, "y": 15.0}],
+        "F.Cu",
+        0.25,
+        None,
+    )
+    assert route["success"] is True
+    routed_text = Path(pcb_path).read_text(encoding="utf-8")
+    assert "(segment" in routed_text
+
+
+@pytest.mark.asyncio
+async def test_functional_placement_preserves_non_overlapping_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "place_demo", True, True, "A4")
+    pcb_path = project["created_files"]["pcb"]
+    for index, ref in enumerate(["R1", "R2"]):
+        added = await tools["pcb_add_footprint"].fn(
+            pcb_path,
+            "Resistor_SMD:R_0603_1608Metric",
+            ref,
+            "10k",
+            10.0 + index,
+            10.0,
+            0.0,
+            {"1": f"NET{index}", "2": "GND"},
+            None,
+        )
+        assert added["success"] is True
+
+    placement = await tools["pcb_apply_functional_placement"].fn(
+        project["project_path"], 80.0, 50.0, None
+    )
+    assert placement["success"] is True
+    assert placement["changed_objects"]["overlap_warnings"] == []
 
 
 @pytest.mark.asyncio

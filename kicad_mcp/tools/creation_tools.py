@@ -27,6 +27,12 @@ from kicad_mcp.utils.library_resolver import (
 from kicad_mcp.utils.library_resolver import (
     resolve_symbol as resolve_symbol_node,
 )
+from kicad_mcp.utils.native_netlist import export_native_netlist
+from kicad_mcp.utils.schematic_pins import (
+    attach_net_to_pin,
+    get_symbol_pin_map,
+    verify_native_net_membership,
+)
 from kicad_mcp.utils.transactional_edit import (
     create_file_backup,
     get_file_diff_against_backup,
@@ -240,6 +246,44 @@ def register_creation_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
+    def schematic_get_pin_map(schematic_path: str, reference: str) -> dict[str, Any]:
+        """Return transformed pin positions for a placed schematic symbol."""
+        return get_symbol_pin_map(schematic_path, reference)
+
+    @mcp.tool()
+    async def schematic_attach_net_to_pin(
+        schematic_path: str,
+        reference: str,
+        pin: str,
+        net_name: str,
+        label_type: str = "global",
+        stub_length_mm: float = 5.08,
+        allow_hidden_power: bool = False,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Attach a net label to an actual symbol pin coordinate and verify it natively."""
+        if ctx:
+            await ctx.info(f"Attaching {net_name} to {reference}.{pin}")
+        return _apply_transactional_schematic_authoring(
+            schematic_path,
+            lambda schematic: {
+                "attachment": attach_net_to_pin(
+                    schematic,
+                    schematic_path,
+                    reference,
+                    pin,
+                    net_name,
+                    label_type,
+                    stub_length_mm,
+                    allow_hidden_power,
+                )
+            },
+            post_write_validator=lambda path: verify_native_net_membership(
+                path, reference, pin, net_name
+            ),
+        )
+
+    @mcp.tool()
     async def schematic_delete_item(
         schematic_path: str,
         item_type: str,
@@ -435,6 +479,80 @@ def register_creation_tools(mcp: FastMCP) -> None:
         except Exception as exc:
             return {"success": False, "project_path": project_path, "error": str(exc)}
 
+    @mcp.tool()
+    async def pcb_sync_from_schematic(
+        project_path: str,
+        board_width_mm: float = 100.0,
+        board_height_mm: float = 80.0,
+        placement_style: str = "functional",
+        preserve_existing_placement: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Synchronize PCB footprints and pad nets from KiCad's native schematic netlist."""
+        if ctx:
+            await ctx.info("Synchronizing PCB from schematic netlist")
+        return _pcb_sync_from_schematic(
+            project_path,
+            board_width_mm,
+            board_height_mm,
+            placement_style,
+            preserve_existing_placement,
+        )
+
+    @mcp.tool()
+    async def pcb_apply_functional_placement(
+        project_path: str,
+        board_width_mm: float,
+        board_height_mm: float,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Apply a functional, overlap-aware initial placement to existing PCB footprints."""
+        if ctx:
+            await ctx.info("Applying functional PCB placement")
+        files = get_project_files(validate_local_path(project_path, "project", must_exist=True))
+        if "pcb" not in files:
+            return {"success": False, "project_path": project_path, "error": "PCB file not found"}
+        return _apply_transactional_pcb_edit(
+            files["pcb"],
+            lambda pcb: _apply_functional_placement(pcb, board_width_mm, board_height_mm),
+        )
+
+    @mcp.tool()
+    def pcb_get_ratsnest(project_path: str) -> dict[str, Any]:
+        """Expose unrouted pad-to-pad endpoints from current PCB pad net assignments."""
+        try:
+            files = get_project_files(validate_local_path(project_path, "project", must_exist=True))
+            if "pcb" not in files:
+                return {"success": False, "project_path": project_path, "error": "PCB file not found"}
+            pcb = KiCadPcb.from_file(files["pcb"])
+            return _build_ratsnest(project_path, files["pcb"], pcb)
+        except Exception as exc:
+            return {"success": False, "project_path": project_path, "error": str(exc)}
+
+    @mcp.tool()
+    async def pcb_route_net_manhattan(
+        pcb_path: str,
+        net_name: str,
+        waypoints: list[dict[str, float]],
+        layer: str = "F.Cu",
+        width_mm: float = 0.25,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Route a net with explicit Manhattan segments through the provided waypoints."""
+        if ctx:
+            await ctx.info(f"Routing {net_name} with Manhattan segments")
+        return _apply_transactional_pcb_edit(
+            pcb_path,
+            lambda pcb: {
+                "route": pcb.add_track(
+                    net_name,
+                    _manhattan_points(waypoints),
+                    layer,
+                    width_mm,
+                )
+            },
+        )
+
 
 def _create_schematic_file(
     project_path: str, overwrite: bool = False, paper: str = "A4"
@@ -475,6 +593,294 @@ def _create_schematic_file(
         return {"success": False, "project_path": project_path, "error": str(exc)}
 
 
+def _pcb_sync_from_schematic(
+    project_path: str,
+    board_width_mm: float,
+    board_height_mm: float,
+    placement_style: str,
+    preserve_existing_placement: bool,
+) -> dict[str, Any]:
+    if placement_style not in {"functional", "grid"}:
+        return {
+            "success": False,
+            "project_path": project_path,
+            "error": "placement_style must be one of: functional, grid",
+        }
+    try:
+        validated_project = validate_local_path(project_path, "project", must_exist=True)
+        files = get_project_files(validated_project)
+        if "schematic" not in files:
+            return {"success": False, "project_path": validated_project, "error": "No schematic file found"}
+        if "pcb" not in files:
+            created = _create_pcb_file(
+                validated_project,
+                overwrite=False,
+                board_width_mm=board_width_mm,
+                board_height_mm=board_height_mm,
+            )
+            if not created["success"]:
+                return created
+            files["pcb"] = created["pcb_path"]
+        native = export_native_netlist(files["schematic"])
+        if not native.get("success"):
+            return {
+                "success": False,
+                "project_path": validated_project,
+                "schematic_path": files["schematic"],
+                "error": native.get("error", "Native netlist export failed"),
+                "native_netlist": native,
+            }
+        components = native.get("components", {})
+        footprint_refs = {
+            ref: component
+            for ref, component in components.items()
+            if component.get("footprint")
+        }
+        resolved_footprints: dict[str, dict[str, Any]] = {}
+        missing_footprints = []
+        for ref, component in footprint_refs.items():
+            try:
+                resolved_footprints[ref] = resolve_footprint_node(component["footprint"])
+            except KiCadLibraryError as exc:
+                missing_footprints.append(
+                    {"reference": ref, "footprint": component.get("footprint"), "error": str(exc)}
+                )
+        assignments = _net_assignments_by_ref(native)
+
+        def mutate(pcb: KiCadPcb) -> dict[str, Any]:
+            outline = pcb.create_board_outline(board_width_mm, board_height_mm)
+            existing_refs = {
+                item["reference"] for item in pcb.list_footprints() if item.get("reference")
+            }
+            placed = []
+            updated = []
+            missing_pads = []
+            for net_name in native.get("nets", {}):
+                pcb.ensure_net(net_name)
+            for index, (ref, component) in enumerate(footprint_refs.items()):
+                if ref not in resolved_footprints:
+                    continue
+                if ref not in existing_refs:
+                    x, y, angle = _initial_component_position(
+                        ref, component, index, board_width_mm, board_height_mm, placement_style
+                    )
+                    placed.append(
+                        pcb.add_footprint(
+                            component["footprint"],
+                            cast(Any, resolved_footprints[ref]["node"]),
+                            ref,
+                            component.get("value", ""),
+                            x,
+                            y,
+                            angle,
+                        )
+                    )
+                elif not preserve_existing_placement:
+                    x, y, angle = _initial_component_position(
+                        ref, component, index, board_width_mm, board_height_mm, placement_style
+                    )
+                    updated.append(pcb.move_footprint(ref, x, y, angle))
+                pad_result = pcb.assign_footprint_pad_nets(ref, assignments.get(ref, {}))
+                missing_pads.extend(
+                    {"reference": ref, "pad": pad, "net": assignments.get(ref, {}).get(pad)}
+                    for pad in pad_result["missing_pads"]
+                )
+            stale = sorted(existing_refs - set(footprint_refs))
+            return {
+                "outline": outline,
+                "placed_footprints": placed,
+                "moved_footprints": updated,
+                "synced_footprints": sorted(set(footprint_refs) - {item["reference"] for item in missing_footprints}),
+                "synced_net_count": len(native.get("nets", {})),
+                "synced_pad_count": sum(len(item) for item in assignments.values()),
+                "missing_footprints": missing_footprints,
+                "missing_pads": missing_pads,
+                "stale_footprints": stale,
+                "unconnected_pins": [],
+            }
+
+        result = _apply_transactional_pcb_edit(files["pcb"], mutate)
+        if result.get("success"):
+            result["project_path"] = validated_project
+            result["schematic_path"] = files["schematic"]
+            result["native_netlist"] = {
+                "component_count": native.get("component_count", 0),
+                "net_count": native.get("net_count", 0),
+                "connectivity_complete": native.get("connectivity_complete", False),
+            }
+        return result
+    except Exception as exc:
+        return {"success": False, "project_path": project_path, "error": str(exc)}
+
+
+def _net_assignments_by_ref(native_netlist: dict[str, Any]) -> dict[str, dict[str, str]]:
+    assignments: dict[str, dict[str, str]] = {}
+    for net_name, net in native_netlist.get("nets", {}).items():
+        for node in net.get("nodes", []):
+            ref = node.get("ref")
+            pin = node.get("pin")
+            if ref and pin:
+                assignments.setdefault(ref, {})[pin] = net_name
+    return assignments
+
+
+def _initial_component_position(
+    reference: str,
+    component: dict[str, Any],
+    index: int,
+    board_width_mm: float,
+    board_height_mm: float,
+    placement_style: str,
+) -> tuple[float, float, float]:
+    if placement_style == "grid":
+        columns = max(1, int(board_width_mm // 20))
+        return 10.0 + (index % columns) * 20.0, 10.0 + (index // columns) * 20.0, 0.0
+    text = f"{reference} {component.get('value', '')} {component.get('footprint', '')}".lower()
+    if "usb" in text:
+        return 8.0, max(12.0, board_height_mm * 0.25), 90.0
+    if reference.startswith("U") and ("esp" in text or "mcu" in text):
+        return board_width_mm * 0.45, 18.0, 0.0
+    if "lcd" in text or "display" in text or "nhd" in text:
+        return board_width_mm * 0.58, board_height_mm * 0.62, 0.0
+    if reference.startswith("J"):
+        return board_width_mm * 0.15, board_height_mm * 0.55 + index * 4.0, 0.0
+    if reference.startswith(("SW", "S")):
+        return board_width_mm * 0.25 + index * 8.0, board_height_mm - 12.0, 0.0
+    if reference.startswith(("R", "C", "D")):
+        return board_width_mm * 0.30 + (index % 8) * 10.0, board_height_mm * 0.25 + (index // 8) * 8.0, 0.0
+    return board_width_mm * 0.5 + (index % 5) * 12.0, board_height_mm * 0.45 + (index // 5) * 10.0, 0.0
+
+
+def _apply_functional_placement(
+    pcb: KiCadPcb, board_width_mm: float, board_height_mm: float
+) -> dict[str, Any]:
+    outline = pcb.create_board_outline(board_width_mm, board_height_mm)
+    moved = []
+    occupied: list[dict[str, float]] = []
+    overlap_warnings = []
+    for index, footprint in enumerate(pcb.list_footprints()):
+        ref = footprint.get("reference") or f"FP{index}"
+        x, y, angle = _initial_component_position(
+            ref,
+            {
+                "value": footprint.get("value", ""),
+                "footprint": footprint.get("footprint_name", ""),
+            },
+            index,
+            board_width_mm,
+            board_height_mm,
+            "functional",
+        )
+        for _attempt in range(25):
+            pcb.move_footprint(ref, x, y, angle)
+            node = pcb.find_footprint(ref)
+            bounds = pcb.footprint_bounds(cast(Any, node)) if node is not None else {}
+            if not any(_bounds_intersect(bounds, other, padding=1.0) for other in occupied):
+                occupied.append(bounds)
+                break
+            x += 8.0
+            if x > board_width_mm - 8.0:
+                x = 10.0
+                y += 8.0
+        else:
+            overlap_warnings.append({"reference": ref, "warning": "Could not find non-overlapping placement"})
+        moved.append({"reference": ref, "position": {"x": x, "y": y, "angle": angle}})
+    keepout_warnings = _esp_antenna_keepout_warnings(pcb)
+    return {
+        "outline": outline,
+        "moved_footprints": moved,
+        "overlap_warnings": overlap_warnings,
+        "keepout_warnings": keepout_warnings,
+    }
+
+
+def _bounds_intersect(a: dict[str, float], b: dict[str, float], padding: float = 0.0) -> bool:
+    if not a or not b:
+        return False
+    return not (
+        a["right"] + padding < b["left"]
+        or a["left"] - padding > b["right"]
+        or a["bottom"] + padding < b["top"]
+        or a["top"] - padding > b["bottom"]
+    )
+
+
+def _esp_antenna_keepout_warnings(pcb: KiCadPcb) -> list[dict[str, str]]:
+    warnings = []
+    footprints = pcb.list_footprints()
+    for footprint in footprints:
+        name = f"{footprint.get('reference', '')} {footprint.get('footprint_name', '')}".lower()
+        if "esp" not in name:
+            continue
+        bounds = footprint.get("bounds", {})
+        antenna_keepout = {
+            "left": bounds.get("left", 0.0),
+            "right": bounds.get("right", 0.0),
+            "top": bounds.get("top", 0.0),
+            "bottom": bounds.get("top", 0.0) + 8.0,
+        }
+        for other in footprints:
+            if other.get("reference") == footprint.get("reference"):
+                continue
+            if _bounds_intersect(antenna_keepout, other.get("bounds", {}), padding=1.0):
+                warnings.append(
+                    {
+                        "reference": footprint.get("reference", ""),
+                        "warning": f"Antenna keepout may overlap {other.get('reference', '')}",
+                    }
+                )
+    return warnings
+
+
+def _build_ratsnest(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str, Any]:
+    pads_by_net: dict[str, list[dict[str, Any]]] = {}
+    for pad in pcb.footprint_pad_positions():
+        if pad.get("net_name"):
+            pads_by_net.setdefault(pad["net_name"], []).append(pad)
+    connections = []
+    for net_name, pads in sorted(pads_by_net.items()):
+        if len(pads) < 2:
+            continue
+        anchor = pads[0]
+        for pad in pads[1:]:
+            connections.append(
+                {
+                    "net_name": net_name,
+                    "from": {
+                        "reference": anchor["reference"],
+                        "pad": anchor["pad"],
+                        "position": anchor["position"],
+                    },
+                    "to": {
+                        "reference": pad["reference"],
+                        "pad": pad["pad"],
+                        "position": pad["position"],
+                    },
+                }
+            )
+    return {
+        "success": True,
+        "project_path": project_path,
+        "pcb_path": pcb_path,
+        "net_count": len(pads_by_net),
+        "connection_count": len(connections),
+        "connections": connections,
+    }
+
+
+def _manhattan_points(waypoints: list[dict[str, float]]) -> list[dict[str, float]]:
+    if len(waypoints) < 2:
+        raise ValueError("At least two waypoints are required")
+    points = [{"x": float(waypoints[0]["x"]), "y": float(waypoints[0]["y"])}]
+    for raw in waypoints[1:]:
+        end = {"x": float(raw["x"]), "y": float(raw["y"])}
+        start = points[-1]
+        if start["x"] != end["x"] and start["y"] != end["y"]:
+            points.append({"x": end["x"], "y": start["y"]})
+        points.append(end)
+    return points
+
+
 def _create_pcb_file(
     project_path: str,
     overwrite: bool = False,
@@ -505,10 +911,16 @@ def _create_pcb_file(
 def _apply_transactional_schematic_authoring(
     schematic_path: str,
     mutator: Callable[[KiCadSchematic], dict[str, Any]],
+    post_write_validator: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
 
-    return apply_transactional_schematic_edit(schematic_path, mutator, run_cli_validation=True)
+    return apply_transactional_schematic_edit(
+        schematic_path,
+        mutator,
+        run_cli_validation=True,
+        post_write_validator=post_write_validator,
+    )
 
 
 def _apply_transactional_pcb_edit(

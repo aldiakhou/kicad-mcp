@@ -5,6 +5,7 @@ Structured KiCad PCB S-expression editing utilities.
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from pathlib import Path
 from typing import Any
 import uuid
@@ -269,10 +270,121 @@ class KiCadPcb:
                 {
                     "reference": self._footprint_property_text(footprint, "Reference"),
                     "value": self._footprint_property_text(footprint, "Value"),
+                    "footprint_name": _atom_text(footprint.items[1] if len(footprint.items) > 1 else None),
                     "position": self._parse_at(footprint),
+                    "bounds": self.footprint_bounds(footprint),
                 }
             )
         return footprints
+
+    def assign_footprint_pad_nets(
+        self, reference: str, net_assignments: dict[str, str], clear_stale: bool = True
+    ) -> dict[str, Any]:
+        """Assign net names to pads on an existing footprint."""
+        footprint = self.find_footprint(reference)
+        if footprint is None:
+            raise KeyError(f"Footprint not found: {reference}")
+        pads = footprint.child_lists("pad")
+        available = {
+            _atom_text(pad.items[1] if len(pad.items) > 1 else None) or ""
+            for pad in pads
+        }
+        missing = sorted(pad for pad in net_assignments if pad not in available)
+        if clear_stale:
+            for pad in pads:
+                pad.items = [
+                    item
+                    for item in pad.items
+                    if not (isinstance(item, SExprList) and item.head() == "net")
+                ]
+        self._assign_pad_nets(footprint, net_assignments)
+        return {
+            "reference": reference,
+            "assigned_pads": sorted(pad for pad in net_assignments if pad in available),
+            "missing_pads": missing,
+        }
+
+    def list_nets(self) -> list[dict[str, Any]]:
+        """List board nets."""
+        nets = []
+        for net in self._top_level("net"):
+            if len(net.items) >= 3:
+                nets.append(
+                    {
+                        "id": int(_atom_text(net.items[1]) or "0"),
+                        "name": _atom_text(net.items[2]) or "",
+                    }
+                )
+        return sorted(nets, key=lambda item: item["id"])
+
+    def footprint_pad_positions(self) -> list[dict[str, Any]]:
+        """Return transformed pad positions with assigned net names."""
+        pads = []
+        for footprint in self._top_level("footprint"):
+            reference = self._footprint_property_text(footprint, "Reference") or ""
+            footprint_at = self._parse_at(footprint)
+            footprint_name = _atom_text(footprint.items[1] if len(footprint.items) > 1 else None) or ""
+            for pad in footprint.child_lists("pad"):
+                pad_number = _atom_text(pad.items[1] if len(pad.items) > 1 else None) or ""
+                local = self._parse_at(pad)
+                position = _transform_point(
+                    local["x"],
+                    local["y"],
+                    footprint_at["x"],
+                    footprint_at["y"],
+                    footprint_at["angle"],
+                )
+                net_expr = pad.first_child("net")
+                net_name = ""
+                net_id = 0
+                if net_expr is not None and len(net_expr.items) >= 3:
+                    net_id = int(_atom_text(net_expr.items[1]) or "0")
+                    net_name = _atom_text(net_expr.items[2]) or ""
+                pads.append(
+                    {
+                        "reference": reference,
+                        "footprint_name": footprint_name,
+                        "pad": pad_number,
+                        "position": position,
+                        "net_id": net_id,
+                        "net_name": net_name,
+                    }
+                )
+        return pads
+
+    def footprint_bounds(self, footprint: SExprList) -> dict[str, float]:
+        """Return a coarse transformed footprint bounding box."""
+        footprint_at = self._parse_at(footprint)
+        points = []
+        for pad in footprint.child_lists("pad"):
+            local = self._parse_at(pad)
+            size = pad.first_child("size")
+            half_w = 1.0
+            half_h = 1.0
+            if size is not None and len(size.items) >= 3:
+                try:
+                    half_w = max(0.5, float(_atom_text(size.items[1]) or "1") / 2.0)
+                    half_h = max(0.5, float(_atom_text(size.items[2]) or "1") / 2.0)
+                except ValueError:
+                    pass
+            for dx, dy in ((-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)):
+                points.append(
+                    _transform_point(
+                        local["x"] + dx,
+                        local["y"] + dy,
+                        footprint_at["x"],
+                        footprint_at["y"],
+                        footprint_at["angle"],
+                    )
+                )
+        if not points:
+            points = [{"x": footprint_at["x"] - 2.5, "y": footprint_at["y"] - 2.5}, {"x": footprint_at["x"] + 2.5, "y": footprint_at["y"] + 2.5}]
+        return {
+            "left": min(point["x"] for point in points),
+            "top": min(point["y"] for point in points),
+            "right": max(point["x"] for point in points),
+            "bottom": max(point["y"] for point in points),
+        }
 
     def _top_level(self, head: str) -> list[SExprList]:
         return [
@@ -448,6 +560,16 @@ def _coerce_point(point: dict[str, float]) -> dict[str, float]:
         return {"x": float(point["x"]), "y": float(point["y"])}
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"Point must contain numeric x and y values: {point}") from exc
+
+
+def _transform_point(
+    local_x: float, local_y: float, origin_x: float, origin_y: float, angle: float
+) -> dict[str, float]:
+    radians = math.radians(angle)
+    return {
+        "x": round(local_x * math.cos(radians) - local_y * math.sin(radians) + origin_x, 6),
+        "y": round(local_x * math.sin(radians) + local_y * math.cos(radians) + origin_y, 6),
+    }
 
 
 def _num(value: float) -> str:

@@ -482,7 +482,12 @@ def analyze_netlist(netlist_data: dict[str, Any]) -> dict[str, Any]:
             results["power_nets"].append(net_name)
 
     # Count pin connections
-    total_pins = sum(len(pins) for pins in netlist_data.get("nets", {}).values())
+    total_pins = 0
+    for pins in netlist_data.get("nets", {}).values():
+        if isinstance(pins, dict) and "nodes" in pins:
+            total_pins += len(pins["nodes"])
+        else:
+            total_pins += len(pins)
     results["total_pin_connections"] = total_pins
 
     return results
