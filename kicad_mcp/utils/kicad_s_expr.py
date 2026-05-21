@@ -56,7 +56,7 @@ class SExprList:
 
 
 SExprNode: TypeAlias = SExprAtom | SExprList
-LABEL_ARRANGE_STEPS = (3.0, 6.0, 9.0, 12.0, 15.0)
+LABEL_ARRANGE_OFFSET_STEPS_MM = (3.0, 6.0, 9.0, 12.0, 15.0)
 S_EXPRESSION_SPECIAL_CHARS = '()"'
 
 
@@ -437,7 +437,7 @@ class KiCadSchematic:
 
     def _candidate_positions(self, x: float, y: float) -> list[tuple[float, float]]:
         offsets = []
-        for step in LABEL_ARRANGE_STEPS:
+        for step in LABEL_ARRANGE_OFFSET_STEPS_MM:
             offsets.extend(
                 [
                     (step, 0.0),
@@ -741,7 +741,7 @@ def parse_s_expression(content: str) -> SExprList:
 
         if not node_stack:
             raise SExpressionError("Atom found outside S-expression list")
-        assert isinstance(token, SExprAtom)
+        assert isinstance(token, SExprAtom), f"Expected SExprAtom but got {type(token).__name__}"
         node_stack[-1].append(token)
 
     if node_stack:

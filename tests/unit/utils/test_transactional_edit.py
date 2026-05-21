@@ -3,6 +3,7 @@ import shutil
 
 import pytest
 
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.transactional_edit import (
     apply_transactional_schematic_edit,
     backup_project_files,
@@ -43,7 +44,10 @@ def test_apply_transactional_schematic_edit_creates_backup_and_diff(tmp_path: Pa
 
     assert result["success"] is True
     assert result["backup_path"]
-    assert "130" in Path(schematic_path).read_text(encoding="utf-8")
+    moved_schematic = KiCadSchematic.from_file(str(schematic_path))
+    moved_symbol = moved_schematic.get_symbol("R1")
+    assert moved_symbol is not None
+    assert moved_symbol["position"]["x"] == 130.0
     assert result["diff"]
 
     diff_result = get_file_diff_against_backup(str(schematic_path), result["backup_path"])
