@@ -11,12 +11,30 @@ from typing import Any
 
 from fastmcp import Context
 
+from kicad_mcp.config import TIMEOUT_CONSTANTS
 from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
 
 logger = logging.getLogger(__name__)
 
 
-async def run_drc_via_cli(pcb_file: str, ctx: Context | None) -> dict[str, Any]:
+def _resolve_drc_timeout(timeout_seconds: float | None) -> float:
+    """Resolve DRC timeout from explicit argument, environment, or config default."""
+    if timeout_seconds is not None and timeout_seconds > 0:
+        return float(timeout_seconds)
+    env_value = os.getenv("KICAD_DRC_TIMEOUT")
+    if env_value:
+        try:
+            parsed = float(env_value)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return float(TIMEOUT_CONSTANTS["kicad_cli_drc"])
+
+
+async def run_drc_via_cli(
+    pcb_file: str, ctx: Context | None, timeout_seconds: float | None = None
+) -> dict[str, Any]:
     """Run DRC using KiCad command line tools.
 
     Args:
@@ -26,7 +44,13 @@ async def run_drc_via_cli(pcb_file: str, ctx: Context | None) -> dict[str, Any]:
     Returns:
         Dictionary with DRC results
     """
-    results = {"success": False, "method": "cli", "pcb_file": pcb_file}
+    resolved_timeout = _resolve_drc_timeout(timeout_seconds)
+    results = {
+        "success": False,
+        "method": "cli",
+        "pcb_file": pcb_file,
+        "timeout_seconds": resolved_timeout,
+    }
 
     try:
         # Create a temporary directory for the output
@@ -50,7 +74,9 @@ async def run_drc_via_cli(pcb_file: str, ctx: Context | None) -> dict[str, Any]:
             cmd = [kicad_cli, "pcb", "drc", "--format", "json", "--output", output_file, pcb_file]
 
             logger.info("Running command: %s", " ".join(cmd))
-            process = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            process = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=resolved_timeout
+            )
 
             # Check if the command was successful
             if process.returncode != 0:
@@ -95,6 +121,7 @@ async def run_drc_via_cli(pcb_file: str, ctx: Context | None) -> dict[str, Any]:
                 "success": True,
                 "method": "cli",
                 "pcb_file": pcb_file,
+                "timeout_seconds": resolved_timeout,
                 "total_violations": violation_count,
                 "violation_categories": error_types,
                 "violations": violations,
@@ -104,6 +131,13 @@ async def run_drc_via_cli(pcb_file: str, ctx: Context | None) -> dict[str, Any]:
                 await ctx.report_progress(90, 100)
             return results
 
+    except subprocess.TimeoutExpired as e:
+        logger.warning("CLI DRC timed out after %s seconds: %s", resolved_timeout, e)
+        results["error"] = (
+            f"KiCad CLI DRC timed out after {resolved_timeout:g} seconds. "
+            "Increase timeout_seconds or KICAD_DRC_TIMEOUT for larger boards."
+        )
+        return results
     except Exception as e:
         logger.exception("Error in CLI DRC: %s", e)
         results["error"] = f"Error in CLI DRC: {e}"

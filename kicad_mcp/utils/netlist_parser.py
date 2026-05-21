@@ -8,6 +8,8 @@ import os
 import re
 from typing import Any
 
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
+
 logger = logging.getLogger(__name__)
 
 NETLIST_LIMITATIONS = [
@@ -154,17 +156,15 @@ class SchematicParser:
         """Extract component information from schematic."""
         logger.info("Extracting components")
 
-        # Extract all symbol expressions (components)
-        symbols = self._extract_s_expressions(r"\(symbol\s+")
-
-        for symbol in symbols:
-            component = self._parse_component(symbol)
-            if component:
-                self.components.append(component)
-
-                # Add to component info dictionary
-                ref = component.get("reference", "Unknown")
-                self.component_info[ref] = component
+        schematic = KiCadSchematic.from_text(self.content)
+        for symbol in schematic.list_symbols():
+            component = {
+                key: value
+                for key, value in symbol.items()
+                if key in {"lib_id", "reference", "value", "footprint", "properties", "position"}
+            }
+            self.components.append(component)
+            self.component_info[component["reference"]] = component
 
         logger.info(f"Extracted {len(self.components)} components")
 

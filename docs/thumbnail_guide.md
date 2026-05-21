@@ -13,7 +13,7 @@ Please generate a thumbnail for my KiCad project at /path/to/my_project/my_proje
 The tool will:
 1. Find the PCB file (.kicad_pcb) associated with your project
 2. Generate a visual representation of your PCB layout
-3. Return an image that you can view directly in Claude
+3. Return JSON-safe thumbnail metadata, including `thumbnail_path`, `mime_type`, and `file_size`
 
 ## How It Works
 

@@ -8,10 +8,10 @@ import os
 import subprocess
 
 from fastmcp import Context, FastMCP
-from fastmcp.utilities.types import Image
 
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
+from kicad_mcp.utils.preview_metadata import SVG_MIME_TYPE, svg_preview_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +29,14 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
             logger.info(f"Project not found: {project_path}")
             if ctx:
                 await ctx.info(f"Project not found: {project_path}")
-            return None
+            return {"success": False, "project_path": project_path, "error": "Project not found"}
 
         files = get_project_files(project_path)
         if "pcb" not in files:
             logger.info("PCB file not found in project")
             if ctx:
                 await ctx.info("PCB file not found in project")
-            return None
+            return {"success": False, "project_path": project_path, "error": "PCB file not found in project"}
 
         pcb_file = files["pcb"]
         logger.info(f"Found PCB file: {pcb_file}")
@@ -54,7 +54,8 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
 
         try:
             thumbnail = await generate_thumbnail_with_cli(pcb_file, ctx)
-            if thumbnail:
+            if thumbnail and thumbnail.get("success"):
+                thumbnail["project_path"] = project_path
                 if app_context and hasattr(app_context, "cache"):
                     app_context.cache[cache_key] = thumbnail
                 logger.info("Thumbnail generated successfully via CLI.")
@@ -62,12 +63,17 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
             logger.warning("generate_thumbnail_with_cli returned None")
             if ctx:
                 await ctx.info("Failed to generate thumbnail using kicad-cli.")
-            return None
+            return {
+                "success": False,
+                "project_path": project_path,
+                "pcb_path": pcb_file,
+                "error": "Failed to generate thumbnail using kicad-cli",
+            }
         except Exception as e:
             logger.exception("Error calling generate_thumbnail_with_cli: %s", e)
             if ctx:
                 await ctx.info(f"Error generating thumbnail with kicad-cli: {e}")
-            return None
+            return {"success": False, "project_path": project_path, "pcb_path": pcb_file, "error": str(e)}
 
     except asyncio.CancelledError:
         logger.info("Thumbnail generation cancelled")
@@ -76,7 +82,7 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
         logger.exception("Unexpected error in thumbnail generation: %s", e)
         if ctx:
             await ctx.info(f"Error: {e}")
-        return None
+        return {"success": False, "project_path": project_path, "error": str(e)}
 
 
 def register_export_tools(mcp: FastMCP) -> None:
@@ -118,7 +124,7 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
         ctx: MCP context for progress reporting
 
     Returns:
-        Image object containing the PCB thumbnail or None if generation failed
+        JSON-safe thumbnail metadata or None if generation failed
     """
     try:
         logger.info("Attempting to generate thumbnail using KiCad CLI tools")
@@ -171,16 +177,23 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
                 logger.info(f"Output file not created: {output_file}")
                 return None
 
-            # Read the image file
-            with open(output_file, "rb") as f:
-                img_data = f.read()
-
-            logger.info(f"Successfully generated thumbnail with CLI, size: {len(img_data)} bytes")
+            preview = svg_preview_metadata(output_file)
+            logger.info(
+                "Successfully generated thumbnail with CLI, size: %s bytes",
+                preview["file_size"],
+            )
             if ctx:
                 await ctx.report_progress(90, 100)
                 # Inform user about the saved file
                 await ctx.info(f"Thumbnail saved to: {output_file}")
-            return Image(data=img_data, format="svg")
+            return {
+                "success": True,
+                "pcb_path": pcb_file,
+                "thumbnail_path": output_file,
+                "mime_type": SVG_MIME_TYPE,
+                "file_size": preview["file_size"],
+                "preview": preview,
+            }
 
         except subprocess.CalledProcessError as e:
             logger.error("Command '%s' failed with code %s", " ".join(e.cmd), e.returncode)

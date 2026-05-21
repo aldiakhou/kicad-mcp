@@ -40,6 +40,8 @@ The tool will:
 - Save the results to your DRC history
 - Compare with previous runs (if available)
 
+`run_drc_check` accepts an optional `timeout_seconds` parameter. If omitted, the timeout defaults to `KICAD_DRC_TIMEOUT` or 120 seconds.
+
 ### Viewing DRC Reports
 
 There are two ways to view DRC information:

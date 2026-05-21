@@ -151,6 +151,11 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         None,
     )
     assert connection["success"] is True
+    assert len(connection["changed_objects"]["connection"]["segments"]) == 2
+    assert all(
+        len(segment["points"]) == 2
+        for segment in connection["changed_objects"]["connection"]["segments"]
+    )
     deleted = await tools["schematic_delete_item"].fn(
         schematic_path,
         "label",

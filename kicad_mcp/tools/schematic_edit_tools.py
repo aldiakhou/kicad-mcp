@@ -4,11 +4,9 @@ Safe schematic inspection, editing, validation, and preview tools.
 
 import logging
 import os
-from pathlib import Path
 from typing import Any, cast
 
 from fastmcp import Context, FastMCP
-from fastmcp.utilities.types import Image
 
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_s_expr import (
@@ -16,6 +14,7 @@ from kicad_mcp.utils.kicad_s_expr import (
     compare_block_connectivity_snapshots,
     compare_connectivity_snapshots,
 )
+from kicad_mcp.utils.preview_metadata import svg_preview_metadata
 from kicad_mcp.utils.transactional_edit import (
     apply_transactional_schematic_cleanup,
     apply_transactional_schematic_edit,
@@ -558,7 +557,7 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
             if not result.get("success"):
                 return result
             svg_path = result["svg_preview"]
-            result["preview"] = Image(data=Path(svg_path).read_bytes(), format="svg")
+            result["preview"] = svg_preview_metadata(svg_path)
             return result
         except Exception as exc:
             return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
@@ -735,10 +734,9 @@ def _export_schematic_svg(schematic_path: str, output_path: str | None) -> dict[
     export_result = export_schematic_svg_file(schematic_path, output_path)
     if not export_result["success"]:
         return export_result
-    preview_bytes = Path(export_result["svg_path"]).read_bytes()
     return {
         "success": True,
         "schematic_path": schematic_path,
         "svg_path": export_result["svg_path"],
-        "preview": Image(data=preview_bytes, format="svg"),
+        "preview": svg_preview_metadata(export_result["svg_path"]),
     }

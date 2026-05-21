@@ -66,7 +66,9 @@ def register_drc_tools(mcp: FastMCP) -> None:
         }
 
     @mcp.tool()
-    async def run_drc_check(project_path: str, ctx: Context | None) -> dict[str, Any]:
+    async def run_drc_check(
+        project_path: str, ctx: Context | None, timeout_seconds: float | None = None
+    ) -> dict[str, Any]:
         """Run a Design Rule Check on a KiCad PCB file.
 
         Args:
@@ -103,7 +105,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
         if ctx:
             await ctx.info("Using KiCad CLI for DRC check...")
         # logging.info(f"[DRC] Calling run_drc_via_cli for {pcb_file}") # <-- Remove log
-        drc_results = await run_drc_via_cli(pcb_file, ctx)
+        drc_results = await run_drc_via_cli(pcb_file, ctx, timeout_seconds=timeout_seconds)
         # logging.info(f"[DRC] run_drc_via_cli finished for {pcb_file}") # <-- Remove log
 
         # Process and save results if successful

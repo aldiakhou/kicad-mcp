@@ -55,6 +55,8 @@ Every transactional schematic write follows this sequence:
 - `schematic_preview_cleanup(schematic_path, layout_style="left_to_right", spacing_x=35.0, spacing_y=25.0, arrange_properties=True, preserve_connectivity=True)`
 - `schematic_apply_cleanup(schematic_path, layout_style="left_to_right", spacing_x=35.0, spacing_y=25.0, arrange_properties=True, preserve_connectivity=True, output_path=None)`
 
+`layout_style="grid"` is accepted as an alias for the same conservative block-spread layout.
+
 These are the recommended schematic cleanup tools for this branch. They keep writes conservative by limiting automatic edits to safe block translations plus symbol property arrangement.
 
 ## Cleanup workflow
@@ -94,7 +96,8 @@ By default, the tools refuse edits when they detect connectivity risk. Callers m
 - `export_schematic_svg(schematic_path, output_path=None)`
 - `export_schematic_preview(project_path)`
 
-These tools use `kicad-cli` through the repository’s secure subprocess wrapper and return an SVG path plus preview content when export succeeds.
+These tools use `kicad-cli` through the repository’s secure subprocess wrapper and return an SVG path plus JSON-safe preview metadata when export succeeds:
+`preview: {kind, path, mime_type, file_size}`.
 
 ## Current limitations
 

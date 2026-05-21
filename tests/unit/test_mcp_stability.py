@@ -5,9 +5,11 @@ Tests for MCP startup and stdout-safe behavior.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 
 import pytest
 
@@ -17,6 +19,7 @@ from kicad_mcp.server import create_server, get_transport_config
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.utils.kicad_api_detection import check_for_cli_api
 from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
+import kicad_mcp.utils.kicad_utils as kicad_utils
 from kicad_mcp.utils.netlist_parser import extract_netlist
 
 
@@ -174,6 +177,47 @@ def test_extract_netlist_does_not_write_stdout(tmp_path: Path, capsys: pytest.Ca
     assert result["limitations"]
 
 
+def test_extract_netlist_ignores_embedded_library_symbols(tmp_path: Path):
+    schematic_path = tmp_path / "embedded.kicad_sch"
+    schematic_path.write_text(
+        """
+(kicad_sch
+  (version 20231120)
+  (generator "pytest")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0))
+      (property "Value" "R" (at 0 2.54 0))
+      (symbol "R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (number "1"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 10 10 0)
+    (uuid 11111111-1111-1111-1111-111111111111)
+    (property "Reference" "R1" (at 10 8 0))
+    (property "Value" "10k" (at 10 12 0))
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 20 10 0)
+    (uuid 22222222-2222-2222-2222-222222222222)
+    (property "Reference" "R2" (at 20 8 0))
+    (property "Value" "1k" (at 20 12 0))
+  )
+)
+""",
+        encoding="utf-8",
+    )
+
+    result = extract_netlist(str(schematic_path))
+
+    assert result["component_count"] == 2
+    assert set(result["components"]) == {"R1", "R2"}
+
+
 @pytest.mark.asyncio
 async def test_extract_schematic_netlist_reports_missing_file_via_async_ctx():
     """Async tool paths should await ctx.info instead of leaking un-awaited coroutines."""
@@ -206,6 +250,63 @@ async def test_run_drc_via_cli_returns_structured_error_without_stdout(
     assert result["error"] == "KiCad CLI not found for tests"
 
 
+@pytest.mark.asyncio
+async def test_run_drc_via_cli_uses_explicit_timeout(monkeypatch, tmp_path: Path):
+    captured: dict[str, float] = {}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        captured["timeout"] = timeout
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        output_path.write_text(json.dumps({"violations": []}), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.get_kicad_cli_path", lambda: "kicad-cli")
+    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.subprocess.run", fake_run)
+
+    result = await run_drc_via_cli(str(tmp_path / "board.kicad_pcb"), None, timeout_seconds=12.5)
+
+    assert result["success"] is True
+    assert result["timeout_seconds"] == 12.5
+    assert captured["timeout"] == 12.5
+
+
+@pytest.mark.asyncio
+async def test_run_drc_via_cli_uses_env_timeout(monkeypatch, tmp_path: Path):
+    captured: dict[str, float] = {}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        captured["timeout"] = timeout
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        output_path.write_text(json.dumps({"violations": []}), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setenv("KICAD_DRC_TIMEOUT", "88")
+    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.get_kicad_cli_path", lambda: "kicad-cli")
+    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.subprocess.run", fake_run)
+
+    result = await run_drc_via_cli(str(tmp_path / "board.kicad_pcb"), None)
+
+    assert result["success"] is True
+    assert result["timeout_seconds"] == 88
+    assert captured["timeout"] == 88
+
+
+@pytest.mark.asyncio
+async def test_run_drc_via_cli_reports_timeout(monkeypatch, tmp_path: Path):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.get_kicad_cli_path", lambda: "kicad-cli")
+    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.subprocess.run", fake_run)
+
+    result = await run_drc_via_cli(str(tmp_path / "board.kicad_pcb"), None, timeout_seconds=1)
+
+    assert result["success"] is False
+    assert result["method"] == "cli"
+    assert result["timeout_seconds"] == 1
+    assert "KICAD_DRC_TIMEOUT" in result["error"]
+
+
 def test_check_for_cli_api_uses_shared_cli_detector(monkeypatch):
     """CLI detection should delegate to the shared KiCad CLI utility."""
     monkeypatch.setattr("kicad_mcp.utils.kicad_api_detection.is_kicad_cli_available", lambda: True)
@@ -213,6 +314,46 @@ def test_check_for_cli_api_uses_shared_cli_detector(monkeypatch):
 
     monkeypatch.setattr("kicad_mcp.utils.kicad_api_detection.is_kicad_cli_available", lambda: False)
     assert check_for_cli_api() is False
+
+
+def test_open_kicad_project_supports_windows_executable(monkeypatch, tmp_path: Path):
+    project_path = tmp_path / "demo.kicad_pro"
+    project_path.write_text("{}", encoding="utf-8")
+    kicad_dir = tmp_path / "KiCad"
+    exe_path = kicad_dir / "bin" / "kicad.exe"
+    exe_path.parent.mkdir(parents=True)
+    exe_path.write_text("", encoding="utf-8")
+    launched: dict[str, list[str]] = {}
+
+    monkeypatch.setattr(kicad_utils.sys, "platform", "win32")
+    monkeypatch.setattr(kicad_utils.config, "KICAD_APP_PATH", str(kicad_dir))
+    monkeypatch.setattr(
+        kicad_utils.subprocess,
+        "Popen",
+        lambda cmd: launched.setdefault("cmd", cmd),
+    )
+
+    result = kicad_utils.open_kicad_project(str(project_path))
+
+    assert result["success"] is True
+    assert result["method"] == "kicad_executable"
+    assert launched["cmd"] == [str(exe_path), str(project_path)]
+
+
+def test_open_kicad_project_windows_startfile_fallback(monkeypatch, tmp_path: Path):
+    project_path = tmp_path / "demo.kicad_pro"
+    project_path.write_text("{}", encoding="utf-8")
+    opened: dict[str, str] = {}
+
+    monkeypatch.setattr(kicad_utils.sys, "platform", "win32")
+    monkeypatch.setattr(kicad_utils.config, "KICAD_APP_PATH", str(tmp_path / "missing"))
+    monkeypatch.setattr(kicad_utils.os, "startfile", lambda path: opened.setdefault("path", path), raising=False)
+
+    result = kicad_utils.open_kicad_project(str(project_path))
+
+    assert result["success"] is True
+    assert result["method"] == "windows_file_association"
+    assert opened["path"] == str(project_path)
 
 
 def test_config_honors_environment_overrides(monkeypatch):

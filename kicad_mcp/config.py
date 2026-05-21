@@ -39,6 +39,18 @@ import platform
 # Returns 'Darwin' (macOS), 'Windows', 'Linux', or other
 system = platform.system()
 
+
+def _float_env(name: str, default: float) -> float:
+    """Read a positive float environment variable with a safe fallback."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
 # Platform-specific KiCad installation and user directory paths
 # These paths are used for finding KiCad resources and user projects
 if system == "Darwin":  # macOS
@@ -179,6 +191,7 @@ DEFAULT_FOOTPRINTS = {
 TIMEOUT_CONSTANTS = {
     "kicad_cli_version_check": 10.0,  # Timeout for KiCad CLI version checks
     "kicad_cli_export": 30.0,  # Timeout for KiCad CLI export operations
+    "kicad_cli_drc": _float_env("KICAD_DRC_TIMEOUT", 120.0),  # KiCad CLI DRC timeout
     "application_open": 10.0,  # Timeout for opening applications (e.g., KiCad)
     "subprocess_default": 30.0,  # Default timeout for subprocess operations
 }

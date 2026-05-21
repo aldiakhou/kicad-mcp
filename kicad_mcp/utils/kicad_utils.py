@@ -4,6 +4,7 @@ KiCad-specific utility functions.
 
 import logging
 import os
+from pathlib import Path
 import subprocess
 import sys
 from typing import Any
@@ -104,6 +105,45 @@ def open_kicad_project(project_path: str) -> dict[str, Any]:
         elif sys.platform == "linux": # Linux
             # On Linux, use 'xdg-open'
             cmd = ["xdg-open", project_path]
+        elif sys.platform == "win32":
+            configured_path = Path(config.KICAD_APP_PATH)
+            candidates = []
+            if configured_path.is_dir():
+                candidates.extend(
+                    [
+                        configured_path / "bin" / "kicad.exe",
+                        configured_path / "kicad.exe",
+                    ]
+                )
+            else:
+                candidates.append(configured_path)
+
+            for candidate in candidates:
+                if candidate.is_file():
+                    subprocess.Popen([str(candidate), project_path])  # nosec B603
+                    return {
+                        "success": True,
+                        "method": "kicad_executable",
+                        "command": f"{candidate} {project_path}",
+                        "output": "",
+                        "error": None,
+                    }
+
+            startfile = getattr(os, "startfile", None)
+            if startfile is not None:
+                startfile(project_path)
+                return {
+                    "success": True,
+                    "method": "windows_file_association",
+                    "command": f"startfile {project_path}",
+                    "output": "",
+                    "error": None,
+                }
+            return {
+                "success": False,
+                "method": "windows",
+                "error": f"KiCad executable not found under KICAD_APP_PATH: {config.KICAD_APP_PATH}",
+            }
         else:
             # Fallback or error for unsupported OS
             return {"success": False, "error": f"Unsupported operating system: {sys.platform}"}

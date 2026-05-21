@@ -2,6 +2,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
+from fastmcp.utilities.types import Image
 import pytest
 
 from kicad_mcp.server import create_server
@@ -13,6 +14,25 @@ def _copy_fixture(tmp_path: Path) -> Path:
     schematic_path = tmp_path / "tool_demo.kicad_sch"
     shutil.copy2(FIXTURE_PATH, schematic_path)
     return schematic_path
+
+
+def _assert_svg_preview(preview: dict, path: Path) -> None:
+    assert preview == {
+        "kind": "svg",
+        "path": str(path),
+        "mime_type": "image/svg+xml",
+        "file_size": path.stat().st_size,
+    }
+
+
+def _contains_image(value) -> bool:
+    if isinstance(value, Image):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_image(item) for item in value.values())
+    if isinstance(value, list | tuple):
+        return any(_contains_image(item) for item in value)
+    return False
 
 
 @pytest.mark.asyncio
@@ -117,7 +137,8 @@ async def test_export_schematic_svg_uses_secure_cli_runner(monkeypatch: pytest.M
 
     assert result["success"] is True
     assert result["svg_path"] == str(output_path)
-    assert result["preview"]._format == "svg"
+    _assert_svg_preview(result["preview"], output_path)
+    assert not _contains_image(result)
 
 
 @pytest.mark.asyncio
@@ -157,7 +178,7 @@ async def test_export_schematic_svg_resolves_cli_directory_output(
     assert result["success"] is True
     assert result["svg_path"] == str(output_path)
     assert output_path.is_file()
-    assert result["preview"]._format == "svg"
+    _assert_svg_preview(result["preview"], output_path)
 
 
 @pytest.mark.asyncio
@@ -200,4 +221,4 @@ async def test_export_schematic_svg_reads_legacy_svg_named_directory(
     assert result["success"] is True
     assert result["svg_path"] == str(expected_svg)
     assert expected_svg.is_file()
-    assert result["preview"]._format == "svg"
+    _assert_svg_preview(result["preview"], expected_svg)

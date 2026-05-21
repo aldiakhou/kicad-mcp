@@ -94,7 +94,13 @@ async def test_generate_project_thumbnail_uses_undecorated_helper(
 
     async def fake_thumbnail(pcb_file: str, ctx):
         assert pcb_file == str(pcb_path)
-        return "thumbnail"
+        return {
+            "success": True,
+            "pcb_path": pcb_file,
+            "thumbnail_path": str(tmp_path / "thumbnail.svg"),
+            "mime_type": "image/svg+xml",
+            "file_size": 6,
+        }
 
     monkeypatch.setattr(
         "kicad_mcp.tools.export_tools.get_project_files",
@@ -110,4 +116,6 @@ async def test_generate_project_thumbnail_uses_undecorated_helper(
 
     result = await tools["generate_project_thumbnail"].fn(str(project_path), None)
 
-    assert result == "thumbnail"
+    assert result["success"] is True
+    assert result["project_path"] == str(project_path)
+    assert result["pcb_path"] == str(pcb_path)

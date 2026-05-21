@@ -76,9 +76,26 @@ async def test_apply_cleanup_creates_backup_returns_diff_and_svg(
     assert result["backup_path"]
     assert result["diff"]
     assert result["svg_preview"] == str(output_path)
+    assert result["preview"] == {
+        "kind": "svg",
+        "path": str(output_path),
+        "mime_type": "image/svg+xml",
+        "file_size": output_path.stat().st_size,
+    }
     assert result["changed_objects"]["blocks_moved"]
     assert result["changed_objects"]["properties_arranged"]
     assert result["validation"]["connectivity"] == "preserved"
+
+
+def test_cleanup_workflow_accepts_grid_alias(patch_cli_validation: None, tmp_path: Path):
+    schematic_path = _copy_fixture(tmp_path)
+    server = create_server()
+    tools = asyncio.run(server.get_tools())
+
+    result = tools["schematic_preview_cleanup"].fn(str(schematic_path), "grid")
+
+    assert result["success"] is True
+    assert result["cleanup_plan"]["layout_style"] == "grid"
 
 
 @pytest.mark.asyncio

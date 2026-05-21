@@ -73,7 +73,7 @@ BLOCK_PROPERTY_ATTACHMENT_PADDING_MM = 12.0
 JUNCTION_MARKER_HALF_SIZE_MM = 0.6
 BLOCK_CONFIDENCE_HIGH_THRESHOLD = 3
 BLOCK_CONFIDENCE_MEDIUM_THRESHOLD = 1
-SUPPORTED_CLEANUP_LAYOUT_STYLES = {"left_to_right"}
+SUPPORTED_CLEANUP_LAYOUT_STYLES = {"left_to_right", "grid"}
 BLOCK_LAYOUT_PRIORITY_USB = 0
 BLOCK_LAYOUT_PRIORITY_POWER = 1
 BLOCK_LAYOUT_PRIORITY_MCU = 2
@@ -253,6 +253,12 @@ class KiCadSchematic:
         normalized_points = [_coerce_point(point) for point in points]
         if len(normalized_points) < 2:
             raise ValueError("A wire requires at least two points")
+        return self._add_wire_from_points(normalized_points, net_name)
+
+    def _add_wire_from_points(
+        self, normalized_points: list[dict[str, float]], net_name: str | None = None
+    ) -> dict[str, Any]:
+        """Add one wire object from normalized points."""
         wire_uuid = str(uuid.uuid4())
         wire = SExprList(
             [
@@ -290,7 +296,30 @@ class KiCadSchematic:
             points = [start_point, corner, end_point]
         else:
             raise ValueError("style must be one of: orthogonal, direct")
-        return self.add_wire(points, net_name)
+        segments = []
+        previous_point = points[0]
+        for point in points[1:]:
+            if _points_equal(previous_point, point):
+                previous_point = point
+                continue
+            segments.append([previous_point, point])
+            previous_point = point
+
+        if not segments:
+            raise ValueError("Connection points must not be identical")
+        if len(segments) == 1:
+            return self._add_wire_from_points(segments[0], net_name)
+
+        wires = []
+        label = None
+        for index, segment in enumerate(segments):
+            wire_result = self._add_wire_from_points(segment, None)
+            wires.append({"uuid": wire_result["uuid"], "points": wire_result["points"]})
+            if index == 0 and net_name:
+                first = segment[0]
+                label = self.add_label(net_name, first["x"], first["y"], "local", 0.0)
+
+        return {"segments": wires, "points": points, "net_label": label}
 
     def delete_item(self, item_type: str, item_id: str) -> dict[str, Any]:
         """Delete a supported top-level schematic item."""
@@ -2337,7 +2366,7 @@ class KiCadSchematic:
     def _sort_blocks_for_layout(
         self, blocks: list[dict[str, Any]], layout_style: str | None
     ) -> list[dict[str, Any]]:
-        if layout_style != "left_to_right":
+        if layout_style not in {"left_to_right", "grid"}:
             return sorted(blocks, key=self._default_block_sort_key)
         return sorted(
             blocks,
@@ -2946,6 +2975,12 @@ def _coerce_point(point: dict[str, float]) -> dict[str, float]:
         return {"x": float(point["x"]), "y": float(point["y"])}
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"Point must contain numeric x and y values: {point}") from exc
+
+
+def _points_equal(left: dict[str, float], right: dict[str, float]) -> bool:
+    return math.isclose(left["x"], right["x"], abs_tol=FLOAT_COMPARISON_TOLERANCE) and math.isclose(
+        left["y"], right["y"], abs_tol=FLOAT_COMPARISON_TOLERANCE
+    )
 
 
 def _needs_quotes(value: str) -> bool:
