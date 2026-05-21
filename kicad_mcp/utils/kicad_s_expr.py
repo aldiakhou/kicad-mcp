@@ -887,9 +887,7 @@ class KiCadSchematic:
         moved_blocks: list[dict[str, Any]] = []
         refusals: list[str] = []
         for placement in placements:
-            if math.isclose(placement["dx"], 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE) and math.isclose(
-                placement["dy"], 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE
-            ):
+            if self._is_zero_translation(placement["dx"], placement["dy"]):
                 continue
             block = self._require_functional_block_by_symbols(placement["symbols"])
             plan = self._plan_block_move(block, placement["dx"], placement["dy"])
@@ -1401,9 +1399,7 @@ class KiCadSchematic:
             outside_endpoint = 1 - inside_endpoint
             inside_point = wire["points"][inside_endpoint]
             outside_point = wire["points"][outside_endpoint]
-            if self.find_junctions_touching_point(inside_point["x"], inside_point["y"]) or self.find_junctions_touching_point(
-                outside_point["x"], outside_point["y"]
-            ):
+            if self._wire_touches_junction_at_points([inside_point, outside_point]):
                 cast(list[str], plan["refusals"]).append(
                     f"Cannot move block {block['block_id']} safely: boundary wire {wire_uuid} touches a junction."
                 )
@@ -1629,6 +1625,14 @@ class KiCadSchematic:
             for label in self.list_labels()
             if math.dist((x, y), (label["position"]["x"], label["position"]["y"])) <= CONNECTIVITY_TOLERANCE_MM
         ]
+
+    def _wire_touches_junction_at_points(self, points: list[dict[str, float]]) -> bool:
+        return any(self.find_junctions_touching_point(point["x"], point["y"]) for point in points)
+
+    def _is_zero_translation(self, dx: float, dy: float) -> bool:
+        return math.isclose(dx, 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE) and math.isclose(
+            dy, 0.0, abs_tol=FLOAT_COMPARISON_TOLERANCE
+        )
 
     def _attached_property_ids(self, symbol: dict[str, Any]) -> list[str]:
         symbol_box = self._symbol_bbox(symbol)
