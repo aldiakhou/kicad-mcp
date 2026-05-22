@@ -91,6 +91,8 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         "schematic_plan_erc_fixes",
         "schematic_apply_functional_layout",
         "project_completion_report",
+        "project_next_actions",
+        "schematic_apply_safe_erc_fixes",
         "schematic_delete_item",
         "pcb_add_footprint",
         "pcb_move_footprint",
@@ -682,6 +684,152 @@ async def test_project_completion_report_combines_generic_status(
     assert report["status"]["drc_clean_or_skipped"] is True
     assert report["native_netlist"]["connectivity_complete"] is True
     assert report["drc"]["skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_project_next_actions_prioritizes_routing_for_synced_unrouted_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "next_demo", True, True, "A4")
+    pcb_path = project["created_files"]["pcb"]
+    added = await tools["pcb_add_footprint"].fn(
+        pcb_path,
+        "Resistor_SMD:R_0603_1608Metric",
+        "R1",
+        "10k",
+        10.0,
+        10.0,
+        0.0,
+        {"1": "NET1", "2": "GND"},
+        None,
+    )
+    assert added["success"] is True
+    added = await tools["pcb_add_footprint"].fn(
+        pcb_path,
+        "Resistor_SMD:R_0603_1608Metric",
+        "R2",
+        "10k",
+        20.0,
+        10.0,
+        0.0,
+        {"1": "NET1", "2": "GND"},
+        None,
+    )
+    assert added["success"] is True
+
+    fake_native = {
+        "success": True,
+        "components": {
+            "R1": {
+                "reference": "R1",
+                "value": "10k",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+            },
+            "R2": {
+                "reference": "R2",
+                "value": "10k",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+            }
+        },
+        "nets": {
+            "NET1": {
+                "nodes": [
+                    {"ref": "R1", "pin": "1", "pinfunction": "~_1"},
+                    {"ref": "R2", "pin": "1", "pinfunction": "~_1"},
+                ]
+            },
+            "GND": {
+                "nodes": [
+                    {"ref": "R1", "pin": "2", "pinfunction": "~_2"},
+                    {"ref": "R2", "pin": "2", "pinfunction": "~_2"},
+                ]
+            },
+        },
+        "component_count": 2,
+        "net_count": 2,
+        "connectivity_complete": True,
+    }
+    monkeypatch.setattr("kicad_mcp.utils.schematic_builder.export_native_netlist", lambda _path: fake_native)
+    monkeypatch.setattr("kicad_mcp.tools.creation_tools.export_native_netlist", lambda _path: fake_native)
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools.run_erc_via_cli",
+        lambda _path, timeout_seconds=None: {
+            "success": True,
+            "total_violations": 0,
+            "violation_categories": {},
+            "severity_counts": {},
+            "violations": [],
+        },
+    )
+
+    actions = await tools["project_next_actions"].fn(
+        project["project_path"],
+        True,
+        False,
+        None,
+        None,
+    )
+
+    assert actions["success"] is True
+    assert actions["top_action"]["id"] == "route_unrouted_nets"
+    assert actions["top_action"]["details"]["ratsnest_connection_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_schematic_apply_safe_erc_fixes_deletes_explicit_dangling_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "safe_fix_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+    label = await tools["schematic_add_label"].fn(
+        schematic_path, "FLOATING", 50.8, 50.8, "global", 0.0, None
+    )
+    label_uuid = label["changed_objects"]["label"]["uuid"]
+    fix = {
+        "kind": "delete_dangling_label",
+        "label_uuid": label_uuid,
+        "action": {"kind": "delete_dangling_label", "auto_safe": True},
+    }
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools.run_erc_via_cli",
+        lambda _path, timeout_seconds=None: {
+            "success": True,
+            "total_violations": 0,
+            "violation_categories": {},
+            "severity_counts": {},
+            "violations": [],
+        },
+    )
+
+    dry_run = await tools["schematic_apply_safe_erc_fixes"].fn(
+        schematic_path,
+        [fix],
+        True,
+        None,
+        None,
+    )
+    assert dry_run["success"] is True
+    assert dry_run["dry_run"] is True
+    assert dry_run["planned_fix_count"] == 1
+    assert "FLOATING" in Path(schematic_path).read_text(encoding="utf-8")
+
+    applied = await tools["schematic_apply_safe_erc_fixes"].fn(
+        schematic_path,
+        [fix],
+        False,
+        None,
+        None,
+    )
+    assert applied["success"] is True
+    assert "FLOATING" not in Path(schematic_path).read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

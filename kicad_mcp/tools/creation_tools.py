@@ -189,6 +189,32 @@ def register_creation_tools(mcp: FastMCP) -> None:
         return await _project_completion_report(project_path, run_erc, run_drc, timeout_seconds)
 
     @mcp.tool()
+    async def project_next_actions(
+        project_path: str,
+        run_erc: bool = True,
+        run_drc: bool = False,
+        timeout_seconds: float | None = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Return ordered generic next actions for bringing a KiCad project to completion."""
+        if ctx:
+            await ctx.info("Planning project next actions")
+        return await _project_next_actions(project_path, run_erc, run_drc, timeout_seconds)
+
+    @mcp.tool()
+    async def schematic_apply_safe_erc_fixes(
+        project_path: str,
+        fixes: list[dict[str, Any]] | None = None,
+        dry_run: bool = True,
+        timeout_seconds: float | None = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Apply only explicitly safe ERC fixes; ambiguous ERC findings remain manual."""
+        if ctx:
+            await ctx.info("Applying safe ERC fixes" if not dry_run else "Previewing safe ERC fixes")
+        return _schematic_apply_safe_erc_fixes(project_path, fixes, dry_run, timeout_seconds)
+
+    @mcp.tool()
     def list_symbol_libraries(query: str | None = None) -> dict[str, Any]:
         """List available KiCad symbol libraries."""
         libraries = resolve_symbol_libraries(query)
@@ -1418,6 +1444,264 @@ async def _project_completion_report(
         }
     except Exception as exc:
         return {"success": False, "project_path": project_path, "error": str(exc)}
+
+
+async def _project_next_actions(
+    project_path: str,
+    run_erc: bool,
+    run_drc: bool,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    report = await _project_completion_report(project_path, run_erc, run_drc, timeout_seconds)
+    if not report.get("success"):
+        return report
+    actions = _next_actions_from_completion_report(report)
+    return {
+        "success": True,
+        "project_path": report["project_path"],
+        "actions": actions,
+        "action_count": len(actions),
+        "top_action": actions[0] if actions else None,
+        "status": report["status"],
+        "completion_report": report,
+    }
+
+
+def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = []
+    erc_plan = report.get("erc_plan", {})
+    schematic = report.get("schematic", {})
+    quality_gate = schematic.get("quality_gate", {})
+    blocking_counts = quality_gate.get("blocking_counts", {})
+    pcb = report.get("pcb", {}) or {}
+    ratsnest = report.get("ratsnest", {}) or {}
+    drc = report.get("drc", {}) or {}
+    status = report.get("status", {})
+
+    if erc_plan.get("safe_auto_fix_count", 0) > 0:
+        actions.append(
+            _next_action(
+                "fix_safe_erc_items",
+                "Fix deterministic ERC issues",
+                "schematic_apply_safe_erc_fixes",
+                "high",
+                "The ERC planner found fixes marked safe to apply.",
+                {"dry_run_first": True},
+            )
+        )
+    if erc_plan.get("manual_decision_count", 0) > 0:
+        actions.append(
+            _next_action(
+                "resolve_manual_erc_decisions",
+                "Resolve ERC items needing design intent",
+                "schematic_plan_erc_fixes",
+                "high",
+                "Some ERC findings cannot be fixed safely without choosing the intended circuit behavior.",
+                {"blocked_reasons": erc_plan.get("blocked_reasons", [])},
+            )
+        )
+    if not quality_gate.get("passed", False):
+        actions.append(
+            _next_action(
+                "fix_schematic_quality_gate",
+                "Fix schematic quality blockers",
+                "schematic_quality_report",
+                "high",
+                "The schematic quality gate has blocking findings.",
+                {"blocking_counts": blocking_counts},
+            )
+        )
+    if not report.get("native_netlist", {}).get("connectivity_complete", False):
+        actions.append(
+            _next_action(
+                "complete_native_netlist",
+                "Complete schematic connectivity",
+                "schematic_apply_connection_plan",
+                "high",
+                "Native KiCad netlist extraction is incomplete.",
+                {},
+            )
+        )
+    if status.get("schematic_complete") and not status.get("pcb_synced"):
+        actions.append(
+            _next_action(
+                "sync_pcb_from_schematic",
+                "Sync PCB from schematic",
+                "pcb_complete_from_schematic",
+                "high",
+                "Schematic is complete, but PCB footprints/pad nets are not synced.",
+                {},
+            )
+        )
+    if status.get("pcb_synced") and not status.get("placement_valid"):
+        actions.append(
+            _next_action(
+                "apply_pcb_functional_placement",
+                "Apply functional PCB placement",
+                "pcb_apply_functional_placement",
+                "medium",
+                "PCB exists but placement has overlap or keepout warnings.",
+                {
+                    "overlap_warning_count": pcb.get("overlap_warning_count"),
+                    "keepout_warning_count": pcb.get("keepout_warning_count"),
+                },
+            )
+        )
+    if status.get("ready_for_routing") and not status.get("routing_complete"):
+        actions.append(
+            _next_action(
+                "route_unrouted_nets",
+                "Route remaining ratsnest connections",
+                "pcb_get_ratsnest",
+                "high",
+                "PCB is synced and placed, but copper routing is not complete.",
+                {"ratsnest_connection_count": ratsnest.get("connection_count")},
+            )
+        )
+    if status.get("routing_complete") and drc.get("skipped", False):
+        actions.append(
+            _next_action(
+                "run_drc",
+                "Run PCB DRC",
+                "run_drc_check",
+                "medium",
+                "Routing appears complete and DRC has not been run in this report.",
+                {},
+            )
+        )
+    if drc.get("success") and drc.get("total_violations", 0):
+        actions.append(
+            _next_action(
+                "fix_drc_violations",
+                "Fix PCB DRC violations",
+                "run_drc_check",
+                "high",
+                "KiCad DRC reports board-level violations.",
+                {"violation_categories": drc.get("violation_categories")},
+            )
+        )
+    if erc_plan.get("accepted_warning_count", 0) > 0:
+        actions.append(
+            _next_action(
+                "optional_review_accepted_erc_warnings",
+                "Review accepted ERC warnings",
+                "schematic_explain_erc",
+                "low",
+                "Only non-blocking accepted ERC warnings remain.",
+                {"accepted_warnings": erc_plan.get("accepted_warnings", [])},
+            )
+        )
+    if not actions and status.get("ready_for_release"):
+        actions.append(
+            _next_action(
+                "ready_for_release",
+                "Project is ready for release checks",
+                "project_completion_report",
+                "low",
+                "Schematic, PCB sync, routing, and DRC status are complete.",
+                {},
+            )
+        )
+    return actions
+
+
+def _next_action(
+    action_id: str,
+    title: str,
+    tool: str,
+    priority: str,
+    reason: str,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": action_id,
+        "title": title,
+        "tool": tool,
+        "priority": priority,
+        "reason": reason,
+        "details": details,
+    }
+
+
+def _schematic_apply_safe_erc_fixes(
+    project_or_schematic_path: str,
+    fixes: list[dict[str, Any]] | None,
+    dry_run: bool,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    plan = _schematic_plan_erc_fixes(project_or_schematic_path, timeout_seconds)
+    if not plan.get("success"):
+        return plan
+    requested_fixes = fixes or plan.get("safe_auto_fixes", [])
+    supported, unsupported = _partition_supported_safe_fixes(requested_fixes)
+    if dry_run:
+        return {
+            "success": True,
+            "project_path": project_or_schematic_path,
+            "schematic_path": plan.get("schematic_path"),
+            "dry_run": True,
+            "planned_fixes": supported,
+            "planned_fix_count": len(supported),
+            "unsupported_or_manual": unsupported + plan.get("manual_decisions", []),
+            "accepted_warnings": plan.get("accepted_warnings", []),
+            "message": "Dry run only; pass dry_run=False to apply supported explicit safe fixes.",
+        }
+    if not supported:
+        return {
+            "success": True,
+            "project_path": project_or_schematic_path,
+            "schematic_path": plan.get("schematic_path"),
+            "dry_run": False,
+            "applied_fixes": [],
+            "applied_fix_count": 0,
+            "unsupported_or_manual": unsupported + plan.get("manual_decisions", []),
+            "accepted_warnings": plan.get("accepted_warnings", []),
+            "message": "No supported safe ERC fixes were available to apply.",
+        }
+
+    schematic_path = plan["schematic_path"]
+    result = _apply_transactional_schematic_authoring(
+        schematic_path,
+        lambda schematic: {"applied_fixes": _apply_supported_safe_fixes(schematic, supported)},
+    )
+    result["dry_run"] = False
+    result["unsupported_or_manual"] = unsupported + plan.get("manual_decisions", [])
+    result["accepted_warnings"] = plan.get("accepted_warnings", [])
+    return result
+
+
+def _partition_supported_safe_fixes(
+    fixes: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    supported = []
+    unsupported = []
+    for fix in fixes:
+        action = fix.get("action", fix.get("suggested_action", {}))
+        kind = action.get("kind") or fix.get("kind")
+        if kind == "delete_dangling_label" and fix.get("label_uuid"):
+            supported.append(fix)
+        else:
+            unsupported.append(fix)
+    return supported, unsupported
+
+
+def _apply_supported_safe_fixes(
+    schematic: KiCadSchematic, fixes: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    applied = []
+    for fix in fixes:
+        action = fix.get("action", fix.get("suggested_action", {}))
+        kind = action.get("kind") or fix.get("kind")
+        if kind == "delete_dangling_label":
+            label_uuid = fix["label_uuid"]
+            applied.append(
+                {
+                    "kind": kind,
+                    "label_uuid": label_uuid,
+                    "result": schematic.delete_item("label", label_uuid),
+                }
+            )
+    return applied
 
 
 def _create_schematic_file(
