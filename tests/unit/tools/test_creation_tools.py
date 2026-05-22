@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from kicad_mcp.server import create_server
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 
 
 def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,6 +85,12 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         "schematic_connect_points",
         "schematic_get_pin_map",
         "schematic_attach_net_to_pin",
+        "schematic_apply_connection_plan",
+        "schematic_add_no_connect",
+        "schematic_explain_erc",
+        "schematic_plan_erc_fixes",
+        "schematic_apply_functional_layout",
+        "project_completion_report",
         "schematic_delete_item",
         "pcb_add_footprint",
         "pcb_move_footprint",
@@ -92,8 +99,10 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         "pcb_add_via",
         "pcb_generate_basic_layout",
         "pcb_sync_from_schematic",
+        "pcb_complete_from_schematic",
         "pcb_apply_functional_placement",
         "pcb_get_ratsnest",
+        "pcb_quality_report",
         "pcb_route_net_manhattan",
         "list_symbol_libraries",
         "list_footprint_libraries",
@@ -293,6 +302,13 @@ async def test_attach_net_to_pin_and_sync_from_native_netlist(
     assert '(net 1 "NET1")' in pcb_text
     assert '(net 2 "NET2")' in pcb_text
 
+    quality = tools["pcb_quality_report"].fn(project["project_path"])
+    assert quality["success"] is True
+    assert quality["footprint_count"] == 1
+    assert quality["net_count"] == 2
+    assert quality["assigned_pad_count"] == 2
+    assert quality["routing_complete"] is False
+
     ratsnest = tools["pcb_get_ratsnest"].fn(project["project_path"])
     assert ratsnest["success"] is True
     assert ratsnest["connection_count"] == 0
@@ -308,6 +324,364 @@ async def test_attach_net_to_pin_and_sync_from_native_netlist(
     assert route["success"] is True
     routed_text = Path(pcb_path).read_text(encoding="utf-8")
     assert "(segment" in routed_text
+
+
+@pytest.mark.asyncio
+async def test_apply_connection_plan_batches_connections_no_connects_and_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "plan_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+
+    for ref, x in [("R1", 25.4), ("R2", 38.1)]:
+        symbol = await tools["schematic_add_symbol"].fn(
+            schematic_path,
+            "Device:R",
+            ref,
+            "10k",
+            x,
+            25.4,
+            0.0,
+            "Resistor_SMD:R_0603_1608Metric",
+            None,
+            None,
+        )
+        assert symbol["success"] is True
+
+    def fake_native_netlist(_path: str):
+        return {
+            "success": True,
+            "components": {},
+            "nets": {
+                "NET1": {"nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1"}]},
+                "NET2": {"nodes": [{"ref": "R1", "pin": "2", "pinfunction": "~_2"}]},
+            },
+            "component_count": 2,
+            "net_count": 2,
+            "connectivity_complete": True,
+        }
+
+    monkeypatch.setattr("kicad_mcp.utils.schematic_builder.export_native_netlist", fake_native_netlist)
+    result = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [
+            {"ref": "R1", "pin": "1", "net": "NET1"},
+            {"ref": "R1", "pin": "2", "net": "NET2"},
+        ],
+        [{"ref": "R2", "pin": "1"}],
+        True,
+        True,
+        None,
+    )
+
+    assert result["success"] is True
+    assert result["changed_objects"]["plan_summary"]["required_connection_count"] == 2
+    assert result["changed_objects"]["plan_summary"]["no_connect_count"] == 1
+    assert result["validation"]["post_write"]["success"] is True
+    assert "NET1" in Path(schematic_path).read_text(encoding="utf-8")
+    assert "(no_connect" in Path(schematic_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_apply_connection_plan_rolls_back_failed_required_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "rollback_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+    symbol = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        25.4,
+        25.4,
+        0.0,
+        "Resistor_SMD:R_0603_1608Metric",
+        None,
+        None,
+    )
+    assert symbol["success"] is True
+
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda _path: {
+            "success": True,
+            "components": {},
+            "nets": {"OTHER": {"nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1"}]}},
+            "component_count": 1,
+            "net_count": 1,
+            "connectivity_complete": True,
+        },
+    )
+    result = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NET_BAD"}],
+        None,
+        True,
+        True,
+        None,
+    )
+
+    assert result["success"] is False
+    assert result["rolled_back"] is True
+    assert "NET_BAD" not in Path(schematic_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_schematic_quality_report_detects_generic_authoring_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "quality_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+    label = await tools["schematic_add_label"].fn(
+        schematic_path, "FLOATING", 50.8, 50.8, "global", 0.0, None
+    )
+    assert label["success"] is True
+
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda _path: {
+            "success": True,
+            "components": {},
+            "nets": {
+                "+3.3V": {
+                    "nodes": [
+                        {
+                            "ref": "U1",
+                            "pin": "1",
+                            "pinfunction": "GND_1",
+                            "pintype": "power_in",
+                        }
+                    ]
+                }
+            },
+            "component_count": 1,
+            "net_count": 1,
+            "connectivity_complete": True,
+        },
+    )
+    report = tools["schematic_quality_report"].fn(schematic_path, False)
+
+    assert report["success"] is True
+    assert report["dangling_label_count"] == 1
+    assert report["isolated_label_count"] == 1
+    assert report["power_ground_mismatch_count"] == 1
+    assert report["quality_gate"]["passed"] is False
+
+
+@pytest.mark.asyncio
+async def test_schematic_erc_explanation_accepts_library_mismatch_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "erc_warn_demo", True, True, "A4")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools.run_erc_via_cli",
+        lambda _path, timeout_seconds=None: {
+            "success": True,
+            "total_violations": 1,
+            "violation_categories": {"lib_symbol_mismatch": 1},
+            "severity_counts": {"warning": 1},
+            "violations": [
+                {
+                    "type": "lib_symbol_mismatch",
+                    "severity": "warning",
+                    "description": "Symbol differs from library",
+                    "items": [{"description": "Symbol U1 [AMS1117-3.3]"}],
+                }
+            ],
+        },
+    )
+
+    explanation = tools["schematic_explain_erc"].fn(project["project_path"], True, None)
+    plan = tools["schematic_plan_erc_fixes"].fn(project["project_path"], None)
+
+    assert explanation["success"] is True
+    assert explanation["blocking_count"] == 0
+    assert explanation["accepted_warning_count"] == 1
+    assert explanation["findings"][0]["classification"] == "accepted_warning"
+    assert plan["success"] is True
+    assert plan["blocked"] is False
+    assert plan["accepted_warning_count"] == 1
+    assert plan["manual_decision_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_schematic_erc_plan_blocks_dangling_label_and_unconnected_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "erc_block_demo", True, True, "A4")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools.run_erc_via_cli",
+        lambda _path, timeout_seconds=None: {
+            "success": True,
+            "total_violations": 2,
+            "violation_categories": {"label_dangling": 1, "pin_not_connected": 1},
+            "severity_counts": {"error": 2},
+            "violations": [
+                {
+                    "type": "label_dangling",
+                    "severity": "error",
+                    "description": "Label not connected",
+                    "items": [{"description": "Label Global 'SDA'"}],
+                },
+                {
+                    "type": "pin_not_connected",
+                    "severity": "error",
+                    "description": "Pin not connected",
+                    "items": [{"description": "Symbol U2 Pin IO13 [Input, Line]"}],
+                },
+            ],
+        },
+    )
+
+    plan = tools["schematic_plan_erc_fixes"].fn(project["project_path"], None)
+
+    assert plan["success"] is True
+    assert plan["blocked"] is True
+    assert plan["manual_decision_count"] == 2
+    assert plan["manual_decisions"][0]["suggested_action"]["kind"] == "reattach_label_to_pin_or_wire"
+    assert plan["manual_decisions"][1]["refs"] == ["U2"]
+    assert plan["manual_decisions"][1]["suggested_action"]["kind"] == "connect_pin_or_add_no_connect"
+
+
+@pytest.mark.asyncio
+async def test_schematic_functional_layout_moves_symbols_and_pin_attached_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "layout_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+
+    symbol = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        25.4,
+        25.4,
+        0.0,
+        "Resistor_SMD:R_0603_1608Metric",
+        None,
+        None,
+    )
+    assert symbol["success"] is True
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda _path: {
+            "success": True,
+            "components": {},
+            "nets": {"NET1": {"nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1"}]}},
+            "component_count": 1,
+            "net_count": 1,
+            "connectivity_complete": True,
+        },
+    )
+    plan = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NET1"}],
+        [{"ref": "R1", "pin": "2"}],
+        True,
+        True,
+        None,
+    )
+    assert plan["success"] is True
+
+    layout = await tools["schematic_apply_functional_layout"].fn(
+        schematic_path,
+        True,
+        True,
+        False,
+        {"references": {"R1": {"x": 76.2, "y": 50.8, "angle": 0.0}}},
+        None,
+    )
+
+    assert layout["success"] is True
+    assert layout["changed_objects"]["moved_symbol_count"] == 1
+    assert layout["changed_objects"]["moved_label_count"] == 1
+    assert layout["changed_objects"]["moved_no_connect_count"] == 1
+    schematic = KiCadSchematic.from_file(schematic_path)
+    assert schematic.get_symbol("R1")["position"]["x"] == 76.2
+    pin_points = {
+        (pin["connection_point"]["x"], pin["connection_point"]["y"])
+        for pin in tools["schematic_get_pin_map"].fn(schematic_path, "R1")["pins"]
+    }
+    label_positions = {
+        (label["position"]["x"], label["position"]["y"]) for label in schematic.list_labels()
+    }
+    no_connect_positions = {
+        (marker["position"]["x"], marker["position"]["y"])
+        for marker in schematic.list_no_connects()
+    }
+    assert label_positions.intersection(pin_points)
+    assert no_connect_positions.intersection(pin_points)
+
+
+@pytest.mark.asyncio
+async def test_project_completion_report_combines_generic_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "report_demo", True, True, "A4")
+
+    fake_native = {
+        "success": True,
+        "components": {
+            "R1": {
+                "reference": "R1",
+                "value": "10k",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+            }
+        },
+        "nets": {
+            "NET1": {"nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1"}]},
+            "GND": {"nodes": [{"ref": "R1", "pin": "2", "pinfunction": "~_2"}]},
+        },
+        "component_count": 1,
+        "net_count": 2,
+        "connectivity_complete": True,
+    }
+    monkeypatch.setattr("kicad_mcp.utils.schematic_builder.export_native_netlist", lambda _path: fake_native)
+    monkeypatch.setattr("kicad_mcp.tools.creation_tools.export_native_netlist", lambda _path: fake_native)
+    report = await tools["project_completion_report"].fn(
+        project["project_path"],
+        False,
+        False,
+        None,
+        None,
+    )
+
+    assert report["success"] is True
+    assert report["status"]["drc_clean_or_skipped"] is True
+    assert report["native_netlist"]["connectivity_complete"] is True
+    assert report["drc"]["skipped"] is True
 
 
 @pytest.mark.asyncio
@@ -339,6 +713,108 @@ async def test_functional_placement_preserves_non_overlapping_positions(
     )
     assert placement["success"] is True
     assert placement["changed_objects"]["overlap_warnings"] == []
+    assert placement["changed_objects"]["placement_valid"] is True
+    roles = {
+        item["reference"]: item["role"]
+        for item in placement["changed_objects"]["moved_footprints"]
+    }
+    assert roles == {"R1": "resistor", "R2": "resistor"}
+
+
+@pytest.mark.asyncio
+async def test_functional_placement_accepts_generic_reference_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "rule_demo", True, True, "A4")
+    pcb_path = project["created_files"]["pcb"]
+    added = await tools["pcb_add_footprint"].fn(
+        pcb_path,
+        "Resistor_SMD:R_0603_1608Metric",
+        "R10",
+        "10k",
+        10.0,
+        10.0,
+        0.0,
+        {"1": "SIG", "2": "GND"},
+        None,
+    )
+    assert added["success"] is True
+
+    placement = await tools["pcb_apply_functional_placement"].fn(
+        project["project_path"],
+        80.0,
+        50.0,
+        {"references": {"R10": {"x": 30.0, "y": 20.0, "angle": 90.0}}},
+        None,
+    )
+    assert placement["success"] is True
+    moved = placement["changed_objects"]["moved_footprints"][0]
+    assert moved["reference"] == "R10"
+    assert moved["role"] == "resistor"
+    assert moved["position"] == {"x": 30.0, "y": 20.0, "angle": 90.0}
+
+
+@pytest.mark.asyncio
+async def test_pcb_complete_from_schematic_syncs_places_and_reports_pending_routing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "generic_pcb", True, False, "A3")
+    assert project["success"] is True
+
+    def fake_native_netlist(_schematic_path: str) -> dict:
+        return {
+            "success": True,
+            "components": {
+                "R1": {
+                    "reference": "R1",
+                    "value": "10k",
+                    "footprint": "Resistor_SMD:R_0603_1608Metric",
+                }
+            },
+            "nets": {
+                "NET1": {
+                    "name": "NET1",
+                    "nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1", "pintype": "passive"}],
+                },
+                "GND": {
+                    "name": "GND",
+                    "nodes": [{"ref": "R1", "pin": "2", "pinfunction": "~_2", "pintype": "passive"}],
+                },
+            },
+            "component_count": 1,
+            "net_count": 2,
+            "connectivity_complete": True,
+            "netlist_quality": "native",
+        }
+
+    monkeypatch.setattr("kicad_mcp.tools.creation_tools.export_native_netlist", fake_native_netlist)
+    completed = tools["pcb_complete_from_schematic"].fn(
+        project["project_path"],
+        80.0,
+        50.0,
+        "functional",
+        True,
+        True,
+        {"references": {"R1": {"x": 25.0, "y": 15.0, "angle": 0.0}}},
+    )
+
+    assert completed["success"] is True
+    assert completed["status"]["pcb_synced"] is True
+    assert completed["status"]["pcb_placed"] is True
+    assert completed["status"]["routing_complete"] is False
+    assert completed["quality"]["assigned_pad_count"] == 2
+    assert completed["ratsnest"]["connection_count"] == 0
+    moved = completed["placement"]["changed_objects"]["moved_footprints"][0]
+    assert moved["reference"] == "R1"
+    assert moved["role"] == "resistor"
 
 
 @pytest.mark.asyncio

@@ -242,10 +242,23 @@ def build_schematic_from_spec(
 def apply_connection_plan(
     schematic_path: str,
     connections: list[dict[str, Any]],
+    no_connects: list[dict[str, Any]] | None = None,
     run_native_netlist: bool = True,
+    rollback_on_failed_membership: bool = True,
 ) -> dict[str, Any]:
     """Apply a batch connection plan transactionally."""
     from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
+
+    no_connects = no_connects or []
+    sanity = validate_connection_plan_sanity(connections)
+    if not sanity["success"]:
+        return {
+            "success": False,
+            "schematic_path": schematic_path,
+            "error": "Connection plan failed preflight sanity checks",
+            "plan_sanity": sanity,
+            "rolled_back": False,
+        }
 
     result = apply_transactional_schematic_edit(
         schematic_path,
@@ -262,15 +275,49 @@ def apply_connection_plan(
                     connection.get("allow_hidden_power", False),
                 )
                 for connection in connections
-            ]
+            ],
+            "no_connects": [
+                add_no_connect_to_pin(
+                    schematic,
+                    schematic_path,
+                    marker["ref"],
+                    marker["pin"],
+                    marker.get("allow_hidden_power", False),
+                )
+                for marker in no_connects
+            ],
+            "plan_summary": {
+                "connection_count": len(connections),
+                "required_connection_count": sum(
+                    1 for connection in connections if connection.get("required", True)
+                ),
+                "optional_connection_count": sum(
+                    1 for connection in connections if not connection.get("required", True)
+                ),
+                "no_connect_count": len(no_connects),
+            },
         },
         run_cli_validation=True,
         post_write_validator=(
-            (lambda path: validate_connection_plan_membership(path, connections))
-            if run_native_netlist
+            (
+                lambda path: validate_connection_plan_membership(
+                    path,
+                    connections,
+                    rollback_on_failed_membership=rollback_on_failed_membership,
+                )
+            )
+            if run_native_netlist and rollback_on_failed_membership
             else None
         ),
     )
+    if result.get("success") and run_native_netlist and not rollback_on_failed_membership:
+        result["validation"]["post_write"] = validate_connection_plan_membership(
+            schematic_path,
+            connections,
+            rollback_on_failed_membership=False,
+        )
+    if result.get("success"):
+        result["plan_sanity"] = sanity
     return result
 
 
@@ -292,13 +339,16 @@ def add_no_connect_marker(
 
 
 def validate_connection_plan_membership(
-    schematic_path: str, connections: list[dict[str, Any]]
+    schematic_path: str,
+    connections: list[dict[str, Any]],
+    rollback_on_failed_membership: bool = True,
 ) -> dict[str, Any]:
     """Validate that every planned connection appears in KiCad's native netlist."""
     native = export_native_netlist(schematic_path)
     if not native.get("success"):
         return {"success": False, "reason": native.get("error"), "native_netlist": native}
     missing = []
+    optional_missing = []
     checked_count = 0
     for connection in connections:
         if str(connection["ref"]).startswith("#"):
@@ -308,12 +358,67 @@ def validate_connection_plan_membership(
             native, connection["ref"], connection["pin"], connection["net"]
         )
         if not check:
-            missing.append(connection)
+            if connection.get("required", True):
+                missing.append(connection)
+            else:
+                optional_missing.append(connection)
+    success = not missing or not rollback_on_failed_membership
     return {
-        "success": not missing,
-        "reason": "all planned connections verified" if not missing else "missing native netlist memberships",
+        "success": success,
+        "reason": (
+            "all required planned connections verified"
+            if not missing
+            else "missing required native netlist memberships"
+        ),
         "missing": missing,
+        "optional_missing": optional_missing,
         "checked_count": checked_count,
+        "required_checked_count": sum(
+            1
+            for connection in connections
+            if connection.get("required", True) and not str(connection["ref"]).startswith("#")
+        ),
+        "native_netlist": {
+            "success": native.get("success"),
+            "component_count": native.get("component_count"),
+            "net_count": native.get("net_count"),
+            "connectivity_complete": native.get("connectivity_complete"),
+        },
+    }
+
+
+def validate_connection_plan_sanity(connections: list[dict[str, Any]]) -> dict[str, Any]:
+    """Catch obvious pin/net intent mistakes before editing the schematic."""
+    mismatches = []
+    malformed = []
+    seen: dict[tuple[str, str], str] = {}
+    conflicts = []
+    for index, connection in enumerate(connections):
+        ref = connection.get("ref")
+        pin = connection.get("pin")
+        net = connection.get("net")
+        if not ref or not pin or not net:
+            malformed.append({"index": index, "connection": connection})
+            continue
+        key = (str(ref), str(pin))
+        if key in seen and seen[key] != str(net):
+            conflicts.append(
+                {
+                    "ref": ref,
+                    "pin": pin,
+                    "first_net": seen[key],
+                    "second_net": net,
+                }
+            )
+        seen[key] = str(net)
+        mismatch = _power_ground_mismatch(str(ref), str(pin), str(net))
+        if mismatch is not None and not connection.get("allow_power_ground_mismatch", False):
+            mismatches.append({**mismatch, "connection": connection})
+    return {
+        "success": not malformed and not conflicts and not mismatches,
+        "malformed": malformed,
+        "conflicts": conflicts,
+        "power_ground_mismatches": mismatches,
     }
 
 
@@ -340,6 +445,9 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
     erc = run_erc_via_cli(schematic_path) if run_erc else {"success": True, "skipped": True}
     categories = erc.get("violation_categories", {}) if erc.get("success") else {}
     native = export_native_netlist(schematic_path)
+    dangling_labels = _dangling_labels(schematic, schematic_path)
+    isolated_labels = _isolated_labels(schematic, native)
+    power_ground_mismatches = _native_power_ground_mismatches(native)
     return {
         "success": True,
         "schematic_path": schematic_path,
@@ -354,8 +462,28 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
         "outside_page_count": len(outside),
         "off_grid_items": off_grid,
         "off_grid_count": len(off_grid),
-        "dangling_label_count": 0,
-        "isolated_label_count": 0,
+        "dangling_labels": dangling_labels,
+        "dangling_label_count": len(dangling_labels),
+        "isolated_labels": isolated_labels,
+        "isolated_label_count": len(isolated_labels),
+        "power_ground_mismatches": power_ground_mismatches,
+        "power_ground_mismatch_count": len(power_ground_mismatches),
+        "quality_gate": {
+            "passed": not off_grid
+            and not dangling_labels
+            and not isolated_labels
+            and not power_ground_mismatches
+            and not missing_footprints
+            and not outside,
+            "blocking_counts": {
+                "off_grid": len(off_grid),
+                "dangling_labels": len(dangling_labels),
+                "isolated_labels": len(isolated_labels),
+                "power_ground_mismatches": len(power_ground_mismatches),
+                "missing_footprints": len(missing_footprints),
+                "outside_page": len(outside),
+            },
+        },
         "erc": {
             "success": erc.get("success"),
             "total_violations": erc.get("total_violations"),
@@ -543,6 +671,131 @@ def _off_grid_items(schematic: KiCadSchematic) -> list[dict[str, Any]]:
         if not _on_grid(marker["position"]["x"]) or not _on_grid(marker["position"]["y"]):
             items.append({"type": "no_connect", "id": marker.get("uuid"), "position": marker["position"]})
     return items
+
+
+def _dangling_labels(schematic: KiCadSchematic, schematic_path: str) -> list[dict[str, Any]]:
+    pin_points = _schematic_pin_points(schematic, schematic_path)
+    dangling = []
+    for label in schematic.list_labels():
+        position = label["position"]
+        point = (position["x"], position["y"])
+        touches_pin = point in pin_points
+        touches_wire = bool(schematic.find_wires_touching_point(position["x"], position["y"]))
+        if not touches_pin and not touches_wire:
+            dangling.append(
+                {
+                    "text": label["text"],
+                    "type": label["type"],
+                    "uuid": label.get("uuid"),
+                    "position": position,
+                }
+            )
+    return dangling
+
+
+def _isolated_labels(schematic: KiCadSchematic, native: dict[str, Any]) -> list[dict[str, Any]]:
+    if not native.get("success"):
+        return []
+    nets = native.get("nets", {})
+    isolated = []
+    for label in schematic.list_labels():
+        net = nets.get(label["text"])
+        if not net or not net.get("nodes"):
+            isolated.append(
+                {
+                    "text": label["text"],
+                    "type": label["type"],
+                    "uuid": label.get("uuid"),
+                    "position": label["position"],
+                }
+            )
+    return isolated
+
+
+def _schematic_pin_points(schematic: KiCadSchematic, schematic_path: str) -> set[tuple[float, float]]:
+    points: set[tuple[float, float]] = set()
+    for symbol in schematic.list_symbols():
+        pin_map = None
+        try:
+            from kicad_mcp.utils.schematic_pins import get_symbol_pin_map_from_schematic
+
+            pin_map = get_symbol_pin_map_from_schematic(
+                schematic, schematic_path, symbol["reference"]
+            )
+        except Exception:
+            pin_map = None
+        if not pin_map or not pin_map.get("success"):
+            continue
+        for pin in pin_map.get("pins", []):
+            point = pin.get("connection_point", {})
+            if "x" in point and "y" in point:
+                points.add((point["x"], point["y"]))
+    return points
+
+
+def _native_power_ground_mismatches(native: dict[str, Any]) -> list[dict[str, Any]]:
+    if not native.get("success"):
+        return []
+    mismatches = []
+    for net_name, net in native.get("nets", {}).items():
+        for node in net.get("nodes", []):
+            mismatch = _power_ground_mismatch(
+                node.get("ref", ""),
+                node.get("pinfunction") or node.get("pin", ""),
+                net_name,
+            )
+            if mismatch is not None:
+                mismatches.append(
+                    {
+                        **mismatch,
+                        "ref": node.get("ref", ""),
+                        "pin": node.get("pin", ""),
+                        "pinfunction": node.get("pinfunction", ""),
+                        "pintype": node.get("pintype", ""),
+                    }
+                )
+    return mismatches
+
+
+def _power_ground_mismatch(reference: str, pin_or_function: str, net_name: str) -> dict[str, str] | None:
+    pin_kind = _power_pin_kind(pin_or_function)
+    net_kind = _power_net_kind(net_name)
+    if not pin_kind or not net_kind or pin_kind == net_kind:
+        return None
+    return {
+        "ref": reference,
+        "pin": pin_or_function,
+        "net": net_name,
+        "pin_kind": pin_kind,
+        "net_kind": net_kind,
+        "reason": f"{pin_or_function} looks like {pin_kind}, but net {net_name} looks like {net_kind}",
+    }
+
+
+def _power_pin_kind(pin_or_function: str) -> str | None:
+    text = pin_or_function.upper().replace(" ", "").replace("-", "")
+    if (
+        text in {"GND", "VSS", "GNDA", "DGND", "AGND", "PGND"}
+        or text.startswith(("GND_", "VSS_", "GNDA_", "DGND_", "AGND_", "PGND_"))
+        or text in {"GND1", "GND2", "VSS1", "VSS2"}
+    ):
+        return "ground"
+    if text in {"VCC", "VDD", "VDDA", "VDDD", "VBUS", "VIN", "VUSB", "3V3", "3.3V", "+3.3V", "+5V"}:
+        return "power"
+    if text.startswith(
+        ("VCC_", "VDD_", "VDDA_", "VDDD_", "VBUS_", "VIN_", "3V3_", "3.3V_", "+3.3V_", "+5V_")
+    ):
+        return "power"
+    return None
+
+
+def _power_net_kind(net_name: str) -> str | None:
+    text = net_name.upper().replace(" ", "")
+    if text in {"GND", "VSS", "GNDA", "DGND", "AGND", "PGND"}:
+        return "ground"
+    if text.startswith("+") or text in {"VCC", "VDD", "VBUS", "VIN", "VUSB", "3V3", "3.3V"}:
+        return "power"
+    return None
 
 
 def _on_grid(value: float, grid: float = SCHEMATIC_GRID_MM) -> bool:
