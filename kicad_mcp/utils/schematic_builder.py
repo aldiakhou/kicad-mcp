@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from typing import Any, cast
 
 from kicad_mcp.utils.file_utils import get_project_files
@@ -10,10 +11,15 @@ from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExprAtom
 from kicad_mcp.utils.library_resolver import resolve_footprint, resolve_symbol
 from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
 from kicad_mcp.utils.preview_metadata import svg_preview_metadata
+from kicad_mcp.utils.schematic_intent import (
+    apply_connection_plan_v2,
+    normalize_connections,
+)
 from kicad_mcp.utils.schematic_pins import (
     SCHEMATIC_GRID_MM,
     add_no_connect_to_pin,
     attach_net_to_pin,
+    get_symbol_pin_map_from_schematic,
 )
 from kicad_mcp.utils.transactional_edit import export_schematic_svg_file
 
@@ -153,6 +159,7 @@ def card_reader_v1_spec() -> dict[str, Any]:
 
 def preview_build_from_spec(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe build preview without writing files."""
+    spec = normalize_build_spec_v2(spec) if _is_v2_spec(spec) else spec
     paper = spec.get("paper", "A4")
     page_width, page_height = KiCadSchematic.PAPER_SIZES_MM.get(paper, KiCadSchematic.PAPER_SIZES_MM["A4"])
     symbol_errors = []
@@ -189,6 +196,7 @@ def build_schematic_from_spec(
     run_erc: bool = True,
 ) -> dict[str, Any]:
     """Build a schematic from a structured spec."""
+    spec = normalize_build_spec_v2(spec) if _is_v2_spec(spec) else spec
     if mode != "replace":
         return {"success": False, "project_path": project_path, "error": "Only mode='replace' is supported"}
     files = get_project_files(project_path)
@@ -246,79 +254,93 @@ def apply_connection_plan(
     run_native_netlist: bool = True,
     rollback_on_failed_membership: bool = True,
 ) -> dict[str, Any]:
-    """Apply a batch connection plan transactionally."""
-    from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
+    """Apply a batch connection plan transactionally through the v2 intent engine."""
+    # Preserve existing tests and callers that monkeypatch this module's native
+    # netlist helper by rebinding the v2 engine at call time.
+    import kicad_mcp.utils.schematic_intent as schematic_intent
 
-    no_connects = no_connects or []
-    sanity = validate_connection_plan_sanity(connections)
-    if not sanity["success"]:
-        return {
-            "success": False,
-            "schematic_path": schematic_path,
-            "error": "Connection plan failed preflight sanity checks",
-            "plan_sanity": sanity,
-            "rolled_back": False,
-        }
-
-    result = apply_transactional_schematic_edit(
+    schematic_intent.export_native_netlist = export_native_netlist
+    return apply_connection_plan_v2(
         schematic_path,
-        lambda schematic: {
-            "connections": [
-                attach_net_to_pin(
-                    schematic,
-                    schematic_path,
-                    connection["ref"],
-                    connection["pin"],
-                    connection["net"],
-                    connection.get("label_type", "global"),
-                    connection.get("stub_length_mm", 5.08),
-                    connection.get("allow_hidden_power", False),
-                )
-                for connection in connections
-            ],
-            "no_connects": [
-                add_no_connect_to_pin(
-                    schematic,
-                    schematic_path,
-                    marker["ref"],
-                    marker["pin"],
-                    marker.get("allow_hidden_power", False),
-                )
-                for marker in no_connects
-            ],
-            "plan_summary": {
-                "connection_count": len(connections),
-                "required_connection_count": sum(
-                    1 for connection in connections if connection.get("required", True)
-                ),
-                "optional_connection_count": sum(
-                    1 for connection in connections if not connection.get("required", True)
-                ),
-                "no_connect_count": len(no_connects),
-            },
-        },
-        run_cli_validation=True,
-        post_write_validator=(
-            (
-                lambda path: validate_connection_plan_membership(
-                    path,
-                    connections,
-                    rollback_on_failed_membership=rollback_on_failed_membership,
-                )
-            )
-            if run_native_netlist and rollback_on_failed_membership
-            else None
-        ),
+        connections,
+        no_connects,
+        verify_native_netlist=run_native_netlist,
+        run_erc=True,
+        auto_snap=True,
+        rollback_on_failure=rollback_on_failed_membership,
     )
-    if result.get("success") and run_native_netlist and not rollback_on_failed_membership:
-        result["validation"]["post_write"] = validate_connection_plan_membership(
-            schematic_path,
-            connections,
-            rollback_on_failed_membership=False,
+
+
+def preview_build_from_spec_v2(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """Preview an agent-friendly v2 circuit specification."""
+    return preview_build_from_spec(project_path, normalize_build_spec_v2(spec))
+
+
+def build_schematic_from_spec_v2(
+    project_path: str,
+    spec: dict[str, Any],
+    mode: str = "replace",
+    run_erc: bool = True,
+) -> dict[str, Any]:
+    """Build a schematic from the v2 parts/nets/no_connects spec format."""
+    return build_schematic_from_spec(
+        project_path,
+        normalize_build_spec_v2(spec),
+        mode=mode,
+        run_erc=run_erc,
+    )
+
+
+def normalize_build_spec_v2(spec: dict[str, Any]) -> dict[str, Any]:
+    """Translate the agent-friendly v2 spec format into the internal builder spec."""
+    if not _is_v2_spec(spec):
+        return spec
+    parts = spec.get("parts", [])
+    layout_positions = _v2_layout_positions(spec)
+    symbols = []
+    for index, part in enumerate(parts):
+        x, y = layout_positions.get(str(part["ref"]), _default_v2_symbol_position(index))
+        symbols.append(
+            {
+                "reference": str(part["ref"]),
+                "lib_id": str(part["symbol"]),
+                "value": str(part.get("value", part["ref"])),
+                "x": _snap(x),
+                "y": _snap(y),
+                "angle": float(part.get("angle", 0.0)),
+                "footprint": part.get("footprint"),
+                "properties": part.get("properties"),
+            }
         )
-    if result.get("success"):
-        result["plan_sanity"] = sanity
-    return result
+    connections = []
+    for net_name, pins in spec.get("nets", {}).items():
+        for item in pins:
+            if isinstance(item, dict):
+                ref = item.get("ref")
+                pin = item.get("pin")
+            else:
+                ref = item[0] if len(item) > 0 else None
+                pin = item[1] if len(item) > 1 else None
+            if ref and pin:
+                connections.append({"type": "pin_to_net", "ref": str(ref), "pin": str(pin), "net": str(net_name)})
+    no_connects = []
+    for item in spec.get("no_connects", []):
+        if isinstance(item, dict):
+            no_connects.append(item)
+        elif len(item) >= 2:
+            no_connects.append({"ref": str(item[0]), "pin": str(item[1])})
+    normalized_connections = normalize_connections(connections)
+    return {
+        "name": spec.get("name"),
+        "paper": spec.get("paper", "A4"),
+        "symbols": symbols,
+        "connections": normalized_connections["connections"],
+        "no_connects": no_connects,
+        "expected_nets": sorted(spec.get("nets", {}).keys()),
+        "accepted_erc_types": spec.get("accepted_erc_types", []),
+        "layout_hints": spec.get("layout_hints", {}),
+        "source_format": "v2",
+    }
 
 
 def add_no_connect_marker(
@@ -448,6 +470,7 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
     dangling_labels = _dangling_labels(schematic, schematic_path)
     isolated_labels = _isolated_labels(schematic, native)
     power_ground_mismatches = _native_power_ground_mismatches(native)
+    visual_quality = _visual_quality(schematic, schematic_path, native)
     return {
         "success": True,
         "schematic_path": schematic_path,
@@ -468,13 +491,15 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
         "isolated_label_count": len(isolated_labels),
         "power_ground_mismatches": power_ground_mismatches,
         "power_ground_mismatch_count": len(power_ground_mismatches),
+        "visual_quality": visual_quality,
         "quality_gate": {
             "passed": not off_grid
             and not dangling_labels
             and not isolated_labels
             and not power_ground_mismatches
             and not missing_footprints
-            and not outside,
+            and not outside
+            and visual_quality["blocking_count"] == 0,
             "blocking_counts": {
                 "off_grid": len(off_grid),
                 "dangling_labels": len(dangling_labels),
@@ -482,6 +507,7 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
                 "power_ground_mismatches": len(power_ground_mismatches),
                 "missing_footprints": len(missing_footprints),
                 "outside_page": len(outside),
+                "visual_quality": visual_quality["blocking_count"],
             },
         },
         "erc": {
@@ -504,6 +530,65 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
             else 0,
             "error": native.get("error"),
         },
+    }
+
+
+def _visual_quality(
+    schematic: KiCadSchematic, schematic_path: str, native: dict[str, Any]
+) -> dict[str, Any]:
+    wires = schematic.list_wires()
+    labels = schematic.list_labels()
+    pin_points = _schematic_pin_points(schematic, schematic_path)
+    tiny_stubs = _tiny_stubs(wires)
+    duplicate_labels = _duplicate_nearby_labels(labels)
+    dangling_labels = _dangling_labels(schematic, schematic_path)
+    short_wires = [
+        wire for wire in wires if _wire_length(wire) < 1.0 and wire not in tiny_stubs
+    ]
+    floating_wires = [
+        wire for wire in wires if not _wire_touches_pin_or_label(wire, pin_points, labels)
+    ]
+    warnings = []
+    blocking = []
+    for ref, count in _tiny_stubs_by_symbol(tiny_stubs, schematic, schematic_path).items():
+        if count > 4:
+            warnings.append({"type": "many_tiny_stubs", "reference": ref, "count": count})
+    for item in duplicate_labels:
+        warnings.append({"type": "duplicate_label_near_pin", **item})
+    for label in dangling_labels:
+        blocking.append({"type": "label_not_attached", "label": label})
+    for wire in short_wires:
+        warnings.append({"type": "unusually_short_wire", "wire": wire})
+    power_symbol_count = sum(
+        1 for symbol in schematic.list_symbols() if str(symbol.get("lib_id", "")).startswith("power:")
+    )
+    ground_symbol_count = sum(
+        1
+        for symbol in schematic.list_symbols()
+        if str(symbol.get("value", "")).upper() in {"GND", "VSS", "GNDA", "DGND"}
+    )
+    penalty = (
+        len(tiny_stubs) * 1.5
+        + len(duplicate_labels) * 5
+        + len(short_wires) * 2
+        + len(floating_wires) * 4
+        + len(blocking) * 25
+    )
+    score = max(0.0, round(100.0 - penalty, 2))
+    return {
+        "tiny_stub_count": len(tiny_stubs),
+        "overlapping_label_count": len(duplicate_labels),
+        "duplicate_label_count": len(duplicate_labels),
+        "unusually_short_wire_count": len(short_wires),
+        "floating_wire_count": len(floating_wires),
+        "power_symbol_count": power_symbol_count,
+        "ground_symbol_count": ground_symbol_count,
+        "readability_score": score,
+        "blocking_count": len(blocking),
+        "warning_count": len(warnings),
+        "warnings": warnings,
+        "blocking": blocking,
+        "native_netlist_available": bool(native.get("success")),
     }
 
 
@@ -545,6 +630,33 @@ def _build_in_memory_schematic(schematic_path: str, spec: dict[str, Any]) -> KiC
             marker.get("allow_hidden_power", False),
         )
     return schematic
+
+
+def _is_v2_spec(spec: dict[str, Any]) -> bool:
+    return "parts" in spec or "nets" in spec
+
+
+def _v2_layout_positions(spec: dict[str, Any]) -> dict[str, tuple[float, float]]:
+    positions: dict[str, tuple[float, float]] = {}
+    part_index = {str(part.get("ref")): index for index, part in enumerate(spec.get("parts", []))}
+    blocks = spec.get("layout_hints", {}).get("functional_blocks", [])
+    if not isinstance(blocks, list) or not blocks:
+        return positions
+    for block_index, block in enumerate(blocks):
+        parts = block.get("parts", []) if isinstance(block, dict) else []
+        for local_index, ref in enumerate(parts):
+            if str(ref) not in part_index:
+                continue
+            positions[str(ref)] = (
+                35.56 + block_index * 63.5,
+                38.1 + local_index * 17.78,
+            )
+    return positions
+
+
+def _default_v2_symbol_position(index: int) -> tuple[float, float]:
+    columns = 4
+    return 35.56 + (index % columns) * 50.8, 38.1 + (index // columns) * 25.4
 
 
 def _resolve_symbol_embed_chain(lib_id: str) -> list[tuple[str, Any]]:
@@ -691,6 +803,85 @@ def _dangling_labels(schematic: KiCadSchematic, schematic_path: str) -> list[dic
                 }
             )
     return dangling
+
+
+def _tiny_stubs(wires: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [wire for wire in wires if 0.0 < _wire_length(wire) < 2.54]
+
+
+def _wire_length(wire: dict[str, Any]) -> float:
+    length = 0.0
+    points = wire.get("points", [])
+    for start, end in zip(points, points[1:]):
+        length += math.dist((start["x"], start["y"]), (end["x"], end["y"]))
+    return length
+
+
+def _duplicate_nearby_labels(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    duplicates = []
+    for index, first in enumerate(labels):
+        for second in labels[index + 1:]:
+            if first.get("text") != second.get("text"):
+                continue
+            first_pos = first.get("position", {})
+            second_pos = second.get("position", {})
+            if math.dist(
+                (first_pos.get("x", 0.0), first_pos.get("y", 0.0)),
+                (second_pos.get("x", 0.0), second_pos.get("y", 0.0)),
+            ) <= 1.0:
+                duplicates.append(
+                    {
+                        "text": first.get("text"),
+                        "first_uuid": first.get("uuid"),
+                        "second_uuid": second.get("uuid"),
+                        "position": first_pos,
+                    }
+                )
+    return duplicates
+
+
+def _wire_touches_pin_or_label(
+    wire: dict[str, Any],
+    pin_points: set[tuple[float, float]],
+    labels: list[dict[str, Any]],
+) -> bool:
+    label_points = {
+        (label["position"]["x"], label["position"]["y"])
+        for label in labels
+        if "position" in label and "x" in label["position"] and "y" in label["position"]
+    }
+    for point in wire.get("points", []):
+        xy = (point["x"], point["y"])
+        if xy in pin_points or xy in label_points:
+            return True
+    return False
+
+
+def _tiny_stubs_by_symbol(
+    stubs: list[dict[str, Any]], schematic: KiCadSchematic, schematic_path: str
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for symbol in schematic.list_symbols():
+        pin_points = set()
+        try:
+            pin_map = get_symbol_pin_map_from_schematic(
+                schematic,
+                schematic_path,
+                symbol["reference"],
+            )
+        except Exception:
+            pin_map = {"success": False}
+        if pin_map.get("success"):
+            pin_points = {
+                (pin["connection_point"]["x"], pin["connection_point"]["y"])
+                for pin in pin_map.get("pins", [])
+            }
+        if not pin_points:
+            continue
+        for wire in stubs:
+            if any((point["x"], point["y"]) in pin_points for point in wire.get("points", [])):
+                counts[symbol["reference"]] = counts.get(symbol["reference"], 0) + 1
+    return counts
 
 
 def _isolated_labels(schematic: KiCadSchematic, native: dict[str, Any]) -> list[dict[str, Any]]:

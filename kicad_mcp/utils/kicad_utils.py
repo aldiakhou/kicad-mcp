@@ -98,7 +98,7 @@ def open_kicad_project(project_path: str) -> dict[str, Any]:
         return {"success": False, "error": f"Project not found: {project_path}"}
 
     try:
-        cmd = []
+        cmd: list[str] = []
         if sys.platform == "darwin":  # macOS
             # On MacOS, use the 'open' command to open the project in KiCad
             cmd = ["open", "-a", config.KICAD_APP_PATH, project_path]
@@ -148,7 +148,7 @@ def open_kicad_project(project_path: str) -> dict[str, Any]:
             # Fallback or error for unsupported OS
             return {"success": False, "error": f"Unsupported operating system: {sys.platform}"}
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)  # type: ignore[unreachable]
 
         return {
             "success": result.returncode == 0,

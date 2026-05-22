@@ -35,6 +35,9 @@ def export_native_netlist(
     except KiCadCLIError as exc:
         result["error"] = str(exc)
         return result
+    if kicad_cli is None:
+        result["error"] = "KiCad CLI is not available"
+        return result
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output_file = os.path.join(temp_dir, "netlist.kicad_net")
@@ -98,6 +101,9 @@ def run_erc_via_cli(
         kicad_cli = get_kicad_cli_path()
     except KiCadCLIError as exc:
         result["error"] = str(exc)
+        return result
+    if kicad_cli is None:
+        result["error"] = "KiCad CLI is not available"
         return result
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -168,7 +174,7 @@ def parse_native_netlist(content: str) -> dict[str, Any]:
             ref = _child_text(comp, "ref")
             if not ref:
                 continue
-            component = {
+            component: dict[str, Any] = {
                 "reference": ref,
                 "value": _child_text(comp, "value") or "",
                 "footprint": _child_text(comp, "footprint") or "",

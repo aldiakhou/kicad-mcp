@@ -31,6 +31,13 @@ def register_project_tools(mcp: FastMCP) -> None:
         return projects
 
     @mcp.tool()
+    def discover_projects() -> dict[str, Any]:
+        """Find KiCad projects and return a structured tool response."""
+        logging.info("Executing discover_projects tool...")
+        projects = find_kicad_projects()
+        return {"success": True, "projects": projects, "count": len(projects)}
+
+    @mcp.tool()
     def get_project_structure(project_path: str) -> dict[str, Any]:
         """Get the structure and files of a KiCad project."""
         if not os.path.exists(project_path):

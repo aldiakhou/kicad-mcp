@@ -366,7 +366,8 @@ class KiCadSchematic:
         for index, item in enumerate(self.root.items):
             if predicate(item):
                 removed = self.root.items.pop(index)
-                return {"item_type": item_type, "item_id": item_id, "removed_head": removed.head()}
+                removed_head = removed.head() if isinstance(removed, SExprList) else None
+                return {"item_type": item_type, "item_id": item_id, "removed_head": removed_head}
         raise KeyError(f"{item_type} not found: {item_id}")
 
     def list_symbols(self) -> list[dict[str, Any]]:

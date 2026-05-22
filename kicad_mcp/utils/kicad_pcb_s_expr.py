@@ -538,7 +538,7 @@ def _layers_node() -> SExprList:
 
 
 def _at_node(x: float, y: float, angle: float | None) -> SExprList:
-    items = [SExprAtom("at"), SExprAtom(_num(x)), SExprAtom(_num(y))]
+    items: list[SExprAtom | SExprList] = [SExprAtom("at"), SExprAtom(_num(x)), SExprAtom(_num(y))]
     if angle is not None:
         items.append(SExprAtom(_num(angle)))
     return SExprList(items)

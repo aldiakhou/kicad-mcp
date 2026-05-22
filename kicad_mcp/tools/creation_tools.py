@@ -4,14 +4,19 @@ Project, schematic creation, library resolution, and conservative PCB authoring 
 
 from collections.abc import Callable
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
+from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
 from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb, validate_pcb_text
 from kicad_mcp.utils.kicad_s_expr import (
     KiCadSchematic,
@@ -39,14 +44,20 @@ from kicad_mcp.utils.schematic_builder import (
     add_no_connect_marker,
     apply_connection_plan,
     build_schematic_from_spec,
+    build_schematic_from_spec_v2,
     preview_build_from_spec,
+    preview_build_from_spec_v2,
 )
 from kicad_mcp.utils.schematic_builder import (
     schematic_quality_report as build_quality_report,
 )
+from kicad_mcp.utils.schematic_intent import (
+    apply_connection_plan_v2,
+    connect_pin_to_net,
+    snap_schematic_to_grid_model,
+)
 from kicad_mcp.utils.schematic_pins import (
     SCHEMATIC_GRID_MM,
-    attach_net_to_pin,
     get_symbol_pin_map,
     get_symbol_pin_map_from_schematic,
     verify_native_net_membership,
@@ -103,6 +114,11 @@ def register_creation_tools(mcp: FastMCP) -> None:
         return preview_build_from_spec(project_path, spec)
 
     @mcp.tool()
+    def schematic_preview_build_from_spec_v2(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
+        """Preview an agent-friendly parts/nets schematic build without writing files."""
+        return preview_build_from_spec_v2(project_path, spec)
+
+    @mcp.tool()
     def schematic_build_from_spec(
         project_path: str,
         spec: dict[str, Any],
@@ -118,6 +134,31 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 "error": "backup=False is not supported; schematic builds are always backed up",
             }
         return build_schematic_from_spec(project_path, spec, mode=mode, run_erc=run_erc)
+
+    @mcp.tool()
+    def schematic_build_from_spec_v2(
+        project_path: str,
+        spec: dict[str, Any],
+        mode: str = "replace",
+        backup: bool = True,
+        run_erc: bool = True,
+    ) -> dict[str, Any]:
+        """Build a schematic from an agent-friendly parts/nets/no_connects specification."""
+        if not backup:
+            return {
+                "success": False,
+                "project_path": project_path,
+                "error": "backup=False is not supported; schematic builds are always backed up",
+            }
+        result = build_schematic_from_spec_v2(project_path, spec, mode=mode, run_erc=run_erc)
+        if result.get("success"):
+            result.setdefault("tool", "schematic_build_from_spec_v2")
+            result.setdefault("stage", "schematic_built")
+            result.setdefault("changed", True)
+            result.setdefault("warnings", [])
+            result.setdefault("recommended_next_tool", "schematic_quality_report")
+            result.setdefault("recommended_next_arguments", {"project_path": project_path})
+        return result
 
     @mcp.tool()
     def schematic_quality_report(project_path: str, run_erc: bool = True) -> dict[str, Any]:
@@ -200,6 +241,15 @@ def register_creation_tools(mcp: FastMCP) -> None:
         if ctx:
             await ctx.info("Planning project next actions")
         return await _project_next_actions(project_path, run_erc, run_drc, timeout_seconds)
+
+    @mcp.tool()
+    async def project_design_state(
+        project_path: str,
+        run_erc: bool = True,
+        run_drc: bool = False,
+    ) -> dict[str, Any]:
+        """Return one compact state object with the safest next KiCad MCP action."""
+        return await _project_design_state(project_path, run_erc, run_drc)
 
     @mcp.tool()
     async def schematic_apply_safe_erc_fixes(
@@ -293,7 +343,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         net_name: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Add a schematic wire, optionally with a local net label."""
+        """Advanced low-level geometry tool. Prefer intent-based schematic connection tools."""
         if ctx:
             await ctx.info("Adding schematic wire")
         return _apply_transactional_schematic_authoring(
@@ -311,7 +361,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         angle: float = 0.0,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Add a local, global, or hierarchical schematic label."""
+        """Advanced low-level label tool. Prefer schematic_connect_pin_to_net for normal wiring."""
         if ctx:
             await ctx.info(f"Adding label {text}")
         return _apply_transactional_schematic_authoring(
@@ -328,7 +378,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         net_name: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Connect two schematic points with a direct or orthogonal wire."""
+        """Advanced low-level geometry tool. Prefer schematic_connect_pins for normal wiring."""
         if ctx:
             await ctx.info("Connecting schematic points")
         return _apply_transactional_schematic_authoring(
@@ -338,8 +388,66 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def schematic_get_pin_map(schematic_path: str, reference: str) -> dict[str, Any]:
-        """Return transformed pin positions for a placed schematic symbol."""
+        """Advanced diagnostics tool for inspecting transformed placed-symbol pin positions."""
         return get_symbol_pin_map(schematic_path, reference)
+
+    @mcp.tool()
+    def schematic_snap_to_grid(
+        schematic_path: str,
+        grid_mm: float = 1.27,
+        include_symbols: bool = True,
+        include_labels: bool = True,
+        include_wires: bool = True,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Snap schematic symbols, labels, wires, and no-connects to a KiCad-safe grid."""
+        try:
+            validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
+            schematic = KiCadSchematic.from_file(validated_path)
+            summary = snap_schematic_to_grid_model(
+                schematic,
+                grid_mm,
+                include_symbols=include_symbols,
+                include_labels=include_labels,
+                include_wires=include_wires,
+            )
+            if dry_run:
+                return {
+                    "success": True,
+                    "tool": "schematic_snap_to_grid",
+                    "stage": "schematic_cleanup",
+                    "schematic_path": validated_path,
+                    "dry_run": True,
+                    "changed": summary["changed_count"] > 0,
+                    "snap": summary,
+                    "warnings": [],
+                    "recommended_next_tool": "schematic_snap_to_grid",
+                    "recommended_next_arguments": {"schematic_path": validated_path, "dry_run": False},
+                }
+            return _apply_transactional_schematic_authoring(
+                validated_path,
+                lambda model: {
+                    "snap": snap_schematic_to_grid_model(
+                        model,
+                        grid_mm,
+                        include_symbols=include_symbols,
+                        include_labels=include_labels,
+                        include_wires=include_wires,
+                    )
+                },
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "tool": "schematic_snap_to_grid",
+                "stage": "schematic_cleanup",
+                "schematic_path": schematic_path,
+                "error": str(exc),
+                "rolled_back": False,
+                "recoverable": True,
+                "recommended_next_tool": "schematic_quality_report",
+                "debug": {},
+            }
 
     @mcp.tool()
     async def schematic_attach_net_to_pin(
@@ -352,27 +460,139 @@ def register_creation_tools(mcp: FastMCP) -> None:
         allow_hidden_power: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Attach a net label to an actual symbol pin coordinate and verify it natively."""
+        """Advanced compatibility alias. Prefer schematic_connect_pin_to_net for normal wiring."""
         if ctx:
             await ctx.info(f"Attaching {net_name} to {reference}.{pin}")
         return _apply_transactional_schematic_authoring(
             schematic_path,
             lambda schematic: {
-                "attachment": attach_net_to_pin(
+                "attachment": connect_pin_to_net(
                     schematic,
                     schematic_path,
                     reference,
                     pin,
                     net_name,
-                    label_type,
-                    stub_length_mm,
-                    allow_hidden_power,
+                    label_type=label_type,
+                    stub_length_mm=stub_length_mm,
+                    allow_hidden_power=allow_hidden_power,
                 )
             },
             post_write_validator=lambda path: verify_native_net_membership(
                 path, reference, pin, net_name
             ),
         )
+
+    @mcp.tool()
+    async def schematic_connect_pin_to_net(
+        schematic_path: str,
+        reference: str,
+        pin: str,
+        net_name: str,
+        label_type: str = "global",
+        stub_length_mm: float = 5.08,
+        auto_snap: bool = True,
+        verify: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Connect one schematic symbol pin to a named net by electrical intent."""
+        if ctx:
+            await ctx.info(f"Connecting {reference}.{pin} to {net_name}")
+        result = apply_connection_plan_v2(
+            schematic_path,
+            [
+                {
+                    "type": "pin_to_net",
+                    "ref": reference,
+                    "pin": pin,
+                    "net": net_name,
+                    "label_type": label_type,
+                    "stub_length_mm": stub_length_mm,
+                }
+            ],
+            verify_native_netlist=verify,
+            run_erc=verify,
+            auto_snap=auto_snap,
+        )
+        result["tool"] = "schematic_connect_pin_to_net"
+        return result
+
+    @mcp.tool()
+    async def schematic_connect_pins(
+        schematic_path: str,
+        ref_a: str,
+        pin_a: str,
+        ref_b: str,
+        pin_b: str,
+        net_name: str | None = None,
+        style: str = "auto",
+        auto_snap: bool = True,
+        verify: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Connect two schematic symbol pins by electrical intent."""
+        if ctx:
+            await ctx.info(f"Connecting {ref_a}.{pin_a} to {ref_b}.{pin_b}")
+        result = apply_connection_plan_v2(
+            schematic_path,
+            [
+                {
+                    "type": "pin_to_pin",
+                    "from": {"ref": ref_a, "pin": pin_a},
+                    "to": {"ref": ref_b, "pin": pin_b},
+                    "net": net_name,
+                    "style": style,
+                }
+            ],
+            verify_native_netlist=verify,
+            run_erc=verify,
+            auto_snap=auto_snap,
+        )
+        result["tool"] = "schematic_connect_pins"
+        return result
+
+    @mcp.tool()
+    async def schematic_connect_pin_to_ground(
+        schematic_path: str,
+        reference: str,
+        pin: str,
+        ground_net: str = "GND",
+        verify: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Connect one schematic symbol pin to a ground net by electrical intent."""
+        if ctx:
+            await ctx.info(f"Connecting {reference}.{pin} to {ground_net}")
+        result = apply_connection_plan_v2(
+            schematic_path,
+            [{"type": "pin_to_ground", "ref": reference, "pin": pin, "net": ground_net}],
+            verify_native_netlist=verify,
+            run_erc=verify,
+            auto_snap=True,
+        )
+        result["tool"] = "schematic_connect_pin_to_ground"
+        return result
+
+    @mcp.tool()
+    async def schematic_connect_pin_to_power(
+        schematic_path: str,
+        reference: str,
+        pin: str,
+        power_net: str,
+        verify: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Connect one schematic symbol pin to a power net by electrical intent."""
+        if ctx:
+            await ctx.info(f"Connecting {reference}.{pin} to {power_net}")
+        result = apply_connection_plan_v2(
+            schematic_path,
+            [{"type": "pin_to_power", "ref": reference, "pin": pin, "net": power_net}],
+            verify_native_netlist=verify,
+            run_erc=verify,
+            auto_snap=True,
+        )
+        result["tool"] = "schematic_connect_pin_to_power"
+        return result
 
     @mcp.tool()
     async def schematic_apply_connection_plan(
@@ -383,7 +603,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         rollback_on_failed_membership: bool = True,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Apply multiple pin-net attachments/no-connect markers and verify them as one transaction."""
+        """Primary agent tool for schematic wiring. Prefer this over raw wire/point tools."""
         if ctx:
             await ctx.info(f"Applying {len(connections)} schematic connections")
         return apply_connection_plan(
@@ -645,6 +865,25 @@ def register_creation_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
+    async def pcb_sync_place_and_report(
+        project_path: str,
+        board_width_mm: float = 100.0,
+        board_height_mm: float = 80.0,
+        placement_style: str = "functional",
+        placement_rules: dict[str, Any] | None = None,
+        run_drc: bool = False,
+    ) -> dict[str, Any]:
+        """Sync PCB from schematic, apply initial placement, and return placement/ratsnest/quality reports."""
+        return await _pcb_sync_place_and_report(
+            project_path,
+            board_width_mm,
+            board_height_mm,
+            placement_style,
+            placement_rules,
+            run_drc,
+        )
+
+    @mcp.tool()
     async def pcb_apply_functional_placement(
         project_path: str,
         board_width_mm: float,
@@ -698,7 +937,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         width_mm: float = 0.25,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Route a net with explicit Manhattan segments through the provided waypoints."""
+        """Advanced coordinate routing tool. Prefer pcb_route_between_pads for normal routing."""
         if ctx:
             await ctx.info(f"Routing {net_name} with Manhattan segments")
         return _apply_transactional_pcb_edit(
@@ -711,6 +950,87 @@ def register_creation_tools(mcp: FastMCP) -> None:
                     width_mm,
                 )
             },
+        )
+
+    @mcp.tool()
+    async def pcb_route_between_pads(
+        pcb_path: str,
+        from_ref: str,
+        from_pad: str,
+        to_ref: str,
+        to_pad: str,
+        net_name: str | None = None,
+        layer: str = "F.Cu",
+        width_mm: float = 0.25,
+        strategy: str = "manhattan",
+        clearance_mm: float = 0.25,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Route a PCB connection by footprint reference and pad number."""
+        if ctx:
+            await ctx.info(f"Routing {from_ref}.{from_pad} to {to_ref}.{to_pad}")
+        return _apply_transactional_pcb_edit(
+            pcb_path,
+            lambda pcb: {
+                "route": _route_between_pads(
+                    pcb,
+                    from_ref,
+                    from_pad,
+                    to_ref,
+                    to_pad,
+                    net_name,
+                    layer,
+                    width_mm,
+                    strategy,
+                    clearance_mm,
+                )
+            },
+            run_cli_validation=True,
+        )
+
+    @mcp.tool()
+    async def pcb_route_ratsnest_connection(
+        project_path: str,
+        connection_index: int,
+        layer: str = "F.Cu",
+        width_mm: float = 0.25,
+        strategy: str = "manhattan",
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Route one geometric pad-ratsnest connection by index."""
+        if ctx:
+            await ctx.info(f"Routing ratsnest connection {connection_index}")
+        files = get_project_files(validate_local_path(project_path, "project", must_exist=True))
+        if "pcb" not in files:
+            return {"success": False, "project_path": project_path, "error": "PCB file not found"}
+        pcb = KiCadPcb.from_file(files["pcb"])
+        ratsnest = _build_ratsnest(project_path, files["pcb"], pcb)
+        connections = ratsnest.get("connections", [])
+        if connection_index < 0 or connection_index >= len(connections):
+            return {
+                "success": False,
+                "project_path": project_path,
+                "error": "connection_index is outside the ratsnest connection list",
+                "connection_count": len(connections),
+            }
+        connection = connections[connection_index]
+        return _apply_transactional_pcb_edit(
+            files["pcb"],
+            lambda model: {
+                "route": _route_between_pads(
+                    model,
+                    connection["from"]["reference"],
+                    connection["from"]["pad"],
+                    connection["to"]["reference"],
+                    connection["to"]["pad"],
+                    connection.get("net_name"),
+                    layer,
+                    width_mm,
+                    strategy,
+                    0.25,
+                )
+            },
+            run_cli_validation=True,
         )
 
 
@@ -1467,6 +1787,77 @@ async def _project_next_actions(
     }
 
 
+async def _project_design_state(
+    project_path: str,
+    run_erc: bool,
+    run_drc: bool,
+) -> dict[str, Any]:
+    report = await _project_completion_report(project_path, run_erc, run_drc, None)
+    if not report.get("success"):
+        return {
+            "success": False,
+            "stage": "unknown",
+            "project_path": project_path,
+            "blocking_issues": [report.get("error", "Project state could not be read")],
+            "recommended_next_tool": "create_kicad_project",
+            "recommended_arguments": {},
+            "tools_to_avoid_now": ["schematic_add_wire", "schematic_connect_points"],
+            "safe_to_continue": False,
+            "debug": report,
+        }
+    status = report.get("status", {})
+    pcb = report.get("pcb", {}) or {}
+    drc = report.get("drc", {}) or {}
+    blocking: list[str] = []
+    if not status.get("schematic_complete"):
+        stage = "schematic_invalid"
+        next_tool = "schematic_apply_connection_plan"
+        next_args = {"schematic_path": report.get("files", {}).get("schematic", project_path)}
+        quality = report.get("schematic", {}).get("quality_gate", {})
+        blocking.extend(
+            f"{key}: {value}"
+            for key, value in quality.get("blocking_counts", {}).items()
+            if value
+        )
+    elif not status.get("pcb_synced"):
+        stage = "schematic_valid"
+        next_tool = "pcb_sync_place_and_report"
+        next_args = {"project_path": report["project_path"]}
+    elif not status.get("placement_valid"):
+        stage = "pcb_synced"
+        next_tool = "pcb_apply_functional_placement"
+        next_args = {"project_path": report["project_path"]}
+    elif pcb.get("routing_status") in {"unrouted", "partially_routed", "unknown_needs_drc"}:
+        stage = "routing_needed"
+        next_tool = "pcb_get_ratsnest"
+        next_args = {"project_path": report["project_path"]}
+    elif run_drc and drc.get("success") and drc.get("total_violations", 0) == 0:
+        stage = "ready"
+        next_tool = "project_design_state"
+        next_args = {"project_path": report["project_path"], "run_drc": True}
+    else:
+        stage = "drc_needed"
+        next_tool = "run_drc_check"
+        next_args = {"project_path": report["project_path"]}
+    return {
+        "success": True,
+        "project_path": report["project_path"],
+        "stage": stage,
+        "blocking_issues": blocking,
+        "recommended_next_tool": next_tool,
+        "recommended_arguments": next_args,
+        "tools_to_avoid_now": ["schematic_add_wire", "schematic_connect_points"],
+        "safe_to_continue": not blocking,
+        "status": status,
+        "summary": {
+            "schematic_complete": status.get("schematic_complete"),
+            "pcb_synced": status.get("pcb_synced"),
+            "placement_valid": status.get("placement_valid"),
+            "routing_status": pcb.get("routing_status"),
+        },
+    }
+
+
 def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     actions = []
     erc_plan = report.get("erc_plan", {})
@@ -1856,7 +2247,7 @@ def _pcb_sync_from_schematic(
             }
             placed = []
             updated = []
-            missing_pads = []
+            missing_pads: list[dict[str, Any]] = []
             for net_name in native.get("nets", {}):
                 pcb.ensure_net(net_name)
             for index, (ref, component) in enumerate(footprint_refs.items()):
@@ -1964,6 +2355,7 @@ def _complete_pcb_from_schematic(
     placement_objects = placement.get("changed_objects", {}) if placement else {}
     return {
         "success": True,
+        "tool": "pcb_complete_from_schematic",
         "project_path": project_path,
         "pcb_path": files["pcb"],
         "stage": "placed" if place_pcb else "synced",
@@ -1974,7 +2366,7 @@ def _complete_pcb_from_schematic(
             "pcb_synced": True,
             "pcb_placed": bool(place_pcb),
             "routing_complete": False,
-            "routing_status": "pending_manual_or_explicit_route_steps",
+            "routing_status": quality.get("routing_status", "unknown_needs_drc"),
             "completion_scope": "sync_and_initial_placement_only",
         },
         "sync": sync,
@@ -1988,6 +2380,53 @@ def _complete_pcb_from_schematic(
             "overlap_warnings": placement_objects.get("overlap_warnings", []),
             "keepout_warnings": placement_objects.get("keepout_warnings", []),
         },
+    }
+
+
+async def _pcb_sync_place_and_report(
+    project_path: str,
+    board_width_mm: float,
+    board_height_mm: float,
+    placement_style: str,
+    placement_rules: dict[str, Any] | None,
+    run_drc: bool,
+) -> dict[str, Any]:
+    completed = _complete_pcb_from_schematic(
+        project_path,
+        board_width_mm,
+        board_height_mm,
+        placement_style,
+        preserve_existing_placement=True,
+        place_pcb=True,
+        placement_rules=placement_rules,
+    )
+    if not completed.get("success"):
+        completed["tool"] = "pcb_sync_place_and_report"
+        return completed
+    files = get_project_files(validate_local_path(project_path, "project", must_exist=True))
+    thumbnail = await _generate_pcb_thumbnail_impl(project_path, None)
+    drc = {"success": True, "skipped": True, "reason": "run_drc=False"}
+    if run_drc and "pcb" in files:
+        drc = await run_drc_via_cli(files["pcb"], None)
+    return {
+        "success": True,
+        "tool": "pcb_sync_place_and_report",
+        "stage": completed.get("stage"),
+        "project_path": project_path,
+        "pcb_path": files.get("pcb"),
+        "changed": True,
+        "backup_path": completed.get("placement", {}).get("backup_path")
+        or completed.get("sync", {}).get("backup_path"),
+        "diff": completed.get("placement", {}).get("diff") or completed.get("sync", {}).get("diff"),
+        "sync": completed.get("sync"),
+        "placement": completed.get("placement"),
+        "ratsnest": completed.get("ratsnest"),
+        "quality": completed.get("quality"),
+        "thumbnail": thumbnail,
+        "validation": {"drc": drc},
+        "warnings": completed.get("warnings", {}),
+        "recommended_next_tool": "pcb_get_ratsnest",
+        "recommended_next_arguments": {"project_path": project_path},
     }
 
 
@@ -2266,6 +2705,7 @@ def _build_ratsnest(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str
         "success": True,
         "project_path": project_path,
         "pcb_path": pcb_path,
+        "ratsnest_type": "geometric_pad_ratsnest",
         "net_count": len(pads_by_net),
         "connection_count": len(connections),
         "connections": connections,
@@ -2281,6 +2721,18 @@ def _pcb_quality_report(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict
     overlap_warnings = _footprint_overlap_warnings(footprints)
     keepout_warnings = _esp_antenna_keepout_warnings(pcb)
     track_count = len(pcb._top_level("segment"))
+    if not assigned_pads:
+        routing_status = "unrouted"
+        routing_confidence = "low"
+    elif track_count == 0 and ratsnest.get("connection_count", 0) > 0:
+        routing_status = "unrouted"
+        routing_confidence = "medium"
+    elif track_count > 0:
+        routing_status = "unknown_needs_drc"
+        routing_confidence = "medium"
+    else:
+        routing_status = "unknown_needs_drc"
+        routing_confidence = "low"
     return {
         "success": True,
         "project_path": project_path,
@@ -2291,7 +2743,10 @@ def _pcb_quality_report(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict
         "assigned_pad_count": len(assigned_pads),
         "unassigned_pad_count": len(unassigned_pads),
         "track_count": track_count,
-        "routing_complete": ratsnest.get("connection_count", 0) == 0 and track_count > 0,
+        "routing_status": routing_status,
+        "routing_complete": False,
+        "routing_confidence": routing_confidence,
+        "requires_drc_for_final_answer": True,
         "ratsnest_connection_count": ratsnest.get("connection_count", 0),
         "overlap_warnings": overlap_warnings,
         "overlap_warning_count": len(overlap_warnings),
@@ -2326,6 +2781,58 @@ def _manhattan_points(waypoints: list[dict[str, float]]) -> list[dict[str, float
             points.append({"x": end["x"], "y": start["y"]})
         points.append(end)
     return points
+
+
+def _route_between_pads(
+    pcb: KiCadPcb,
+    from_ref: str,
+    from_pad: str,
+    to_ref: str,
+    to_pad: str,
+    net_name: str | None,
+    layer: str,
+    width_mm: float,
+    strategy: str,
+    clearance_mm: float,
+) -> dict[str, Any]:
+    if strategy != "manhattan":
+        raise ValueError("Only strategy='manhattan' is currently supported")
+    pads = pcb.footprint_pad_positions()
+    start = _find_pad(pads, from_ref, from_pad)
+    end = _find_pad(pads, to_ref, to_pad)
+    resolved_net = net_name or start.get("net_name") or end.get("net_name")
+    if not resolved_net:
+        raise ValueError("net_name is required when neither pad has an assigned net")
+    assigned_nets: set[str] = set()
+    for pad in (start, end):
+        if pad.get("net_name"):
+            assigned_nets.add(str(pad["net_name"]))
+    if len(assigned_nets) > 1 and net_name is None:
+        raise ValueError(
+            f"Pads are assigned to different nets: {', '.join(sorted(assigned_nets))}"
+        )
+    route = pcb.add_track(
+        resolved_net,
+        _manhattan_points([start["position"], end["position"]]),
+        layer,
+        width_mm,
+    )
+    route.update(
+        {
+            "from": {"reference": from_ref, "pad": from_pad, "position": start["position"]},
+            "to": {"reference": to_ref, "pad": to_pad, "position": end["position"]},
+            "strategy": strategy,
+            "clearance_mm": clearance_mm,
+        }
+    )
+    return route
+
+
+def _find_pad(pads: list[dict[str, Any]], reference: str, pad_number: str) -> dict[str, Any]:
+    for pad in pads:
+        if pad.get("reference") == reference and str(pad.get("pad")) == str(pad_number):
+            return pad
+    raise ValueError(f"Pad not found: {reference}.{pad_number}")
 
 
 def _create_pcb_file(
@@ -2373,6 +2880,10 @@ def _apply_transactional_schematic_authoring(
 def _apply_transactional_pcb_edit(
     pcb_path: str,
     mutator: Callable[[KiCadPcb], dict[str, Any]],
+    *,
+    run_cli_validation: bool = True,
+    run_drc: bool = False,
+    post_write_validator: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     validated_path = validate_local_path(pcb_path, "pcb", must_exist=True)
     original_text = Path(validated_path).read_text(encoding="utf-8")
@@ -2384,21 +2895,46 @@ def _apply_transactional_pcb_edit(
         updated_text = pcb.to_text()
         after_validation = validate_pcb_text(updated_text)
         Path(validated_path).write_text(updated_text, encoding="utf-8")
+        cli_export = (
+            _validate_pcb_with_cli_export(validated_path)
+            if run_cli_validation
+            else {"success": True, "skipped": True, "reason": "PCB CLI validation disabled"}
+        )
+        if not cli_export.get("success"):
+            raise ValueError(cli_export.get("stderr") or cli_export.get("error") or "PCB CLI export failed")
+        drc = (
+            _run_pcb_drc_sync(validated_path)
+            if run_drc
+            else {"success": True, "skipped": True, "reason": "run_drc=False"}
+        )
+        if run_drc and not drc.get("success"):
+            raise ValueError(drc.get("error", "PCB DRC failed"))
+        post_write = (
+            post_write_validator(validated_path)
+            if post_write_validator is not None
+            else {"success": True, "skipped": True, "reason": "Post-write validation disabled"}
+        )
+        if not post_write.get("success"):
+            raise ValueError(post_write.get("error") or post_write.get("reason") or "PCB post-write validation failed")
         diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
         return {
             "success": True,
+            "tool": "pcb_transactional_edit",
+            "stage": "pcb_authoring",
+            "changed": True,
             "pcb_path": validated_path,
             "backup_path": backup["backup_path"],
             "changed_objects": change_result,
             "validation": {
                 "before": before_validation,
                 "after": after_validation,
-                "cli": {
-                    "success": True,
-                    "skipped": True,
-                    "reason": "PCB CLI validation is not required for primitive edits",
-                },
+                "cli_export": cli_export,
+                "drc": drc,
+                "post_write": post_write,
             },
+            "warnings": [],
+            "recommended_next_tool": "pcb_quality_report",
+            "recommended_next_arguments": {},
             "rolled_back": False,
             "diff": diff_result["diff"],
         }
@@ -2410,7 +2946,76 @@ def _apply_transactional_pcb_edit(
             "backup_path": backup["backup_path"],
             "error": str(exc),
             "rolled_back": restore_result.get("success", False),
+            "recoverable": True,
+            "recommended_next_tool": "pcb_quality_report",
+            "debug": {},
             "restore_result": restore_result,
+        }
+
+
+def _validate_pcb_with_cli_export(pcb_path: str) -> dict[str, Any]:
+    cli_path = get_kicad_cli_path(required=False)
+    if cli_path is None:
+        return {"success": True, "skipped": True, "reason": "KiCad CLI is not available"}
+    pcb_dir = os.path.dirname(pcb_path) or "."
+    with tempfile.TemporaryDirectory(prefix=".kicad_mcp_pcb_validate_", dir=pcb_dir) as temp_dir:
+        output_path = os.path.join(temp_dir, "pcb_validation.svg")
+        try:
+            process = subprocess.run(
+                [
+                    cli_path,
+                    "pcb",
+                    "export",
+                    "svg",
+                    "--output",
+                    output_path,
+                    "--layers",
+                    "F.Cu,B.Cu,Edge.Cuts",
+                    pcb_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "KiCad CLI PCB SVG export timed out"}
+        return {
+            "success": process.returncode == 0,
+            "skipped": False,
+            "returncode": process.returncode,
+            "stdout": process.stdout,
+            "stderr": process.stderr,
+        }
+
+
+def _run_pcb_drc_sync(pcb_path: str) -> dict[str, Any]:
+    cli_path = get_kicad_cli_path(required=False)
+    if cli_path is None:
+        return {"success": True, "skipped": True, "reason": "KiCad CLI is not available"}
+    with tempfile.TemporaryDirectory() as temp_dir:
+        output_path = os.path.join(temp_dir, "drc_report.json")
+        try:
+            process = subprocess.run(
+                [cli_path, "pcb", "drc", "--format", "json", "--output", output_path, pcb_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "KiCad CLI PCB DRC timed out"}
+        if process.returncode != 0:
+            return {
+                "success": False,
+                "error": process.stderr or process.stdout or "KiCad CLI PCB DRC failed",
+                "returncode": process.returncode,
+            }
+        report = json.loads(Path(output_path).read_text(encoding="utf-8")) if os.path.exists(output_path) else {}
+        violations = report.get("violations", [])
+        return {
+            "success": True,
+            "total_violations": len(violations),
+            "violations": violations,
+            "report": report,
         }
 
 

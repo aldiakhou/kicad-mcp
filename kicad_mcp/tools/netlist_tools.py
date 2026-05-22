@@ -19,6 +19,37 @@ from kicad_mcp.utils.netlist_parser import (
 logger = logging.getLogger(__name__)
 
 
+def _netlist_native_first(schematic_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    native_netlist = export_native_netlist(schematic_path)
+    if native_netlist.get("success") and (
+        native_netlist.get("component_count", 0) > 0 or native_netlist.get("net_count", 0) > 0
+    ):
+        return native_netlist, native_netlist
+    inferred = extract_netlist(schematic_path)
+    if native_netlist.get("success") is False:
+        inferred["native_netlist_error"] = native_netlist.get("error")
+    return inferred, native_netlist
+
+
+def _net_nodes(net_value: Any) -> list[dict[str, Any]]:
+    nodes = net_value.get("nodes", []) if isinstance(net_value, dict) else net_value
+    if not isinstance(nodes, list):
+        return []
+    normalized = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        normalized.append(
+            {
+                "component": node.get("component") or node.get("ref"),
+                "pin": node.get("pin", "Unknown"),
+                "pinfunction": node.get("pinfunction", ""),
+                "pintype": node.get("pintype", ""),
+            }
+        )
+    return normalized
+
+
 async def _extract_schematic_netlist_impl(
     schematic_path: str, ctx: Context | None
 ) -> dict[str, Any]:
@@ -40,13 +71,7 @@ async def _extract_schematic_netlist_impl(
             await ctx.report_progress(20, 100)
             await ctx.info("Parsing schematic structure...")
 
-        native_netlist = export_native_netlist(schematic_path)
-        if native_netlist.get("success") and (
-            native_netlist.get("component_count", 0) > 0 or native_netlist.get("net_count", 0) > 0
-        ):
-            netlist_data = native_netlist
-        else:
-            netlist_data = extract_netlist(schematic_path)
+        netlist_data, native_netlist = _netlist_native_first(schematic_path)
 
         if "error" in netlist_data:
             logger.info(f"Error extracting netlist: {netlist_data['error']}")
@@ -217,7 +242,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
 
         # Extract netlist information
         try:
-            netlist_data = extract_netlist(schematic_path)
+            netlist_data, native_netlist = _netlist_native_first(schematic_path)
 
             if "error" in netlist_data:
                 logger.info(f"Error extracting netlist: {netlist_data['error']}")
@@ -259,7 +284,8 @@ def register_netlist_tools(mcp: FastMCP) -> None:
 
             # Identify power nets
             nets = netlist_data.get("nets", {})
-            for net_name, pins in nets.items():
+            for net_name, net_value in nets.items():
+                pins = _net_nodes(net_value)
                 if any(
                     net_name.startswith(prefix)
                     for prefix in ["VCC", "VDD", "GND", "+5V", "+3V3", "+12V"]
@@ -273,7 +299,8 @@ def register_netlist_tools(mcp: FastMCP) -> None:
 
             # Check for potential issues
             # 1. Nets with only one connection (floating)
-            for net_name, pins in nets.items():
+            for net_name, net_value in nets.items():
+                pins = _net_nodes(net_value)
                 if len(pins) <= 1 and not any(
                     net_name.startswith(prefix)
                     for prefix in ["VCC", "VDD", "GND", "+5V", "+3V3", "+12V"]
@@ -299,8 +326,13 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 "analysis": analysis,
                 "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
                 "netlist_quality": netlist_data.get("netlist_quality", "partial"),
-                "connectivity_complete": False,
+                "connectivity_complete": bool(
+                    netlist_data.get("connectivity_complete")
+                    and netlist_data.get("netlist_quality") == "native"
+                ),
             }
+            if native_netlist.get("success") is False:
+                result["native_netlist_error"] = native_netlist.get("error")
 
             # Complete progress
             if ctx:
@@ -364,7 +396,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 await ctx.report_progress(30, 100)
                 await ctx.info(f"Extracting netlist to find connections for {component_ref}...")
 
-            netlist_data = extract_netlist(schematic_path)
+            netlist_data, native_netlist = _netlist_native_first(schematic_path)
 
             if "error" in netlist_data:
                 logger.info(f"Failed to extract netlist: {netlist_data['error']}")
@@ -396,7 +428,8 @@ def register_netlist_tools(mcp: FastMCP) -> None:
             connections = []
             connected_nets = []
 
-            for net_name, pins in nets.items():
+            for net_name, net_value in nets.items():
+                pins = _net_nodes(net_value)
                 # Check if any pin belongs to our component
                 component_pins = []
                 for pin in pins:
@@ -469,17 +502,29 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 "connected_nets": connected_nets,
                 "pin_functions": pin_functions,
                 "total_connections": len(connections),
-                "inferred_connection_count": len(connections),
+                "inferred_connection_count": 0
+                if netlist_data.get("netlist_quality") == "native"
+                else len(connections),
                 "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
                 "netlist_quality": netlist_data.get("netlist_quality", "partial"),
-                "connectivity_complete": False,
+                "connectivity_complete": bool(
+                    netlist_data.get("connectivity_complete")
+                    and netlist_data.get("netlist_quality") == "native"
+                ),
             }
+            if native_netlist.get("success") is False:
+                result["native_netlist_error"] = native_netlist.get("error")
 
             if ctx:
                 await ctx.report_progress(100, 100)
-                await ctx.info(
-                    f"Inferred {len(connections)} possible connections for component {component_ref}; full connectivity tracing is not yet available."
-                )
+                if result["connectivity_complete"]:
+                    await ctx.info(
+                        f"Found {len(connections)} native KiCad connections for component {component_ref}."
+                    )
+                else:
+                    await ctx.info(
+                        f"Inferred {len(connections)} possible connections for component {component_ref}; native connectivity was unavailable."
+                    )
 
             return result
 
