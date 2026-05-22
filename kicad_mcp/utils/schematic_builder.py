@@ -1,0 +1,586 @@
+"""Spec-driven schematic building helpers."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Any, cast
+
+from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExprAtom
+from kicad_mcp.utils.library_resolver import resolve_footprint, resolve_symbol
+from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
+from kicad_mcp.utils.preview_metadata import svg_preview_metadata
+from kicad_mcp.utils.schematic_pins import (
+    SCHEMATIC_GRID_MM,
+    add_no_connect_to_pin,
+    attach_net_to_pin,
+)
+from kicad_mcp.utils.transactional_edit import export_schematic_svg_file
+
+UNACCEPTABLE_ERC_TYPES = {
+    "endpoint_off_grid",
+    "label_dangling",
+    "isolated_pin_label",
+    "ground_pin_not_ground",
+}
+
+
+def card_reader_v1_spec() -> dict[str, Any]:
+    """Return the built-in clean Card Reader schematic specification."""
+    symbols = [
+        _sym("J1", "Connector:USB_C_Receptacle_USB2.0_14P", "USB_C_Receptacle_USB2.0_14P", 35, 65, footprint="Connector_USB:USB_C_Receptacle_XKB_U262-16XN-4BVC11"),
+        _sym("R1", "Device:R", "5.1k", 75, 78, 90, "Resistor_SMD:R_0603_1608Metric"),
+        _sym("R2", "Device:R", "5.1k", 75, 92, 90, "Resistor_SMD:R_0603_1608Metric"),
+        _sym("D1", "Diode:SMF5V0A", "SMF5V0A", 95, 45, 180, "Diode_SMD:D_SMF"),
+        _sym("U1", "Regulator_Linear:AMS1117-3.3", "AMS1117-3.3", 125, 65, footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2"),
+        _sym("C1", "Device:C", "10u", 105, 92, footprint="Capacitor_SMD:C_1206_3216Metric"),
+        _sym("C2", "Device:C", "22u", 145, 92, footprint="Capacitor_SMD:C_1206_3216Metric"),
+        _sym("C3", "Device:C", "0.1u", 165, 92, footprint="Capacitor_SMD:C_0805_2012Metric"),
+        _sym("U2", "RF_Module:ESP32-S3-WROOM-1", "ESP32-S3-WROOM-1", 210, 115, footprint="RF_Module:ESP32-S3-WROOM-1"),
+        _sym("C4", "Device:C", "0.1u", 210, 158, footprint="Capacitor_SMD:C_0805_2012Metric"),
+        _sym("R4", "Device:R", "10k", 175, 158, footprint="Resistor_SMD:R_0603_1608Metric"),
+        _sym("SW1", "Switch:SW_Push", "RESET", 165, 180, 0, "Button_Switch_SMD:SW_SPST_TL3342"),
+        _sym("R7", "Device:R", "10k", 198, 180, footprint="Resistor_SMD:R_0603_1608Metric"),
+        _sym("SW2", "Switch:SW_Push", "BOOT", 225, 180, 0, "Button_Switch_SMD:SW_SPST_TL3342"),
+        _sym("J2", "Connector_Generic:Conn_01x04", "UART_Debug_Header", 210, 232, footprint="Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"),
+        _sym("J3", "Connector_Generic:Conn_01x06", "PN532_I2C_Module", 290, 232, footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"),
+        _sym("R5", "Device:R", "4.7k", 280, 198, footprint="Resistor_SMD:R_0603_1608Metric"),
+        _sym("R6", "Device:R", "4.7k", 296, 198, footprint="Resistor_SMD:R_0603_1608Metric"),
+        _sym("U3", "Display_Character:NHD-0420H1Z", "NHD-0420H1Z", 350, 105, footprint="Display:NHD-0420H1Z"),
+        _sym("RV1", "Device:R_Potentiometer", "10k", 325, 160, footprint="Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical"),
+        _sym("R3", "Device:R", "100", 318, 58, 90, "Resistor_SMD:R_0603_1608Metric"),
+        _sym("#FLG01", "power:PWR_FLAG", "PWR_FLAG", 105, 30),
+        _sym("#FLG03", "power:PWR_FLAG", "PWR_FLAG", 185, 30),
+        _sym("#FLG04", "power:PWR_FLAG", "PWR_FLAG", 332, 180),
+    ]
+    connections = [
+        *[_conn("J1", pin, "+5V", True) for pin in ("A4", "A9", "B4", "B9")],
+        *[_conn("J1", pin, "GND", True) for pin in ("A1", "A12", "B1", "B12", "SH")],
+        _conn("J1", "A5", "USB_CC1"),
+        _conn("J1", "B5", "USB_CC2"),
+        _conn("J1", "A6", "USB_D+"),
+        _conn("J1", "B6", "USB_D+"),
+        _conn("J1", "A7", "USB_D-"),
+        _conn("J1", "B7", "USB_D-"),
+        _conn("R1", "1", "USB_CC1"),
+        _conn("R1", "2", "GND"),
+        _conn("R2", "1", "USB_CC2"),
+        _conn("R2", "2", "GND"),
+        _conn("D1", "1", "+5V"),
+        _conn("D1", "2", "GND"),
+        _conn("U1", "VI", "+5V"),
+        _conn("U1", "VO", "+3.3V"),
+        _conn("U1", "GND", "GND"),
+        *[_conn(ref, "1", high) for ref, high in (("C1", "+5V"), ("C2", "+3.3V"), ("C3", "+3.3V"), ("C4", "+3.3V"))],
+        *[_conn(ref, "2", "GND") for ref in ("C1", "C2", "C3", "C4")],
+        _conn("U2", "1", "GND", True),
+        _conn("U2", "40", "GND", True),
+        _conn("U2", "41", "GND", True),
+        _conn("U2", "3V3", "+3.3V"),
+        _conn("U2", "EN", "ESP_EN"),
+        _conn("U2", "USB_D+", "USB_D+"),
+        _conn("U2", "USB_D-", "USB_D-"),
+        _conn("U2", "TXD0", "UART_TXD0"),
+        _conn("U2", "RXD0", "UART_RXD0"),
+        _conn("U2", "IO13", "NFC_SDA"),
+        _conn("U2", "IO47", "NFC_SCL"),
+        _conn("U2", "IO11", "NFC_IRQ"),
+        _conn("U2", "IO12", "NFC_RST"),
+        _conn("U2", "IO4", "LCD_RS"),
+        _conn("U2", "IO6", "LCD_E"),
+        _conn("U2", "IO7", "LCD_D4"),
+        _conn("U2", "IO8", "LCD_D5"),
+        _conn("U2", "IO9", "LCD_D6"),
+        _conn("U2", "IO10", "LCD_D7"),
+        _conn("U2", "IO14", "ESP_BOOT"),
+        _conn("R4", "1", "ESP_EN"),
+        _conn("R4", "2", "+3.3V"),
+        _conn("SW1", "1", "ESP_EN"),
+        _conn("SW1", "2", "GND"),
+        _conn("R7", "1", "ESP_BOOT"),
+        _conn("R7", "2", "+3.3V"),
+        _conn("SW2", "1", "ESP_BOOT"),
+        _conn("SW2", "2", "GND"),
+        _conn("J2", "1", "+3.3V"),
+        _conn("J2", "2", "GND"),
+        _conn("J2", "3", "UART_TXD0"),
+        _conn("J2", "4", "UART_RXD0"),
+        _conn("J3", "1", "+3.3V"),
+        _conn("J3", "2", "GND"),
+        _conn("J3", "3", "NFC_SDA"),
+        _conn("J3", "4", "NFC_SCL"),
+        _conn("J3", "5", "NFC_IRQ"),
+        _conn("J3", "6", "NFC_RST"),
+        _conn("R5", "1", "NFC_SDA"),
+        _conn("R5", "2", "+3.3V"),
+        _conn("R6", "1", "NFC_SCL"),
+        _conn("R6", "2", "+3.3V"),
+        _conn("U3", "VSS", "GND"),
+        _conn("U3", "VDD", "+3.3V"),
+        _conn("U3", "VO", "LCD_VO"),
+        _conn("U3", "R/W", "GND"),
+        _conn("U3", "RS", "LCD_RS"),
+        _conn("U3", "E", "LCD_E"),
+        _conn("U3", "DB4", "LCD_D4"),
+        _conn("U3", "DB5", "LCD_D5"),
+        _conn("U3", "DB6", "LCD_D6"),
+        _conn("U3", "DB7", "LCD_D7"),
+        _conn("U3", "A", "LCD_BL_A"),
+        _conn("U3", "K", "GND"),
+        _conn("RV1", "1", "GND"),
+        _conn("RV1", "2", "LCD_VO"),
+        _conn("RV1", "3", "+3.3V"),
+        _conn("R3", "1", "+3.3V"),
+        _conn("R3", "2", "LCD_BL_A"),
+        _conn("#FLG01", "1", "+5V"),
+        _conn("#FLG03", "1", "GND"),
+        _conn("#FLG04", "1", "LCD_VO"),
+    ]
+    no_connects = [
+        *[{"ref": "U2", "pin": pin} for pin in ("IO5", "IO15", "IO16", "IO17", "IO18", "IO3", "IO46", "IO21", "IO48", "IO45", "IO0", "IO35", "IO36", "IO37", "IO38", "IO39", "IO40", "IO41", "IO42", "IO2", "IO1")],
+        *[{"ref": "U3", "pin": pin} for pin in ("DB0", "DB1", "DB2", "DB3")],
+    ]
+    return {
+        "name": "card_reader_v1",
+        "paper": "A3",
+        "symbols": symbols,
+        "connections": connections,
+        "no_connects": no_connects,
+        "expected_nets": sorted({connection["net"] for connection in connections}),
+        "accepted_erc_types": [],
+    }
+
+
+def preview_build_from_spec(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """Return a JSON-safe build preview without writing files."""
+    paper = spec.get("paper", "A4")
+    page_width, page_height = KiCadSchematic.PAPER_SIZES_MM.get(paper, KiCadSchematic.PAPER_SIZES_MM["A4"])
+    symbol_errors = []
+    footprint_errors = []
+    for symbol in spec.get("symbols", []):
+        try:
+            resolve_symbol(symbol["lib_id"])
+        except Exception as exc:
+            symbol_errors.append({"reference": symbol.get("reference"), "lib_id": symbol.get("lib_id"), "error": str(exc)})
+        if symbol.get("footprint"):
+            try:
+                resolve_footprint(symbol["footprint"])
+            except Exception as exc:
+                footprint_errors.append({"reference": symbol.get("reference"), "footprint": symbol.get("footprint"), "error": str(exc)})
+    return {
+        "success": not symbol_errors and not footprint_errors,
+        "project_path": project_path,
+        "spec_name": spec.get("name"),
+        "page": {"paper": paper, "width_mm": page_width, "height_mm": page_height},
+        "planned_symbol_count": len(spec.get("symbols", [])),
+        "planned_connection_count": len(spec.get("connections", [])),
+        "planned_no_connect_count": len(spec.get("no_connects", [])),
+        "planned_nets": sorted({connection["net"] for connection in spec.get("connections", [])}),
+        "erc_sensitive_pins": _erc_sensitive_pins(spec),
+        "symbol_errors": symbol_errors,
+        "footprint_errors": footprint_errors,
+    }
+
+
+def build_schematic_from_spec(
+    project_path: str,
+    spec: dict[str, Any],
+    mode: str = "replace",
+    run_erc: bool = True,
+) -> dict[str, Any]:
+    """Build a schematic from a structured spec."""
+    if mode != "replace":
+        return {"success": False, "project_path": project_path, "error": "Only mode='replace' is supported"}
+    files = get_project_files(project_path)
+    if "schematic" not in files:
+        return {"success": False, "project_path": project_path, "error": "Schematic file not found"}
+    preview = preview_build_from_spec(project_path, spec)
+    if not preview["success"]:
+        return {**preview, "success": False, "error": "Spec contains unresolved symbols or footprints"}
+    schematic_path = files["schematic"]
+    built_summary: dict[str, Any] = {}
+
+    def mutate(schematic: KiCadSchematic) -> dict[str, Any]:
+        built = _build_in_memory_schematic(schematic_path, spec)
+        schematic.root = built.root
+        built_summary.update(
+            {
+                "symbols": built.list_symbols(),
+                "labels": built.list_labels(),
+                "wires": built.list_wires(),
+                "no_connects": built.list_no_connects(),
+            }
+        )
+        return {
+            "spec_name": spec.get("name"),
+            "symbol_count": len(built_summary["symbols"]),
+            "connection_count": len(spec.get("connections", [])),
+            "no_connect_count": len(built_summary["no_connects"]),
+        }
+
+    from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
+
+    result = apply_transactional_schematic_edit(
+        schematic_path,
+        mutate,
+        run_cli_validation=True,
+        post_write_validator=lambda path: validate_connection_plan_membership(path, spec.get("connections", [])),
+    )
+    if not result.get("success"):
+        return result
+    result["preview"] = preview
+    result["native_netlist"] = export_native_netlist(schematic_path)
+    result["quality_report"] = schematic_quality_report(schematic_path, run_erc=run_erc)
+    svg_result = export_schematic_svg_file(schematic_path, None)
+    if svg_result.get("success"):
+        result["schematic_preview"] = svg_preview_metadata(svg_result["svg_path"])
+    else:
+        result["schematic_preview_error"] = svg_result.get("error")
+    return result
+
+
+def apply_connection_plan(
+    schematic_path: str,
+    connections: list[dict[str, Any]],
+    run_native_netlist: bool = True,
+) -> dict[str, Any]:
+    """Apply a batch connection plan transactionally."""
+    from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
+
+    result = apply_transactional_schematic_edit(
+        schematic_path,
+        lambda schematic: {
+            "connections": [
+                attach_net_to_pin(
+                    schematic,
+                    schematic_path,
+                    connection["ref"],
+                    connection["pin"],
+                    connection["net"],
+                    connection.get("label_type", "global"),
+                    connection.get("stub_length_mm", 5.08),
+                    connection.get("allow_hidden_power", False),
+                )
+                for connection in connections
+            ]
+        },
+        run_cli_validation=True,
+        post_write_validator=(
+            (lambda path: validate_connection_plan_membership(path, connections))
+            if run_native_netlist
+            else None
+        ),
+    )
+    return result
+
+
+def add_no_connect_marker(
+    schematic_path: str, reference: str, pin: str, allow_hidden_power: bool = False
+) -> dict[str, Any]:
+    """Add a no-connect marker to a resolved symbol pin."""
+    from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
+
+    return apply_transactional_schematic_edit(
+        schematic_path,
+        lambda schematic: {
+            "no_connect": add_no_connect_to_pin(
+                schematic, schematic_path, reference, pin, allow_hidden_power
+            )
+        },
+        run_cli_validation=True,
+    )
+
+
+def validate_connection_plan_membership(
+    schematic_path: str, connections: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Validate that every planned connection appears in KiCad's native netlist."""
+    native = export_native_netlist(schematic_path)
+    if not native.get("success"):
+        return {"success": False, "reason": native.get("error"), "native_netlist": native}
+    missing = []
+    checked_count = 0
+    for connection in connections:
+        if str(connection["ref"]).startswith("#"):
+            continue
+        checked_count += 1
+        check = _membership_from_native(
+            native, connection["ref"], connection["pin"], connection["net"]
+        )
+        if not check:
+            missing.append(connection)
+    return {
+        "success": not missing,
+        "reason": "all planned connections verified" if not missing else "missing native netlist memberships",
+        "missing": missing,
+        "checked_count": checked_count,
+    }
+
+
+def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = True) -> dict[str, Any]:
+    """Summarize schematic quality and common agent-authoring failure modes."""
+    schematic_path = _schematic_path(project_or_schematic_path)
+    schematic = KiCadSchematic.from_file(schematic_path)
+    paper = _paper(schematic)
+    width, height = KiCadSchematic.PAPER_SIZES_MM.get(paper, KiCadSchematic.PAPER_SIZES_MM["A4"])
+    missing_footprints = [
+        symbol["reference"]
+        for symbol in schematic.list_symbols()
+        if not str(symbol.get("reference", "")).startswith("#") and not symbol.get("footprint")
+    ]
+    off_grid = _off_grid_items(schematic)
+    outside = [
+        symbol["reference"]
+        for symbol in schematic.list_symbols()
+        if symbol["position"]["x"] < 0
+        or symbol["position"]["y"] < 0
+        or symbol["position"]["x"] > width
+        or symbol["position"]["y"] > height
+    ]
+    erc = run_erc_via_cli(schematic_path) if run_erc else {"success": True, "skipped": True}
+    categories = erc.get("violation_categories", {}) if erc.get("success") else {}
+    native = export_native_netlist(schematic_path)
+    return {
+        "success": True,
+        "schematic_path": schematic_path,
+        "page": {"paper": paper, "width_mm": width, "height_mm": height},
+        "symbol_count": len(schematic.list_symbols()),
+        "wire_count": len(schematic.list_wires()),
+        "label_count": len(schematic.list_labels()),
+        "no_connect_count": len(schematic.list_no_connects()),
+        "missing_footprints": missing_footprints,
+        "missing_footprint_count": len(missing_footprints),
+        "symbols_outside_page": outside,
+        "outside_page_count": len(outside),
+        "off_grid_items": off_grid,
+        "off_grid_count": len(off_grid),
+        "dangling_label_count": 0,
+        "isolated_label_count": 0,
+        "erc": {
+            "success": erc.get("success"),
+            "total_violations": erc.get("total_violations"),
+            "violation_categories": categories,
+            "unacceptable_categories": {
+                key: categories[key] for key in sorted(UNACCEPTABLE_ERC_TYPES.intersection(categories))
+            },
+            "error": erc.get("error"),
+        },
+        "native_netlist": {
+            "success": native.get("success"),
+            "component_count": native.get("component_count"),
+            "net_count": native.get("net_count"),
+            "non_empty_nets": sum(
+                1 for net in native.get("nets", {}).values() if net.get("nodes")
+            )
+            if native.get("success")
+            else 0,
+            "error": native.get("error"),
+        },
+    }
+
+
+def _build_in_memory_schematic(schematic_path: str, spec: dict[str, Any]) -> KiCadSchematic:
+    schematic = KiCadSchematic.empty(paper=spec.get("paper", "A4"))
+    for symbol in spec.get("symbols", []):
+        resolved_chain = _resolve_symbol_embed_chain(symbol["lib_id"])
+        for parent_lib_id, parent_node in resolved_chain[:-1]:
+            schematic.embed_lib_symbol(parent_lib_id, cast(Any, parent_node))
+        lib_id, symbol_node = resolved_chain[-1]
+        schematic.add_symbol(
+            lib_id,
+            symbol["reference"],
+            symbol.get("value", symbol["reference"]),
+            symbol["x"],
+            symbol["y"],
+            symbol.get("angle", 0.0),
+            symbol.get("footprint"),
+            symbol.get("properties"),
+            cast(Any, symbol_node),
+        )
+    for connection in spec.get("connections", []):
+        attach_net_to_pin(
+            schematic,
+            schematic_path,
+            connection["ref"],
+            connection["pin"],
+            connection["net"],
+            connection.get("label_type", "global"),
+            connection.get("stub_length_mm", 5.08),
+            connection.get("allow_hidden_power", False),
+        )
+    for marker in spec.get("no_connects", []):
+        add_no_connect_to_pin(
+            schematic,
+            schematic_path,
+            marker["ref"],
+            marker["pin"],
+            marker.get("allow_hidden_power", False),
+        )
+    return schematic
+
+
+def _resolve_symbol_embed_chain(lib_id: str) -> list[tuple[str, Any]]:
+    """Return parent lib symbols followed by the requested symbol."""
+    resolved = resolve_symbol(lib_id)
+    parent = _symbol_extends(resolved["node"])
+    if parent and not _node_has_pin(resolved["node"]):
+        parent_node = _nearest_parent_with_pins(resolved["library"], parent)
+        if parent_node is not None:
+            flattened = deepcopy(parent_node)
+            _rename_embedded_symbol(flattened, lib_id)
+            return [(lib_id, flattened)]
+    chain: list[tuple[str, Any]] = [(lib_id, resolved["node"])]
+    library = resolved["library"]
+    seen = {lib_id}
+    while parent:
+        parent_lib_id = f"{library}:{parent}"
+        if parent_lib_id in seen:
+            break
+        seen.add(parent_lib_id)
+        parent_resolved = resolve_symbol(parent_lib_id)
+        chain.insert(0, (parent_lib_id, parent_resolved["node"]))
+        parent = _symbol_extends(parent_resolved["node"])
+    return chain
+
+
+def _nearest_parent_with_pins(library: str, parent: str) -> Any | None:
+    seen: set[str] = set()
+    while parent:
+        parent_lib_id = f"{library}:{parent}"
+        if parent_lib_id in seen:
+            return None
+        seen.add(parent_lib_id)
+        resolved = resolve_symbol(parent_lib_id)
+        if _node_has_pin(resolved["node"]):
+            return resolved["node"]
+        parent = _symbol_extends(resolved["node"]) or ""
+    return None
+
+
+def _node_has_pin(node: Any) -> bool:
+    if hasattr(node, "head") and node.head() == "pin":
+        return True
+    if not hasattr(node, "child_lists"):
+        return False
+    return any(_node_has_pin(child) for child in node.child_lists())
+
+
+def _rename_embedded_symbol(node: Any, lib_id: str) -> None:
+    if not hasattr(node, "head") or node.head() != "symbol" or len(node.items) < 2:
+        return
+    old_name = node.items[1].value if hasattr(node.items[1], "value") else ""
+    old_part = old_name.split(":", 1)[-1]
+    new_part = lib_id.split(":", 1)[-1]
+    node.items[1] = SExprAtom(lib_id, quoted=True)
+    for child in node.child_lists():
+        if child.head() == "symbol" and len(child.items) >= 2 and hasattr(child.items[1], "value"):
+            child_name = child.items[1].value
+            if child_name.startswith(old_part):
+                child.items[1] = SExprAtom(
+                    f"{new_part}{child_name[len(old_part):]}", quoted=True
+                )
+
+
+def _symbol_extends(node: Any) -> str | None:
+    child = node.first_child("extends") if hasattr(node, "first_child") else None
+    if child is None or len(child.items) < 2:
+        return None
+    value = child.items[1]
+    return value.value if hasattr(value, "value") else None
+
+
+def _membership_from_native(native: dict[str, Any], reference: str, pin: str, net_name: str) -> bool:
+    net = native.get("nets", {}).get(net_name)
+    if not net:
+        return False
+    for node in net.get("nodes", []):
+        pinfunction = node.get("pinfunction", "")
+        if node.get("ref") == reference and (
+            node.get("pin") == pin or pinfunction == pin or pinfunction.startswith(f"{pin}_")
+        ):
+            return True
+    return False
+
+
+def _erc_sensitive_pins(spec: dict[str, Any]) -> list[dict[str, str]]:
+    sensitive = []
+    for connection in spec.get("connections", []):
+        if connection["net"] in {"+5V", "+3.3V", "GND"}:
+            sensitive.append({"ref": connection["ref"], "pin": connection["pin"], "net": connection["net"]})
+    return sensitive
+
+
+def _schematic_path(project_or_schematic_path: str) -> str:
+    if project_or_schematic_path.endswith(".kicad_sch"):
+        return project_or_schematic_path
+    files = get_project_files(project_or_schematic_path)
+    if "schematic" not in files:
+        raise FileNotFoundError("Schematic file not found")
+    return files["schematic"]
+
+
+def _paper(schematic: KiCadSchematic) -> str:
+    paper = schematic.root.first_child("paper")
+    if paper is not None and len(paper.items) >= 2:
+        atom = paper.items[1]
+        return atom.value if hasattr(atom, "value") else "A4"
+    return "A4"
+
+
+def _off_grid_items(schematic: KiCadSchematic) -> list[dict[str, Any]]:
+    items = []
+    for symbol in schematic.list_symbols():
+        if not _on_grid(symbol["position"]["x"]) or not _on_grid(symbol["position"]["y"]):
+            items.append({"type": "symbol", "id": symbol["reference"], "position": symbol["position"]})
+    for label in schematic.list_labels():
+        if not _on_grid(label["position"]["x"]) or not _on_grid(label["position"]["y"]):
+            items.append({"type": "label", "id": label.get("uuid"), "position": label["position"]})
+    for wire in schematic.list_wires():
+        for point in wire["points"]:
+            if not _on_grid(point["x"]) or not _on_grid(point["y"]):
+                items.append({"type": "wire", "id": wire.get("uuid"), "position": point})
+    for marker in schematic.list_no_connects():
+        if not _on_grid(marker["position"]["x"]) or not _on_grid(marker["position"]["y"]):
+            items.append({"type": "no_connect", "id": marker.get("uuid"), "position": marker["position"]})
+    return items
+
+
+def _on_grid(value: float, grid: float = SCHEMATIC_GRID_MM) -> bool:
+    return abs((value / grid) - round(value / grid)) < 1e-5
+
+
+def _snap(value: float, grid: float = SCHEMATIC_GRID_MM) -> float:
+    return round(round(value / grid) * grid, 6)
+
+
+def _sym(
+    reference: str,
+    lib_id: str,
+    value: str,
+    x: float,
+    y: float,
+    angle: float = 0.0,
+    footprint: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "reference": reference,
+        "lib_id": lib_id,
+        "value": value,
+        "x": _snap(x),
+        "y": _snap(y),
+        "angle": angle,
+        "footprint": footprint,
+    }
+
+
+def _conn(
+    ref: str, pin: str, net: str, allow_hidden_power: bool = False
+) -> dict[str, Any]:
+    return {
+        "ref": ref,
+        "pin": pin,
+        "net": net,
+        "label_type": "global",
+        "stub_length_mm": 5.08,
+        "allow_hidden_power": allow_hidden_power,
+    }

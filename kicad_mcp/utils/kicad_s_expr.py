@@ -321,6 +321,19 @@ class KiCadSchematic:
 
         return {"segments": wires, "points": points, "net_label": label}
 
+    def add_no_connect(self, x: float, y: float) -> dict[str, Any]:
+        """Add a no-connect marker at an electrical pin position."""
+        marker_uuid = str(uuid.uuid4())
+        marker = SExprList(
+            [
+                SExprAtom("no_connect"),
+                SExprList([SExprAtom("at"), SExprAtom(_format_number(x)), SExprAtom(_format_number(y))]),
+                SExprList([SExprAtom("uuid"), SExprAtom(marker_uuid)]),
+            ]
+        )
+        self.root.items.append(marker)
+        return {"uuid": marker_uuid, "position": {"x": x, "y": y}}
+
     def delete_item(self, item_type: str, item_id: str) -> dict[str, Any]:
         """Delete a supported top-level schematic item."""
         if item_type == "symbol":
@@ -396,6 +409,13 @@ class KiCadSchematic:
             position = self._parse_xy(xy_expr)
             junctions.append({"position": position, "uuid": self._get_uuid(junction)})
         return junctions
+
+    def list_no_connects(self) -> list[dict[str, Any]]:
+        """Return all top-level no-connect markers."""
+        markers: list[dict[str, Any]] = []
+        for marker in self._top_level("no_connect"):
+            markers.append({"position": self._parse_at(marker), "uuid": self._get_uuid(marker)})
+        return markers
 
     def get_symbol_connection_points(self, reference: str) -> list[dict[str, Any]]:
         """Return wire endpoints that appear attached to a symbol."""

@@ -28,6 +28,16 @@ from kicad_mcp.utils.library_resolver import (
     resolve_symbol as resolve_symbol_node,
 )
 from kicad_mcp.utils.native_netlist import export_native_netlist
+from kicad_mcp.utils.schematic_builder import (
+    add_no_connect_marker,
+    apply_connection_plan,
+    build_schematic_from_spec,
+    card_reader_v1_spec,
+    preview_build_from_spec,
+)
+from kicad_mcp.utils.schematic_builder import (
+    schematic_quality_report as build_quality_report,
+)
 from kicad_mcp.utils.schematic_pins import (
     attach_net_to_pin,
     get_symbol_pin_map,
@@ -55,51 +65,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         paper: str = "A4",
     ) -> dict[str, Any]:
         """Create a new KiCad project and optional schematic/PCB files."""
-        try:
-            safe_name = _safe_project_name(project_name)
-            base_dir = Path(validate_local_directory(project_dir, must_exist=False))
-            target_dir = base_dir / safe_name
-            target_dir.mkdir(parents=True, exist_ok=True)
-            project_path = target_dir / f"{safe_name}.kicad_pro"
-            if project_path.exists():
-                return {
-                    "success": False,
-                    "project_path": str(project_path),
-                    "error": "Project already exists",
-                }
-            project_path.write_text(json.dumps(_default_project_json(), indent=2), encoding="utf-8")
-
-            created_files = {"project": str(project_path)}
-            schematic_result = None
-            pcb_result = None
-            if create_schematic:
-                schematic_result = _create_schematic_file(
-                    str(project_path), overwrite=False, paper=paper
-                )
-                if not schematic_result["success"]:
-                    return schematic_result
-                created_files["schematic"] = schematic_result["schematic_path"]
-            if create_pcb:
-                pcb_result = _create_pcb_file(str(project_path), overwrite=False)
-                if not pcb_result["success"]:
-                    return pcb_result
-                created_files["pcb"] = pcb_result["pcb_path"]
-
-            return {
-                "success": True,
-                "project_path": str(project_path),
-                "project_dir": str(target_dir),
-                "created_files": created_files,
-                "schematic": schematic_result,
-                "pcb": pcb_result,
-            }
-        except Exception as exc:
-            return {
-                "success": False,
-                "project_dir": project_dir,
-                "project_name": project_name,
-                "error": str(exc),
-            }
+        return _create_kicad_project(project_dir, project_name, create_schematic, create_pcb, paper)
 
     @mcp.tool()
     def create_schematic_file(
@@ -122,6 +88,58 @@ def register_creation_tools(mcp: FastMCP) -> None:
             board_width_mm=board_width_mm,
             board_height_mm=board_height_mm,
         )
+
+    @mcp.tool()
+    def create_card_reader_reference_project(
+        project_dir: str, project_name: str = "Card_Reader_clean"
+    ) -> dict[str, Any]:
+        """Create a clean card-reader reference project using the built-in v1 spec."""
+        project = _create_kicad_project(project_dir, project_name, True, False, "A3")
+        if not project.get("success"):
+            return project
+        build = build_schematic_from_spec(
+            project["project_path"],
+            card_reader_v1_spec(),
+            mode="replace",
+            run_erc=True,
+        )
+        return {
+            "success": bool(build.get("success")),
+            "project_path": project["project_path"],
+            "project_dir": project["project_dir"],
+            "created_files": project["created_files"],
+            "build": build,
+        }
+
+    @mcp.tool()
+    def schematic_preview_build_from_spec(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
+        """Preview a spec-driven schematic build without writing files."""
+        return preview_build_from_spec(project_path, spec)
+
+    @mcp.tool()
+    def schematic_build_from_spec(
+        project_path: str,
+        spec: dict[str, Any],
+        mode: str = "replace",
+        backup: bool = True,
+        run_erc: bool = True,
+    ) -> dict[str, Any]:
+        """Build a schematic from a structured specification."""
+        if not backup:
+            return {
+                "success": False,
+                "project_path": project_path,
+                "error": "backup=False is not supported; schematic builds are always backed up",
+            }
+        return build_schematic_from_spec(project_path, spec, mode=mode, run_erc=run_erc)
+
+    @mcp.tool()
+    def schematic_quality_report(project_path: str, run_erc: bool = True) -> dict[str, Any]:
+        """Summarize schematic ERC, netlist, footprint, page-bound, and grid quality."""
+        try:
+            return build_quality_report(project_path, run_erc=run_erc)
+        except Exception as exc:
+            return {"success": False, "project_path": project_path, "error": str(exc)}
 
     @mcp.tool()
     def list_symbol_libraries(query: str | None = None) -> dict[str, Any]:
@@ -282,6 +300,31 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 path, reference, pin, net_name
             ),
         )
+
+    @mcp.tool()
+    async def schematic_apply_connection_plan(
+        schematic_path: str,
+        connections: list[dict[str, Any]],
+        run_native_netlist: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Apply multiple pin-net attachments and verify them as one transaction."""
+        if ctx:
+            await ctx.info(f"Applying {len(connections)} schematic connections")
+        return apply_connection_plan(schematic_path, connections, run_native_netlist)
+
+    @mcp.tool()
+    async def schematic_add_no_connect(
+        schematic_path: str,
+        reference: str,
+        pin: str,
+        allow_hidden_power: bool = False,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Add a no-connect marker at an actual symbol pin coordinate."""
+        if ctx:
+            await ctx.info(f"Adding no-connect marker to {reference}.{pin}")
+        return add_no_connect_marker(schematic_path, reference, pin, allow_hidden_power)
 
     @mcp.tool()
     async def schematic_delete_item(
@@ -591,6 +634,58 @@ def _create_schematic_file(
         }
     except Exception as exc:
         return {"success": False, "project_path": project_path, "error": str(exc)}
+
+
+def _create_kicad_project(
+    project_dir: str,
+    project_name: str,
+    create_schematic: bool = True,
+    create_pcb: bool = True,
+    paper: str = "A4",
+) -> dict[str, Any]:
+    try:
+        safe_name = _safe_project_name(project_name)
+        base_dir = Path(validate_local_directory(project_dir, must_exist=False))
+        target_dir = base_dir / safe_name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        project_path = target_dir / f"{safe_name}.kicad_pro"
+        if project_path.exists():
+            return {
+                "success": False,
+                "project_path": str(project_path),
+                "error": "Project already exists",
+            }
+        project_path.write_text(json.dumps(_default_project_json(), indent=2), encoding="utf-8")
+
+        created_files = {"project": str(project_path)}
+        schematic_result = None
+        pcb_result = None
+        if create_schematic:
+            schematic_result = _create_schematic_file(str(project_path), overwrite=False, paper=paper)
+            if not schematic_result["success"]:
+                return schematic_result
+            created_files["schematic"] = schematic_result["schematic_path"]
+        if create_pcb:
+            pcb_result = _create_pcb_file(str(project_path), overwrite=False)
+            if not pcb_result["success"]:
+                return pcb_result
+            created_files["pcb"] = pcb_result["pcb_path"]
+
+        return {
+            "success": True,
+            "project_path": str(project_path),
+            "project_dir": str(target_dir),
+            "created_files": created_files,
+            "schematic": schematic_result,
+            "pcb": pcb_result,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "project_dir": project_dir,
+            "project_name": project_name,
+            "error": str(exc),
+        }
 
 
 def _pcb_sync_from_schematic(

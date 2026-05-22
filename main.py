@@ -9,7 +9,8 @@ import os
 
 # Must import config BEFORE env potentially overrides it via os.environ
 from kicad_mcp import config
-from kicad_mcp.server import get_transport_config, main as server_main
+from kicad_mcp.server import get_transport_config
+from kicad_mcp.server import main as server_main
 from kicad_mcp.utils.env import load_dotenv
 
 # --- Setup Logging ---
