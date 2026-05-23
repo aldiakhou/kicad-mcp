@@ -56,6 +56,36 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_SSE_PATH = "/sse"
 DEFAULT_HTTP_PATH = "/mcp"
+SUPPORTED_TOOL_PROFILES = {"agent", "default", "advanced", "debug"}
+ADVANCED_TOOL_PROFILES = {"advanced", "debug"}
+DEFAULT_TOOL_PROFILE = "agent"
+AGENT_PROFILE_TOOLS = {
+    "project_design_state",
+    "create_kicad_project",
+    "discover_projects",
+    "get_project_structure",
+    "schematic_preview_build_from_spec_v2",
+    "schematic_build_from_spec_v2",
+    "schematic_apply_connection_plan",
+    "schematic_connect_pin_to_net",
+    "schematic_connect_pins",
+    "schematic_connect_pin_to_power",
+    "schematic_connect_pin_to_ground",
+    "schematic_add_no_connect",
+    "schematic_quality_report",
+    "schematic_explain_erc",
+    "schematic_plan_erc_fixes",
+    "schematic_apply_safe_erc_fixes",
+    "run_erc_check",
+    "resolve_symbol",
+    "resolve_footprint",
+    "pcb_sync_place_and_report",
+    "pcb_get_ratsnest",
+    "pcb_quality_report",
+    "pcb_route_between_pads",
+    "pcb_route_ratsnest_connection",
+    "run_drc_check",
+}
 
 
 def add_cleanup_handler(handler: Callable) -> None:
@@ -177,6 +207,7 @@ def create_server() -> FastMCP:
     register_pattern_tools(mcp)
     register_schematic_edit_tools(mcp)
     register_creation_tools(mcp)
+    _apply_tool_profile(mcp, get_tool_profile())
 
     # Register prompts
     logging.info("Registering prompts...")
@@ -255,6 +286,37 @@ def _coerce_port(value: str | None) -> int:
     if not 1 <= port <= 65535:
         raise ValueError(f"KICAD_MCP_PORT must be between 1 and 65535, got: {port}")
     return port
+
+
+def get_tool_profile() -> str:
+    """Return the configured MCP tool exposure profile."""
+    profile = os.getenv("KICAD_MCP_TOOL_PROFILE", DEFAULT_TOOL_PROFILE).strip().lower()
+    if profile not in SUPPORTED_TOOL_PROFILES:
+        raise ValueError(
+            "Unsupported KICAD_MCP_TOOL_PROFILE "
+            f"'{profile}'. Supported values: {', '.join(sorted(SUPPORTED_TOOL_PROFILES))}"
+        )
+    return "agent" if profile == "default" else profile
+
+
+def _apply_tool_profile(mcp: FastMCP, profile: str) -> None:
+    """Hide advanced/debug tools from the default agent-facing tool surface."""
+    if profile in ADVANCED_TOOL_PROFILES:
+        logging.info("Using %s tool profile; all tools are exposed.", profile)
+        return
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tool_names = list(getattr(tool_manager, "_tools", {}).keys())
+    hidden = []
+    for tool_name in tool_names:
+        if tool_name in AGENT_PROFILE_TOOLS:
+            continue
+        mcp.remove_tool(tool_name)
+        hidden.append(tool_name)
+    logging.info(
+        "Using agent tool profile; exposed %d tools and hid %d advanced/debug tools.",
+        len(AGENT_PROFILE_TOOLS),
+        len(hidden),
+    )
 
 
 def get_transport_config() -> dict[str, Any]:

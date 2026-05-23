@@ -15,7 +15,12 @@ import pytest
 
 import kicad_mcp.config as config
 import kicad_mcp.server as server_module
-from kicad_mcp.server import create_server, get_transport_config
+from kicad_mcp.server import (
+    AGENT_PROFILE_TOOLS,
+    create_server,
+    get_tool_profile,
+    get_transport_config,
+)
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.utils.kicad_api_detection import check_for_cli_api
 from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
@@ -66,23 +71,43 @@ class FakeKwargsRunnableServer:
 
 @pytest.mark.asyncio
 async def test_create_server_registers_smoke_resources_and_tools():
-    """The server should initialize and expose core tools/resources."""
+    """The default server should expose only the agent-first intent tool surface."""
     server = create_server()
 
     tools = await server.get_tools()
     resource_templates = await server.get_resource_templates()
 
-    assert "extract_schematic_netlist" in tools
-    assert "run_drc_check" in tools
-    assert "validate_schematic_syntax" in tools
-    assert "schematic_move_symbol" in tools
-    assert "export_schematic_svg" in tools
+    assert set(tools) == AGENT_PROFILE_TOOLS
+    assert "schematic_build_from_spec_v2" in tools
+    assert "schematic_connect_pin_to_net" in tools
+    assert "pcb_sync_place_and_report" in tools
+    assert "pcb_route_between_pads" in tools
+    assert "schematic_add_wire" not in tools
+    assert "schematic_get_pin_map" not in tools
+    assert "schematic_build_from_spec" not in tools
+    assert "pcb_add_track" not in tools
     assert "kicad://netlist/{schematic_path}" in resource_templates
     assert "kicad://drc/{project_path}" in resource_templates
     assert server_module._server_instance is server
 
     server_module.shutdown_server()
     assert server_module._server_instance is None
+
+
+@pytest.mark.asyncio
+async def test_create_server_advanced_profile_exposes_debug_tools(monkeypatch):
+    """Advanced/debug profile keeps raw geometry and diagnostic tools available."""
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
+    server = create_server()
+    tools = await server.get_tools()
+
+    assert get_tool_profile() == "advanced"
+    assert "schematic_add_wire" in tools
+    assert "schematic_get_pin_map" in tools
+    assert "schematic_build_from_spec" in tools
+    assert "list_symbol_libraries" in tools
+
+    server_module.shutdown_server()
 
 
 def test_main_entrypoint_calls_blocking_server_main(monkeypatch):
@@ -219,8 +244,9 @@ def test_extract_netlist_ignores_embedded_library_symbols(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_extract_schematic_netlist_reports_missing_file_via_async_ctx():
+async def test_extract_schematic_netlist_reports_missing_file_via_async_ctx(monkeypatch):
     """Async tool paths should await ctx.info instead of leaking un-awaited coroutines."""
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
     server = create_server()
     tools = await server.get_tools()
     fake_ctx = FakeContext()
@@ -391,6 +417,7 @@ def test_get_kicad_cli_path_can_return_none_when_not_required(monkeypatch):
 @pytest.mark.asyncio
 async def test_find_component_connections_marks_results_as_inferred(monkeypatch):
     """Connection lookup should expose incomplete connectivity explicitly."""
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
     server = create_server()
     tools = await server.get_tools()
     fake_ctx = FakeContext()

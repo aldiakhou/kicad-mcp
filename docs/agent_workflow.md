@@ -52,3 +52,15 @@ Use this v2 build shape for complete circuits:
 ```
 
 The MCP layer resolves symbols, resolves pins, snaps generated geometry to the schematic grid, writes KiCad S-expressions, exports the native netlist, runs ERC when requested, and rolls back failed connection transactions.
+
+## Tool Profiles
+
+By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only the intent-first tools needed for normal design work. Low-level coordinate and raw KiCad geometry tools are hidden from the normal LLM tool list. The default profile still includes the high-level PCB workflow tools for sync/place/report and pad-based routing.
+
+Use this only for manual recovery, debugging, or library exploration:
+
+```text
+KICAD_MCP_TOOL_PROFILE=advanced
+```
+
+`debug` is also accepted and exposes the same full tool surface. In advanced/debug mode, legacy builders, raw schematic geometry tools, pin-map diagnostics, full library listing, explicit PCB primitives, export helpers, and netlist-analysis tools are registered again.
