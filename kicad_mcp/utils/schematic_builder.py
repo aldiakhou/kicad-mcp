@@ -317,14 +317,22 @@ def normalize_build_spec_v2(spec: dict[str, Any]) -> dict[str, Any]:
     connections = []
     for net_name, pins in spec.get("nets", {}).items():
         for item in pins:
+            allow_hidden = False
             if isinstance(item, dict):
                 ref = item.get("ref")
                 pin = item.get("pin")
+                allow_hidden = item.get("allow_hidden_power", False)
             else:
                 ref = item[0] if len(item) > 0 else None
                 pin = item[1] if len(item) > 1 else None
             if ref and pin:
-                connections.append({"type": "pin_to_net", "ref": str(ref), "pin": str(pin), "net": str(net_name)})
+                connections.append({
+                    "type": "pin_to_net",
+                    "ref": str(ref),
+                    "pin": str(pin),
+                    "net": str(net_name),
+                    "allow_hidden_power": allow_hidden
+                })
     no_connects = []
     for item in spec.get("no_connects", []):
         if isinstance(item, dict):
