@@ -11,6 +11,7 @@ from kicad_mcp.utils.schematic_builder import (
     _build_in_memory_schematic,
     _resolve_symbol_embed_chain,
     card_reader_v1_spec,
+    normalize_build_spec_v2,
     validate_connection_plan_membership,
 )
 from kicad_mcp.utils.schematic_pins import (
@@ -71,6 +72,64 @@ def test_validate_connection_plan_ignores_power_flag_symbols(monkeypatch):
 
     assert result["success"] is True
     assert result["checked_count"] == 1
+
+
+def test_v2_normalizer_accepts_lib_id_alias_and_rsplit_string_endpoint():
+    normalized = normalize_build_spec_v2(
+        {
+            "parts": [
+                {
+                    "ref": "R10",
+                    "lib_id": "Device:R",
+                    "symbol": "R_1_1",
+                    "value": "10k",
+                }
+            ],
+            "nets": {"GND": ["R10_1"]},
+        }
+    )
+
+    assert normalized["normalization_errors"] == []
+    assert normalized["symbols"][0]["lib_id"] == "Device:R"
+    assert normalized["connections"][0]["ref"] == "R10"
+    assert normalized["connections"][0]["pin"] == "1"
+    assert normalized["normalization_warnings"]
+
+
+def test_v2_normalizer_rejects_unit_name_without_lib_id():
+    normalized = normalize_build_spec_v2(
+        {"parts": [{"ref": "R1", "symbol": "R_1_1"}], "nets": {}}
+    )
+
+    assert normalized["normalization_errors"]
+    assert "full KiCad library ID" in normalized["normalization_errors"][0]["error"]
+
+
+def test_custom_part_pins_are_available_from_embedded_symbol(tmp_path: Path):
+    schematic_path = tmp_path / "custom.kicad_sch"
+    spec = normalize_build_spec_v2(
+        {
+            "custom_parts": [
+                {
+                    "ref": "U6",
+                    "value": "DPS310",
+                    "footprint": "Package_LGA:LGA-8_2.0x2.5mm_P0.65mm",
+                    "pins": [
+                        {"number": "1", "name": "SCL", "type": "bidirectional"},
+                        {"number": "2", "name": "SDA", "type": "bidirectional"},
+                        {"number": "3", "name": "GND", "type": "power_in"},
+                    ],
+                }
+            ],
+            "nets": {},
+        }
+    )
+    schematic = _build_in_memory_schematic(str(schematic_path), spec)
+
+    pin_map = get_symbol_pin_map_from_schematic(schematic, str(schematic_path), "U6")
+
+    assert pin_map["success"] is True
+    assert {pin["name"] for pin in pin_map["pins"]} == {"SCL", "SDA", "GND"}
 
 
 def test_card_reader_spec_native_netlist_has_required_members(tmp_path: Path):

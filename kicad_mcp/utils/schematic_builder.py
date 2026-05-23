@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
+from pathlib import Path
 from typing import Any, cast
 
 from kicad_mcp.utils.file_utils import get_project_files
-from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExprAtom
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExprAtom, SExprList
 from kicad_mcp.utils.library_resolver import resolve_footprint, resolve_symbol
 from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
 from kicad_mcp.utils.preview_metadata import svg_preview_metadata
@@ -164,18 +165,20 @@ def preview_build_from_spec(project_path: str, spec: dict[str, Any]) -> dict[str
     page_width, page_height = KiCadSchematic.PAPER_SIZES_MM.get(paper, KiCadSchematic.PAPER_SIZES_MM["A4"])
     symbol_errors = []
     footprint_errors = []
+    normalization_errors = spec.get("normalization_errors", [])
     for symbol in spec.get("symbols", []):
-        try:
-            resolve_symbol(symbol["lib_id"])
-        except Exception as exc:
-            symbol_errors.append({"reference": symbol.get("reference"), "lib_id": symbol.get("lib_id"), "error": str(exc)})
+        if not symbol.get("custom_symbol_node"):
+            try:
+                resolve_symbol(symbol["lib_id"])
+            except Exception as exc:
+                symbol_errors.append({"reference": symbol.get("reference"), "lib_id": symbol.get("lib_id"), "error": str(exc)})
         if symbol.get("footprint"):
             try:
                 resolve_footprint(symbol["footprint"])
             except Exception as exc:
                 footprint_errors.append({"reference": symbol.get("reference"), "footprint": symbol.get("footprint"), "error": str(exc)})
     return {
-        "success": not symbol_errors and not footprint_errors,
+        "success": not normalization_errors and not symbol_errors and not footprint_errors,
         "project_path": project_path,
         "spec_name": spec.get("name"),
         "page": {"paper": paper, "width_mm": page_width, "height_mm": page_height},
@@ -184,6 +187,8 @@ def preview_build_from_spec(project_path: str, spec: dict[str, Any]) -> dict[str
         "planned_no_connect_count": len(spec.get("no_connects", [])),
         "planned_nets": sorted({connection["net"] for connection in spec.get("connections", [])}),
         "erc_sensitive_pins": _erc_sensitive_pins(spec),
+        "normalization_errors": normalization_errors,
+        "normalization_warnings": spec.get("normalization_warnings", []),
         "symbol_errors": symbol_errors,
         "footprint_errors": footprint_errors,
     }
@@ -194,22 +199,59 @@ def build_schematic_from_spec(
     spec: dict[str, Any],
     mode: str = "replace",
     run_erc: bool = True,
+    *,
+    allow_destructive_replace: bool = True,
+    detail: str = "full",
+    include_diff: bool = True,
+    include_preview: bool = True,
+    include_full_native_netlist: bool = True,
+    run_quality_report: bool = True,
 ) -> dict[str, Any]:
     """Build a schematic from a structured spec."""
     spec = normalize_build_spec_v2(spec) if _is_v2_spec(spec) else spec
-    if mode != "replace":
-        return {"success": False, "project_path": project_path, "error": "Only mode='replace' is supported"}
+    if mode not in {"append", "update", "replace"}:
+        return {
+            "success": False,
+            "project_path": project_path,
+            "error": "mode must be one of: append, update, replace",
+        }
+    if spec.get("normalization_errors"):
+        return {
+            "success": False,
+            "project_path": project_path,
+            "error": "Spec contains schema errors",
+            "normalization_errors": spec["normalization_errors"],
+            "normalization_warnings": spec.get("normalization_warnings", []),
+        }
     files = get_project_files(project_path)
     if "schematic" not in files:
         return {"success": False, "project_path": project_path, "error": "Schematic file not found"}
+    schematic_path = files["schematic"]
+    if (
+        mode == "replace"
+        and not allow_destructive_replace
+        and _schematic_has_user_content(schematic_path)
+    ):
+        return {
+            "success": False,
+            "project_path": project_path,
+            "schematic_path": schematic_path,
+            "error": "mode='replace' would overwrite a non-empty schematic; pass allow_destructive_replace=True or use mode='update'",
+            "recoverable": True,
+            "recommended_next_tool": "schematic_build_from_spec_v2",
+            "recommended_next_arguments": {"project_path": project_path, "mode": "update"},
+        }
     preview = preview_build_from_spec(project_path, spec)
     if not preview["success"]:
         return {**preview, "success": False, "error": "Spec contains unresolved symbols or footprints"}
-    schematic_path = files["schematic"]
     built_summary: dict[str, Any] = {}
 
     def mutate(schematic: KiCadSchematic) -> dict[str, Any]:
-        built = _build_in_memory_schematic(schematic_path, spec)
+        built = (
+            _build_in_memory_schematic(schematic_path, spec)
+            if mode == "replace"
+            else _apply_spec_to_existing_schematic(schematic, schematic_path, spec, mode)
+        )
         schematic.root = built.root
         built_summary.update(
             {
@@ -236,14 +278,35 @@ def build_schematic_from_spec(
     )
     if not result.get("success"):
         return result
-    result["preview"] = preview
-    result["native_netlist"] = export_native_netlist(schematic_path)
-    result["quality_report"] = schematic_quality_report(schematic_path, run_erc=run_erc)
-    svg_result = export_schematic_svg_file(schematic_path, None)
-    if svg_result.get("success"):
-        result["schematic_preview"] = svg_preview_metadata(svg_result["svg_path"])
-    else:
-        result["schematic_preview_error"] = svg_result.get("error")
+    native = export_native_netlist(schematic_path)
+    result["tool"] = (
+        "schematic_build_from_spec_v2"
+        if spec.get("source_format") == "v2"
+        else "schematic_build_from_spec"
+    )
+    result["stage"] = "schematic_built"
+    result["mode"] = mode
+    result["changed"] = True
+    result["warnings"] = spec.get("normalization_warnings", [])
+    result["symbol_count"] = len(built_summary["symbols"])
+    result["connection_count"] = len(spec.get("connections", []))
+    result["no_connect_count"] = len(built_summary["no_connects"])
+    result["native_netlist"] = native if include_full_native_netlist else _compact_native_netlist(native)
+    if run_quality_report:
+        quality = schematic_quality_report(schematic_path, run_erc=run_erc)
+        result["quality_report"] = quality if detail == "full" else _compact_quality_report(quality)
+    if include_preview:
+        svg_result = export_schematic_svg_file(schematic_path, None)
+        if svg_result.get("success"):
+            result["schematic_preview"] = svg_preview_metadata(svg_result["svg_path"])
+        else:
+            result["schematic_preview_error"] = svg_result.get("error")
+    if detail == "full":
+        result["preview"] = preview
+    if not include_diff:
+        result.pop("diff", None)
+    if detail == "compact":
+        result.pop("validation", None)
     return result
 
 
@@ -281,8 +344,15 @@ def preview_build_from_spec_v2(project_path: str, spec: dict[str, Any]) -> dict[
 def build_schematic_from_spec_v2(
     project_path: str,
     spec: dict[str, Any],
-    mode: str = "replace",
+    mode: str = "update",
     run_erc: bool = True,
+    *,
+    allow_destructive_replace: bool = False,
+    detail: str = "compact",
+    include_diff: bool = False,
+    include_preview: bool = False,
+    include_full_native_netlist: bool = False,
+    run_quality_report: bool = False,
 ) -> dict[str, Any]:
     """Build a schematic from the v2 parts/nets/no_connects spec format."""
     return build_schematic_from_spec(
@@ -290,6 +360,12 @@ def build_schematic_from_spec_v2(
         normalize_build_spec_v2(spec),
         mode=mode,
         run_erc=run_erc,
+        allow_destructive_replace=allow_destructive_replace,
+        detail=detail,
+        include_diff=include_diff,
+        include_preview=include_preview,
+        include_full_native_netlist=include_full_native_netlist,
+        run_quality_report=run_quality_report,
     )
 
 
@@ -297,60 +373,279 @@ def normalize_build_spec_v2(spec: dict[str, Any]) -> dict[str, Any]:
     """Translate the agent-friendly v2 spec format into the internal builder spec."""
     if not _is_v2_spec(spec):
         return spec
-    parts = spec.get("parts", [])
+    parts = [*spec.get("parts", []), *spec.get("custom_parts", [])]
     layout_positions = _v2_layout_positions(spec)
     symbols = []
+    errors = []
+    warnings = []
     for index, part in enumerate(parts):
-        x, y = layout_positions.get(str(part["ref"]), _default_v2_symbol_position(index))
-        symbols.append(
-            {
-                "reference": str(part["ref"]),
-                "lib_id": str(part["symbol"]),
-                "value": str(part.get("value", part["ref"])),
-                "x": _snap(x),
-                "y": _snap(y),
-                "angle": float(part.get("angle", 0.0)),
-                "footprint": part.get("footprint"),
-                "properties": part.get("properties"),
-            }
-        )
+        if not isinstance(part, dict):
+            errors.append({"path": f"parts[{index}]", "error": "part must be an object"})
+            continue
+        ref = part.get("ref") or part.get("reference")
+        if not ref:
+            errors.append({"path": f"parts[{index}]", "error": "part requires ref"})
+            continue
+        custom_pins = part.get("pins")
+        lib_id = _normalize_v2_part_lib_id(part, f"parts[{index}]", errors, warnings)
+        if not lib_id:
+            continue
+        x, y = layout_positions.get(str(ref), _default_v2_symbol_position(index))
+        symbol: dict[str, Any] = {
+            "reference": str(ref),
+            "lib_id": lib_id,
+            "value": str(part.get("value", ref)),
+            "x": _snap(x),
+            "y": _snap(y),
+            "angle": float(part.get("angle", 0.0)),
+            "footprint": part.get("footprint"),
+            "properties": part.get("properties"),
+        }
+        if custom_pins is not None:
+            symbol["custom_symbol_node"] = _custom_symbol_node(
+                lib_id,
+                str(part.get("value", ref)),
+                part.get("footprint"),
+                custom_pins,
+                f"parts[{index}]",
+                errors,
+            )
+        if symbol.get("custom_symbol_node") is None and custom_pins is not None:
+            continue
+        symbols.append(symbol)
     connections = []
-    for net_name, pins in spec.get("nets", {}).items():
-        for item in pins:
-            allow_hidden = False
-            if isinstance(item, dict):
-                ref = item.get("ref")
-                pin = item.get("pin")
-                allow_hidden = item.get("allow_hidden_power", False)
-            else:
-                ref = item[0] if len(item) > 0 else None
-                pin = item[1] if len(item) > 1 else None
-            if ref and pin:
-                connections.append({
-                    "type": "pin_to_net",
-                    "ref": str(ref),
-                    "pin": str(pin),
-                    "net": str(net_name),
-                    "allow_hidden_power": allow_hidden
-                })
+    nets = spec.get("nets", {})
+    if not isinstance(nets, dict):
+        errors.append({"path": "nets", "error": "nets must be an object keyed by net name"})
+        nets = {}
+    for net_name, pins in nets.items():
+        if not isinstance(pins, list):
+            errors.append({"path": f"nets.{net_name}", "error": "net entries must be a list"})
+            continue
+        for item_index, item in enumerate(pins):
+            endpoint = _normalize_v2_endpoint(
+                item,
+                f"nets.{net_name}[{item_index}]",
+                errors,
+                warnings,
+            )
+            if endpoint:
+                connections.append(
+                    {
+                        "type": "pin_to_net",
+                        "ref": endpoint["ref"],
+                        "pin": endpoint["pin"],
+                        "net": str(net_name),
+                        "allow_hidden_power": endpoint.get("allow_hidden_power", False),
+                    }
+                )
     no_connects = []
-    for item in spec.get("no_connects", []):
-        if isinstance(item, dict):
-            no_connects.append(item)
-        elif len(item) >= 2:
-            no_connects.append({"ref": str(item[0]), "pin": str(item[1])})
+    for index, item in enumerate(spec.get("no_connects", [])):
+        endpoint = _normalize_v2_endpoint(
+            item,
+            f"no_connects[{index}]",
+            errors,
+            warnings,
+        )
+        if endpoint:
+            no_connects.append(endpoint)
     normalized_connections = normalize_connections(connections)
+    errors.extend(normalized_connections["failed_connections"])
     return {
         "name": spec.get("name"),
         "paper": spec.get("paper", "A4"),
         "symbols": symbols,
         "connections": normalized_connections["connections"],
         "no_connects": no_connects,
-        "expected_nets": sorted(spec.get("nets", {}).keys()),
+        "expected_nets": sorted(nets.keys()),
         "accepted_erc_types": spec.get("accepted_erc_types", []),
         "layout_hints": spec.get("layout_hints", {}),
         "source_format": "v2",
+        "normalization_errors": errors,
+        "normalization_warnings": warnings,
     }
+
+
+def _normalize_v2_part_lib_id(
+    part: dict[str, Any],
+    path: str,
+    errors: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+) -> str | None:
+    lib_id = part.get("lib_id") or part.get("kicad_symbol") or part.get("kicad_symbol_id")
+    symbol = part.get("symbol")
+    if lib_id:
+        if symbol and ":" not in str(symbol):
+            warnings.append(
+                {
+                    "path": f"{path}.symbol",
+                    "warning": "ignored symbol-unit-looking value because lib_id was provided",
+                    "value": str(symbol),
+                }
+            )
+        return str(lib_id)
+    if symbol and ":" in str(symbol):
+        return str(symbol)
+    if part.get("pins") is not None:
+        custom_name = str(part.get("value") or part.get("ref") or "CustomPart")
+        return str(part.get("custom_lib_id") or f"Custom:{custom_name}")
+    errors.append(
+        {
+            "path": path,
+            "error": "part requires lib_id or symbol as a full KiCad library ID like 'Device:R'; unit names like 'R_1_1' are not valid",
+            "symbol": symbol,
+        }
+    )
+    return None
+
+
+def _normalize_v2_endpoint(
+    item: Any,
+    path: str,
+    errors: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    allow_hidden = False
+    if isinstance(item, dict):
+        ref = item.get("ref") or item.get("reference")
+        pin = item.get("pin") or item.get("pin_number") or item.get("pin_name")
+        allow_hidden = bool(item.get("allow_hidden_power", False))
+    elif isinstance(item, str):
+        if "_" not in item:
+            errors.append(
+                {
+                    "path": path,
+                    "error": "string pin shorthand must be 'REF_PIN'; prefer ['REF', 'PIN'] or {'ref':'REF','pin':'PIN'}",
+                    "value": item,
+                }
+            )
+            return None
+        ref, pin = item.rsplit("_", 1)
+        warnings.append(
+            {
+                "path": path,
+                "warning": "string pin shorthand is accepted but list/object endpoint format is preferred",
+                "value": item,
+            }
+        )
+    elif isinstance(item, list | tuple):
+        ref = item[0] if len(item) > 0 else None
+        pin = item[1] if len(item) > 1 else None
+    else:
+        errors.append({"path": path, "error": "endpoint must be object, [ref, pin], or 'REF_PIN'"})
+        return None
+    if not ref or not pin:
+        errors.append({"path": path, "error": "endpoint requires ref and pin", "value": item})
+        return None
+    return {"ref": str(ref), "pin": str(pin), "allow_hidden_power": allow_hidden}
+
+
+def _custom_symbol_node(
+    lib_id: str,
+    value: str,
+    footprint: str | None,
+    pins: Any,
+    path: str,
+    errors: list[dict[str, Any]],
+) -> SExprList | None:
+    if not isinstance(pins, list) or not pins:
+        errors.append({"path": f"{path}.pins", "error": "custom part pins must be a non-empty list"})
+        return None
+    symbol_name = lib_id.split(":", 1)[-1]
+    node = SExprList(
+        [
+            SExprAtom("symbol"),
+            SExprAtom(lib_id, quoted=True),
+            SExprList([SExprAtom("in_bom"), SExprAtom("yes")]),
+            SExprList([SExprAtom("on_board"), SExprAtom("yes")]),
+            _library_property("Reference", "U", 0.0, -5.08),
+            _library_property("Value", value, 0.0, 5.08),
+            _library_property("Footprint", footprint or "", 0.0, 7.62),
+            SExprList([SExprAtom("symbol"), SExprAtom(f"{symbol_name}_0_1", quoted=True)]),
+        ]
+    )
+    body = node.child_lists("symbol")[-1]
+    for index, pin in enumerate(pins):
+        if not isinstance(pin, dict):
+            errors.append({"path": f"{path}.pins[{index}]", "error": "pin must be an object"})
+            continue
+        number = str(pin.get("number") or pin.get("pin") or "")
+        name = str(pin.get("name") or number)
+        if not number:
+            errors.append({"path": f"{path}.pins[{index}]", "error": "pin requires number"})
+            continue
+        body.items.append(
+            _library_pin(
+                number,
+                name,
+                str(pin.get("type") or pin.get("pintype") or "passive"),
+                index,
+                len(pins),
+                bool(pin.get("hidden", False)),
+            )
+        )
+    if errors and any(str(error.get("path", "")).startswith(f"{path}.pins") for error in errors):
+        return None
+    return node
+
+
+def _library_property(name: str, value: str, x: float, y: float) -> SExprList:
+    return SExprList(
+        [
+            SExprAtom("property"),
+            SExprAtom(name, quoted=True),
+            SExprAtom(value, quoted=True),
+            SExprList([SExprAtom("at"), SExprAtom(str(x)), SExprAtom(str(y)), SExprAtom("0")]),
+        ]
+    )
+
+
+def _library_pin(
+    number: str,
+    name: str,
+    pin_type: str,
+    index: int,
+    total: int,
+    hidden: bool,
+) -> SExprList:
+    left_side = index < math.ceil(total / 2)
+    local_index = index if left_side else index - math.ceil(total / 2)
+    x = -7.62 if left_side else 7.62
+    y = _snap((local_index - max(total / 4, 1)) * -2.54)
+    angle = 180 if left_side else 0
+    items: list[Any] = [
+        SExprAtom("pin"),
+        SExprAtom(_normalize_pin_type(pin_type)),
+        SExprAtom("line"),
+        SExprList([SExprAtom("at"), SExprAtom(str(x)), SExprAtom(str(y)), SExprAtom(str(angle))]),
+        SExprList([SExprAtom("length"), SExprAtom("2.54")]),
+        SExprList([SExprAtom("name"), SExprAtom(name, quoted=True)]),
+        SExprList([SExprAtom("number"), SExprAtom(number, quoted=True)]),
+    ]
+    if hidden:
+        items.append(SExprAtom("hide"))
+    return SExprList(items)
+
+
+def _normalize_pin_type(pin_type: str) -> str:
+    normalized = str(pin_type).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "bidirectional": "bidirectional",
+        "bi_directional": "bidirectional",
+        "input": "input",
+        "output": "output",
+        "passive": "passive",
+        "power_in": "power_in",
+        "power_input": "power_in",
+        "power_out": "power_out",
+        "power_output": "power_out",
+        "open_collector": "open_collector",
+        "open_emitter": "open_emitter",
+        "no_connect": "no_connect",
+        "tri_state": "tri_state",
+        "unspecified": "unspecified",
+    }
+    return aliases.get(normalized, "passive")
 
 
 def add_no_connect_marker(
@@ -605,21 +900,7 @@ def _visual_quality(
 def _build_in_memory_schematic(schematic_path: str, spec: dict[str, Any]) -> KiCadSchematic:
     schematic = KiCadSchematic.empty(paper=spec.get("paper", "A4"))
     for symbol in spec.get("symbols", []):
-        resolved_chain = _resolve_symbol_embed_chain(symbol["lib_id"])
-        for parent_lib_id, parent_node in resolved_chain[:-1]:
-            schematic.embed_lib_symbol(parent_lib_id, cast(Any, parent_node))
-        lib_id, symbol_node = resolved_chain[-1]
-        schematic.add_symbol(
-            lib_id,
-            symbol["reference"],
-            symbol.get("value", symbol["reference"]),
-            symbol["x"],
-            symbol["y"],
-            symbol.get("angle", 0.0),
-            symbol.get("footprint"),
-            symbol.get("properties"),
-            cast(Any, symbol_node),
-        )
+        _add_spec_symbol(schematic, symbol)
     for connection in spec.get("connections", []):
         attach_net_to_pin(
             schematic,
@@ -642,13 +923,136 @@ def _build_in_memory_schematic(schematic_path: str, spec: dict[str, Any]) -> KiC
     return schematic
 
 
+def _apply_spec_to_existing_schematic(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    spec: dict[str, Any],
+    mode: str,
+) -> KiCadSchematic:
+    existing_refs = {symbol["reference"] for symbol in schematic.list_symbols()}
+    for symbol in spec.get("symbols", []):
+        reference = symbol["reference"]
+        if reference in existing_refs:
+            if mode == "append":
+                raise ValueError(f"Symbol reference already exists: {reference}")
+            continue
+        _add_spec_symbol(schematic, symbol)
+        existing_refs.add(reference)
+    for connection in spec.get("connections", []):
+        if _pin_has_label(
+            schematic,
+            schematic_path,
+            connection["ref"],
+            connection["pin"],
+            connection["net"],
+        ):
+            continue
+        attach_net_to_pin(
+            schematic,
+            schematic_path,
+            connection["ref"],
+            connection["pin"],
+            connection["net"],
+            connection.get("label_type", "global"),
+            connection.get("stub_length_mm", 5.08),
+            connection.get("allow_hidden_power", False),
+        )
+    for marker in spec.get("no_connects", []):
+        if _pin_has_no_connect(schematic, schematic_path, marker["ref"], marker["pin"]):
+            continue
+        add_no_connect_to_pin(
+            schematic,
+            schematic_path,
+            marker["ref"],
+            marker["pin"],
+            marker.get("allow_hidden_power", False),
+        )
+    return schematic
+
+
+def _add_spec_symbol(schematic: KiCadSchematic, symbol: dict[str, Any]) -> None:
+    if symbol.get("custom_symbol_node") is not None:
+        lib_id = symbol["lib_id"]
+        symbol_node = symbol["custom_symbol_node"]
+    else:
+        resolved_chain = _resolve_symbol_embed_chain(symbol["lib_id"])
+        for parent_lib_id, parent_node in resolved_chain[:-1]:
+            schematic.embed_lib_symbol(parent_lib_id, cast(Any, parent_node))
+        lib_id, symbol_node = resolved_chain[-1]
+    schematic.add_symbol(
+        lib_id,
+        symbol["reference"],
+        symbol.get("value", symbol["reference"]),
+        symbol["x"],
+        symbol["y"],
+        symbol.get("angle", 0.0),
+        symbol.get("footprint"),
+        symbol.get("properties"),
+        cast(Any, symbol_node),
+    )
+
+
+def _pin_has_label(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    reference: str,
+    pin: str,
+    net_name: str,
+) -> bool:
+    point = _pin_connection_point(schematic, schematic_path, reference, pin)
+    if point is None:
+        return False
+    return any(
+        label.get("text") == net_name
+        and label.get("position", {}).get("x") == point["x"]
+        and label.get("position", {}).get("y") == point["y"]
+        for label in schematic.list_labels()
+    )
+
+
+def _pin_has_no_connect(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    reference: str,
+    pin: str,
+) -> bool:
+    point = _pin_connection_point(schematic, schematic_path, reference, pin)
+    if point is None:
+        return False
+    return any(
+        marker.get("position", {}).get("x") == point["x"]
+        and marker.get("position", {}).get("y") == point["y"]
+        for marker in schematic.list_no_connects()
+    )
+
+
+def _pin_connection_point(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    reference: str,
+    pin: str,
+) -> dict[str, float] | None:
+    pin_map = get_symbol_pin_map_from_schematic(schematic, schematic_path, reference)
+    if not pin_map.get("success"):
+        return None
+    matches = [
+        item
+        for item in pin_map["pins"]
+        if item["number"] == pin or item["name"] == pin or item["pinfunction"] == pin
+    ]
+    if len(matches) != 1:
+        return None
+    return cast(dict[str, float], matches[0]["connection_point"])
+
+
 def _is_v2_spec(spec: dict[str, Any]) -> bool:
-    return "parts" in spec or "nets" in spec
+    return "parts" in spec or "custom_parts" in spec or "nets" in spec
 
 
 def _v2_layout_positions(spec: dict[str, Any]) -> dict[str, tuple[float, float]]:
     positions: dict[str, tuple[float, float]] = {}
-    part_index = {str(part.get("ref")): index for index, part in enumerate(spec.get("parts", []))}
+    parts = [*spec.get("parts", []), *spec.get("custom_parts", [])]
+    part_index = {str(part.get("ref")): index for index, part in enumerate(parts)}
     blocks = spec.get("layout_hints", {}).get("functional_blocks", [])
     if not isinstance(blocks, list) or not blocks:
         return positions
@@ -758,6 +1162,41 @@ def _erc_sensitive_pins(spec: dict[str, Any]) -> list[dict[str, str]]:
         if connection["net"] in {"+5V", "+3.3V", "GND"}:
             sensitive.append({"ref": connection["ref"], "pin": connection["pin"], "net": connection["net"]})
     return sensitive
+
+
+def _compact_native_netlist(native: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "success": native.get("success"),
+        "component_count": native.get("component_count"),
+        "net_count": native.get("net_count"),
+        "connectivity_complete": native.get("connectivity_complete"),
+        "error": native.get("error"),
+    }
+
+
+def _compact_quality_report(quality: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "success": quality.get("success"),
+        "symbol_count": quality.get("symbol_count"),
+        "label_count": quality.get("label_count"),
+        "wire_count": quality.get("wire_count"),
+        "quality_gate": quality.get("quality_gate"),
+        "erc": quality.get("erc"),
+        "native_netlist": quality.get("native_netlist"),
+    }
+
+
+def _schematic_has_user_content(schematic_path: str) -> bool:
+    path = Path(schematic_path)
+    if not path.exists():
+        return False
+    schematic = KiCadSchematic.from_file(str(path))
+    return bool(
+        schematic.list_symbols()
+        or schematic.list_labels()
+        or schematic.list_wires()
+        or schematic.list_no_connects()
+    )
 
 
 def _schematic_path(project_or_schematic_path: str) -> str:

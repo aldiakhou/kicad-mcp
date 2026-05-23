@@ -5,12 +5,19 @@ KiCad symbol and footprint library discovery.
 from __future__ import annotations
 
 from copy import deepcopy
+from difflib import SequenceMatcher
+from functools import lru_cache
 import os
 from pathlib import Path
 import platform
 from typing import Any
 
-from kicad_mcp.utils.kicad_s_expr import SExprAtom, parse_s_expression, serialize_s_expression
+from kicad_mcp.utils.kicad_s_expr import (
+    SExprAtom,
+    SExprList,
+    parse_s_expression,
+    serialize_s_expression,
+)
 
 
 class KiCadLibraryError(FileNotFoundError):
@@ -41,6 +48,94 @@ def list_footprint_libraries(query: str | None = None) -> list[dict[str, Any]]:
                 continue
             libraries.append({"name": name, "path": str(library_dir)})
     return libraries
+
+
+@lru_cache(maxsize=128)
+def find_symbols(query: str, max_results: int = 10) -> list[dict[str, Any]]:
+    """Fuzzy-search installed KiCad symbols by library, symbol name, and properties."""
+    normalized_query = _normalize_search_text(query)
+    if not normalized_query:
+        return []
+    matches: list[tuple[float, dict[str, Any]]] = []
+    for library in list_symbol_libraries():
+        library_name = library["name"]
+        library_query_match = normalized_query in _normalize_search_text(library_name)
+        try:
+            library_text = Path(library["path"]).read_text(encoding="utf-8")
+            if (
+                not library_query_match
+                and query.lower() not in library_text.lower()
+                and SequenceMatcher(
+                    None, normalized_query, _normalize_search_text(library_name)
+                ).ratio()
+                < 0.62
+            ):
+                continue
+            root = parse_s_expression(library_text)
+        except Exception:
+            continue
+        for symbol in root.child_lists("symbol"):
+            symbol_name = _atom_text(symbol.items[1] if len(symbol.items) > 1 else None) or ""
+            lib_id = f"{library_name}:{symbol_name}"
+            properties = _symbol_properties(symbol)
+            searchable = " ".join(
+                [
+                    lib_id,
+                    library_name,
+                    symbol_name,
+                    properties.get("Value", ""),
+                    properties.get("Description", ""),
+                    properties.get("Keywords", ""),
+                ]
+            )
+            score = _search_score(normalized_query, searchable, lib_id)
+            if score <= 0:
+                continue
+            matches.append(
+                (
+                    score,
+                    {
+                        "lib_id": lib_id,
+                        "library": library_name,
+                        "symbol": symbol_name,
+                        "description": properties.get("Description", ""),
+                        "keywords": properties.get("Keywords", ""),
+                        "default_footprint": properties.get("Footprint", ""),
+                    },
+                )
+            )
+    matches.sort(key=lambda item: (-item[0], item[1]["lib_id"]))
+    return [item for _, item in matches[: max(1, int(max_results))]]
+
+
+@lru_cache(maxsize=128)
+def find_footprints(query: str, max_results: int = 10) -> list[dict[str, Any]]:
+    """Fuzzy-search installed KiCad footprints by library and footprint name."""
+    normalized_query = _normalize_search_text(query)
+    if not normalized_query:
+        return []
+    matches: list[tuple[float, dict[str, Any]]] = []
+    for library in list_footprint_libraries():
+        library_name = library["name"]
+        for footprint_file in sorted(Path(library["path"]).glob("*.kicad_mod")):
+            footprint_name = footprint_file.stem
+            footprint_id = f"{library_name}:{footprint_name}"
+            score = _search_score(normalized_query, f"{footprint_id} {library_name}", footprint_id)
+            if score <= 0:
+                continue
+            matches.append(
+                (
+                    score,
+                    {
+                        "footprint_id": footprint_id,
+                        "library": library_name,
+                        "footprint": footprint_name,
+                        "path": str(footprint_file),
+                    },
+                )
+            )
+    matches.sort(key=lambda item: (-item[0], item[1]["footprint_id"]))
+    return [item for _, item in matches[: max(1, int(max_results))]]
 
 
 def resolve_symbol(lib_id: str) -> dict[str, Any]:
@@ -96,6 +191,35 @@ def _split_library_id(item_id: str) -> tuple[str, str]:
     if not library_name or not item_name:
         raise KiCadLibraryError(f"Expected KiCad library id in Library:Item form, got: {item_id}")
     return library_name, item_name
+
+
+def _symbol_properties(symbol: SExprList) -> dict[str, str]:
+    properties = {}
+    for child in symbol.child_lists("property"):
+        if len(child.items) < 3:
+            continue
+        name = _atom_text(child.items[1])
+        value = _atom_text(child.items[2])
+        if name:
+            properties[name] = value or ""
+    return properties
+
+
+def _normalize_search_text(value: str) -> str:
+    return "".join(character.lower() for character in str(value) if character.isalnum())
+
+
+def _search_score(normalized_query: str, searchable: str, identifier: str) -> float:
+    normalized_searchable = _normalize_search_text(searchable)
+    normalized_identifier = _normalize_search_text(identifier)
+    if normalized_query in normalized_identifier:
+        return 100.0 - (len(normalized_identifier) - len(normalized_query)) * 0.01
+    if normalized_query in normalized_searchable:
+        return 80.0 - (len(normalized_searchable) - len(normalized_query)) * 0.001
+    ratio = SequenceMatcher(None, normalized_query, normalized_identifier).ratio()
+    if ratio >= 0.62:
+        return ratio * 60.0
+    return 0.0
 
 
 def _find_symbol_library(library_name: str) -> Path | None:

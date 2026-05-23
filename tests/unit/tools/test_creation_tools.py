@@ -1054,3 +1054,100 @@ async def test_library_resolution_reports_missing_items(
     assert resolved_footprint["success"] is True
     assert missing_symbol["success"] is False
     assert missing_footprint["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_agent_search_tools_and_compact_v2_build_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_symbol_roots", lambda: [])
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_footprint_roots", lambda: [])
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "agent")
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.validate_connection_plan_membership",
+        lambda path, connections: {"success": True, "checked_count": len(connections)},
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda path: {
+            "success": True,
+            "component_count": 1,
+            "net_count": 0,
+            "connectivity_complete": True,
+            "nets": {},
+        },
+    )
+    server = create_server()
+    tools = await server.get_tools()
+
+    assert "find_symbols" in tools
+    assert "find_footprints" in tools
+    assert "list_symbol_libraries" not in tools
+
+    symbols = tools["find_symbols"].fn("Device", 5)
+    footprints = tools["find_footprints"].fn("0603", 5)
+
+    assert symbols["success"] is True
+    assert any(match["lib_id"] == "Device:R" for match in symbols["matches"])
+    assert footprints["success"] is True
+    assert footprints["matches"][0]["footprint_id"] == "Resistor_SMD:R_0603_1608Metric"
+
+    project = tools["create_kicad_project"].fn(str(tmp_path), "compact_demo", True, True, "A4")
+    built = tools["schematic_build_from_spec_v2"].fn(
+        project["project_path"],
+        {
+            "parts": [{"ref": "R10", "lib_id": "Device:R", "symbol": "R_1_1", "value": "10k"}],
+            "nets": {},
+        },
+    )
+
+    assert built["success"] is True
+    assert built["mode"] == "update"
+    assert built["symbol_count"] == 1
+    assert built["native_netlist"] == {
+        "success": True,
+        "component_count": 1,
+        "net_count": 0,
+        "connectivity_complete": True,
+        "error": None,
+    }
+    assert "diff" not in built
+    assert "schematic_preview" not in built
+    assert "quality_report" not in built
+
+
+@pytest.mark.asyncio
+async def test_v2_replace_requires_explicit_destructive_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.validate_connection_plan_membership",
+        lambda path, connections: {"success": True, "checked_count": len(connections)},
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda path: {"success": True, "component_count": 1, "net_count": 0},
+    )
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "replace_guard", True, True, "A4")
+
+    first = tools["schematic_build_from_spec_v2"].fn(
+        project["project_path"],
+        {"parts": [{"ref": "R1", "symbol": "Device:R", "value": "10k"}], "nets": {}},
+        "update",
+    )
+    assert first["success"] is True
+
+    guarded = tools["schematic_build_from_spec_v2"].fn(
+        project["project_path"],
+        {"parts": [{"ref": "R2", "symbol": "Device:R", "value": "20k"}], "nets": {}},
+        "replace",
+    )
+
+    assert guarded["success"] is False
+    assert "allow_destructive_replace=True" in guarded["error"]

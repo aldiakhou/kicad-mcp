@@ -6,12 +6,13 @@ Recommended order:
 
 1. `project_design_state`
 2. `create_kicad_project`, if needed
-3. `schematic_preview_build_from_spec_v2`
-4. `schematic_build_from_spec_v2`
-5. `schematic_apply_connection_plan`, only for incremental edits
-6. `schematic_quality_report`
-7. `run_erc_check`
-8. `project_design_state`
+3. `find_symbols` / `find_footprints` for unknown library IDs
+4. `schematic_preview_build_from_spec_v2`
+5. `schematic_build_from_spec_v2`
+6. `schematic_apply_connection_plan`, only for incremental edits
+7. `schematic_quality_report`
+8. `run_erc_check`
+9. `project_design_state`
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 
@@ -42,9 +43,30 @@ Use this v2 build shape for complete circuits:
   ],
   "nets": {
     "+5V": [["U1", "VCC"]],
-    "GND": [["U1", "GND"]]
+    "GND": [{"ref": "U1", "pin": "GND"}]
   },
   "no_connects": [["U1", "CV"]]
+}
+```
+
+In v2 specs, `symbol` and `lib_id` are both accepted for parts, but the value must be a full KiCad library ID such as `Device:R`, not a symbol-unit name such as `R_1_1`. Net endpoints should use `["U1", "1"]` or `{"ref": "U1", "pin": "1"}`. Legacy string shorthand like `U1_1` is accepted with `rsplit("_", 1)` but is not preferred.
+
+Missing library parts can be declared as `custom_parts` with explicit pins:
+
+```json
+{
+  "custom_parts": [
+    {
+      "ref": "U6",
+      "value": "DPS310",
+      "footprint": "Package_LGA:LGA-8_2.0x2.5mm_P0.65mm",
+      "pins": [
+        {"number": "1", "name": "SCL", "type": "bidirectional"},
+        {"number": "2", "name": "SDA", "type": "bidirectional"},
+        {"number": "3", "name": "GND", "type": "power_in"}
+      ]
+    }
+  ]
 }
 ```
 
@@ -52,7 +74,7 @@ The MCP layer resolves symbols, resolves pins, snaps generated geometry to the s
 
 ## Tool Profiles
 
-By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only the intent-first schematic/project tools needed for normal design work. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
+By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only the intent-first schematic/project tools needed for normal design work plus compact fuzzy library search. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
 
 Use this for manual schematic edits or library exploration:
 

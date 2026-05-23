@@ -116,7 +116,17 @@ async def test_agent_555_blinker_workflow(tmp_path: Path, monkeypatch: pytest.Mo
         pytest.skip(f"Required KiCad library item unavailable: {preview}")
 
     built = tools["schematic_build_from_spec_v2"].fn(
-        project["project_path"], _555_blinker_spec(), "replace", True, True
+        project["project_path"],
+        _555_blinker_spec(),
+        "replace",
+        True,
+        True,
+        True,
+        "full",
+        True,
+        True,
+        True,
+        True,
     )
     assert built["success"] is True
     assert built["native_netlist"]["success"] is True

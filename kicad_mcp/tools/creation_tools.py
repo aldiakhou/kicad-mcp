@@ -28,6 +28,12 @@ from kicad_mcp.utils.library_resolver import (
     KiCadLibraryError,
 )
 from kicad_mcp.utils.library_resolver import (
+    find_footprints as search_footprints,
+)
+from kicad_mcp.utils.library_resolver import (
+    find_symbols as search_symbols,
+)
+from kicad_mcp.utils.library_resolver import (
     list_footprint_libraries as resolve_footprint_libraries,
 )
 from kicad_mcp.utils.library_resolver import (
@@ -115,7 +121,11 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def schematic_preview_build_from_spec_v2(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
-        """Preview an agent-friendly parts/nets schematic build without writing files."""
+        """Preview an agent-friendly parts/nets schematic build without writing files.
+
+        Part symbols must be full KiCad library IDs such as "Device:R"; use find_symbols
+        first when unsure. Nets may use ["U1", "1"] or {"ref": "U1", "pin": "1"} endpoints.
+        """
         return preview_build_from_spec_v2(project_path, spec)
 
     @mcp.tool()
@@ -139,18 +149,40 @@ def register_creation_tools(mcp: FastMCP) -> None:
     def schematic_build_from_spec_v2(
         project_path: str,
         spec: dict[str, Any],
-        mode: str = "replace",
+        mode: str = "update",
         backup: bool = True,
         run_erc: bool = True,
+        allow_destructive_replace: bool = False,
+        detail: str = "compact",
+        include_diff: bool = False,
+        include_preview: bool = False,
+        include_full_native_netlist: bool = False,
+        run_quality_report: bool = False,
     ) -> dict[str, Any]:
-        """Build a schematic from an agent-friendly parts/nets/no_connects specification."""
+        """Build a schematic from an agent-friendly parts/nets/no_connects specification.
+
+        Part symbol/lib_id values must be full KiCad library IDs such as "Device:R", not
+        unit names such as "R_1_1". Prefer mode="update"; mode="replace" requires
+        allow_destructive_replace=True when the schematic is non-empty.
+        """
         if not backup:
             return {
                 "success": False,
                 "project_path": project_path,
                 "error": "backup=False is not supported; schematic builds are always backed up",
             }
-        result = build_schematic_from_spec_v2(project_path, spec, mode=mode, run_erc=run_erc)
+        result = build_schematic_from_spec_v2(
+            project_path,
+            spec,
+            mode=mode,
+            run_erc=run_erc,
+            allow_destructive_replace=allow_destructive_replace,
+            detail=detail,
+            include_diff=include_diff,
+            include_preview=include_preview,
+            include_full_native_netlist=include_full_native_netlist,
+            run_quality_report=run_quality_report,
+        )
         if result.get("success"):
             result.setdefault("tool", "schematic_build_from_spec_v2")
             result.setdefault("stage", "schematic_built")
@@ -284,6 +316,36 @@ def register_creation_tools(mcp: FastMCP) -> None:
             return {key: value for key, value in result.items() if key != "node"}
         except KiCadLibraryError as exc:
             return {"success": False, "lib_id": lib_id, "error": str(exc)}
+
+    @mcp.tool()
+    def find_symbols(query: str, max_results: int = 10) -> dict[str, Any]:
+        """Fuzzy-search KiCad symbols before resolving an exact lib_id."""
+        try:
+            matches = search_symbols(query, max_results=max_results)
+            return {
+                "success": True,
+                "query": query,
+                "count": len(matches),
+                "matches": matches,
+                "recommended_next_tool": "resolve_symbol",
+            }
+        except Exception as exc:
+            return {"success": False, "query": query, "error": str(exc)}
+
+    @mcp.tool()
+    def find_footprints(query: str, max_results: int = 10) -> dict[str, Any]:
+        """Fuzzy-search KiCad footprints before resolving an exact footprint_id."""
+        try:
+            matches = search_footprints(query, max_results=max_results)
+            return {
+                "success": True,
+                "query": query,
+                "count": len(matches),
+                "matches": matches,
+                "recommended_next_tool": "resolve_footprint",
+            }
+        except Exception as exc:
+            return {"success": False, "query": query, "error": str(exc)}
 
     @mcp.tool()
     def resolve_footprint(footprint_id: str) -> dict[str, Any]:

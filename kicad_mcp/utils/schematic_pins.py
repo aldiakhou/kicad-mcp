@@ -44,13 +44,15 @@ def get_symbol_pin_map_from_schematic(
     try:
         pins = _resolve_symbol_pins(lib_id)
     except KiCadLibraryError as exc:
-        return {
-            "success": False,
-            "schematic_path": schematic_path,
-            "reference": reference,
-            "lib_id": lib_id,
-            "error": str(exc),
-        }
+        pins = _resolve_embedded_symbol_pins(schematic, lib_id)
+        if not pins:
+            return {
+                "success": False,
+                "schematic_path": schematic_path,
+                "reference": reference,
+                "lib_id": lib_id,
+                "error": str(exc),
+            }
     position = symbol["position"]
     transformed = [
         _transform_pin(pin, position["x"], position["y"], position.get("angle", 0.0))
@@ -218,6 +220,16 @@ def _resolve_symbol_pins(lib_id: str) -> list[dict[str, Any]]:
         pin["local_position"] = dict(pin["local_position"])
         pins.append(pin)
     return pins
+
+
+def _resolve_embedded_symbol_pins(schematic: KiCadSchematic, lib_id: str) -> list[dict[str, Any]]:
+    lib_symbols = schematic.root.first_child("lib_symbols")
+    if lib_symbols is None:
+        return []
+    for symbol in lib_symbols.child_lists("symbol"):
+        if len(symbol.items) > 1 and _atom_text(symbol.items[1]) == lib_id:
+            return _extract_library_pins(symbol)
+    return []
 
 
 def _freeze_pins(pins: list[dict[str, Any]]) -> tuple[tuple[tuple[str, Any], ...], ...]:

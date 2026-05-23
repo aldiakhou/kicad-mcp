@@ -76,6 +76,8 @@ AGENT_PROFILE_TOOLS = {
     "schematic_plan_erc_fixes",
     "schematic_apply_safe_erc_fixes",
     "run_erc_check",
+    "find_symbols",
+    "find_footprints",
     "resolve_symbol",
     "resolve_footprint",
 }
