@@ -2,6 +2,8 @@
 
 This guide covers the MCP tools for creating KiCad projects, authoring schematics, and adding conservative PCB layout primitives.
 
+Most tools in this guide are hidden from the default `KICAD_MCP_TOOL_PROFILE=agent` surface. Use `advanced` for manual schematic authoring, `debug` for raw schematic geometry diagnostics, or `all` for PCB/export/BOM/netlist tooling.
+
 ## Project creation
 
 - `create_kicad_project(project_dir, project_name, create_schematic=True, create_pcb=True, paper="A4")`

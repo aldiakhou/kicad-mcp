@@ -220,8 +220,8 @@ def apply_connection_plan_v2(
         "stage": "schematic_wiring",
         "changed": False,
         "failed_connections": failed or normalized["connections"],
-        "recommended_next_tool": "schematic_get_pin_map",
-        "recommended_next_arguments": {},
+        "recommended_next_tool": "schematic_quality_report",
+        "recommended_next_arguments": {"project_path": schematic_path},
         "recoverable": True,
     }
 
@@ -619,6 +619,7 @@ def _failure_response(
         "rolled_back": rolled_back,
         "recoverable": True,
         "failed_connections": failed_connections,
-        "recommended_next_tool": "schematic_get_pin_map",
+        "recommended_next_tool": "schematic_quality_report",
+        "recommended_next_arguments": {"project_path": schematic_path},
         "debug": debug or {},
     }

@@ -56,8 +56,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_SSE_PATH = "/sse"
 DEFAULT_HTTP_PATH = "/mcp"
-SUPPORTED_TOOL_PROFILES = {"agent", "default", "advanced", "debug"}
-ADVANCED_TOOL_PROFILES = {"advanced", "debug"}
+SUPPORTED_TOOL_PROFILES = {"agent", "default", "advanced", "debug", "all"}
 DEFAULT_TOOL_PROFILE = "agent"
 AGENT_PROFILE_TOOLS = {
     "project_design_state",
@@ -79,12 +78,24 @@ AGENT_PROFILE_TOOLS = {
     "run_erc_check",
     "resolve_symbol",
     "resolve_footprint",
-    "pcb_sync_place_and_report",
-    "pcb_get_ratsnest",
-    "pcb_quality_report",
-    "pcb_route_between_pads",
-    "pcb_route_ratsnest_connection",
-    "run_drc_check",
+}
+ADVANCED_PROFILE_TOOLS = {
+    "create_schematic_file",
+    "schematic_add_symbol",
+    "schematic_snap_to_grid",
+    "schematic_delete_item",
+    "schematic_apply_functional_layout",
+    "list_symbol_libraries",
+    "list_footprint_libraries",
+}
+DEBUG_PROFILE_TOOLS = {
+    "schematic_add_wire",
+    "schematic_add_label",
+    "schematic_connect_points",
+    "schematic_get_pin_map",
+    "schematic_attach_net_to_pin",
+    "schematic_preview_build_from_spec",
+    "schematic_build_from_spec",
 }
 
 
@@ -300,21 +311,29 @@ def get_tool_profile() -> str:
 
 
 def _apply_tool_profile(mcp: FastMCP, profile: str) -> None:
-    """Hide advanced/debug tools from the default agent-facing tool surface."""
-    if profile in ADVANCED_TOOL_PROFILES:
-        logging.info("Using %s tool profile; all tools are exposed.", profile)
-        return
+    """Hide tools that do not belong to the configured LLM tool surface."""
     tool_manager = getattr(mcp, "_tool_manager", None)
     tool_names = list(getattr(tool_manager, "_tools", {}).keys())
+    if profile == "all":
+        logging.info("Using all tool profile; all %d tools are exposed.", len(tool_names))
+        return
+
+    allowed_tools = set(AGENT_PROFILE_TOOLS)
+    if profile in {"advanced", "debug"}:
+        allowed_tools.update(ADVANCED_PROFILE_TOOLS)
+    if profile == "debug":
+        allowed_tools.update(DEBUG_PROFILE_TOOLS)
+
     hidden = []
     for tool_name in tool_names:
-        if tool_name in AGENT_PROFILE_TOOLS:
+        if tool_name in allowed_tools:
             continue
         mcp.remove_tool(tool_name)
         hidden.append(tool_name)
     logging.info(
-        "Using agent tool profile; exposed %d tools and hid %d advanced/debug tools.",
-        len(AGENT_PROFILE_TOOLS),
+        "Using %s tool profile; exposed %d tools and hid %d tools.",
+        profile,
+        len(allowed_tools),
         len(hidden),
     )
 

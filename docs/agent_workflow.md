@@ -11,10 +11,7 @@ Recommended order:
 5. `schematic_apply_connection_plan`, only for incremental edits
 6. `schematic_quality_report`
 7. `run_erc_check`
-8. `pcb_sync_place_and_report`
-9. `pcb_route_between_pads` or `pcb_route_ratsnest_connection`
-10. `run_drc_check`
-11. `project_design_state`
+8. `project_design_state`
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 
@@ -55,12 +52,22 @@ The MCP layer resolves symbols, resolves pins, snaps generated geometry to the s
 
 ## Tool Profiles
 
-By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only the intent-first tools needed for normal design work. Low-level coordinate and raw KiCad geometry tools are hidden from the normal LLM tool list. The default profile still includes the high-level PCB workflow tools for sync/place/report and pad-based routing.
+By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only the intent-first schematic/project tools needed for normal design work. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
 
-Use this only for manual recovery, debugging, or library exploration:
+Use this for manual schematic edits or library exploration:
 
 ```text
 KICAD_MCP_TOOL_PROFILE=advanced
 ```
 
-`debug` is also accepted and exposes the same full tool surface. In advanced/debug mode, legacy builders, raw schematic geometry tools, pin-map diagnostics, full library listing, explicit PCB primitives, export helpers, and netlist-analysis tools are registered again.
+Use this for raw schematic geometry, v1 builder compatibility, and pin-map diagnostics:
+
+```text
+KICAD_MCP_TOOL_PROFILE=debug
+```
+
+Use this only for broad regression testing or non-agent clients that need every registered tool:
+
+```text
+KICAD_MCP_TOOL_PROFILE=all
+```

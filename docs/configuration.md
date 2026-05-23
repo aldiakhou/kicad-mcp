@@ -29,6 +29,17 @@ These settings control how the server locates KiCad:
 |---------------------|-------------|---------------|---------|
 | `KICAD_APP_PATH` | Path to the KiCad application | `/Applications/KiCad/KiCad.app` (macOS)<br>`C:\Program Files\KiCad` (Windows)<br>`/usr/share/kicad` (Linux) | `/Applications/KiCad7/KiCad.app` |
 
+### MCP Tool Profile
+
+`KICAD_MCP_TOOL_PROFILE` controls which tools are exposed to MCP clients:
+
+| Value | Description |
+|-------|-------------|
+| `agent` | Default. Intent-first schematic/project tools only. |
+| `advanced` | Adds manual schematic editing and library listing tools. |
+| `debug` | Adds raw schematic geometry, v1 builders, compatibility aliases, and pin-map diagnostics. |
+| `all` | Exposes every registered tool, including PCB, export, BOM, netlist, and validation tools. |
+
 ## Using a .env File (Recommended)
 
 The recommended way to configure the server is by creating a `.env` file in the project root:

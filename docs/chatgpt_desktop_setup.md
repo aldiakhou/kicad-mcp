@@ -37,6 +37,7 @@ The server supports configurable MCP transports through environment variables:
 - `KICAD_MCP_TRANSPORT=stdio` keeps the historical local stdio behavior.
 - `KICAD_MCP_TRANSPORT=sse` starts an HTTP/SSE MCP endpoint.
 - `KICAD_MCP_TRANSPORT=streamable-http` or `http` starts an HTTP MCP endpoint for clients that support those FastMCP transports.
+- `KICAD_MCP_TOOL_PROFILE=agent` keeps the default LLM tool surface intent-first. Use `advanced`, `debug`, or `all` only when a client needs lower-level tools.
 
 Optional HTTP/SSE variables:
 
@@ -50,6 +51,7 @@ Start the local server on an HTTP transport. SSE is the most conservative option
 
 ```bash
 KICAD_MCP_TRANSPORT=sse \
+KICAD_MCP_TOOL_PROFILE=agent \
 KICAD_MCP_HOST=127.0.0.1 \
 KICAD_MCP_PORT=8765 \
 KICAD_MCP_PATH=/sse \
@@ -61,6 +63,7 @@ On Windows PowerShell:
 
 ```powershell
 $env:KICAD_MCP_TRANSPORT = "sse"
+$env:KICAD_MCP_TOOL_PROFILE = "agent"
 $env:KICAD_MCP_HOST = "127.0.0.1"
 $env:KICAD_MCP_PORT = "8765"
 $env:KICAD_MCP_PATH = "/sse"
@@ -111,7 +114,8 @@ Some MCP clients launch local stdio servers directly. For those clients, use thi
       "cwd": "/path/to/kicad-mcp",
       "env": {
         "KICAD_CLI_PATH": "/path/to/kicad-cli",
-        "KICAD_MCP_TRANSPORT": "stdio"
+        "KICAD_MCP_TRANSPORT": "stdio",
+        "KICAD_MCP_TOOL_PROFILE": "agent"
       }
     }
   }

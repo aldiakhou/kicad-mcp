@@ -16,7 +16,9 @@ import pytest
 import kicad_mcp.config as config
 import kicad_mcp.server as server_module
 from kicad_mcp.server import (
+    ADVANCED_PROFILE_TOOLS,
     AGENT_PROFILE_TOOLS,
+    DEBUG_PROFILE_TOOLS,
     create_server,
     get_tool_profile,
     get_transport_config,
@@ -80,8 +82,6 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert set(tools) == AGENT_PROFILE_TOOLS
     assert "schematic_build_from_spec_v2" in tools
     assert "schematic_connect_pin_to_net" in tools
-    assert "pcb_sync_place_and_report" in tools
-    assert "pcb_route_between_pads" in tools
     assert "schematic_add_wire" not in tools
     assert "schematic_get_pin_map" not in tools
     assert "schematic_build_from_spec" not in tools
@@ -95,17 +95,57 @@ async def test_create_server_registers_smoke_resources_and_tools():
 
 
 @pytest.mark.asyncio
-async def test_create_server_advanced_profile_exposes_debug_tools(monkeypatch):
-    """Advanced/debug profile keeps raw geometry and diagnostic tools available."""
+async def test_create_server_advanced_profile_exposes_manual_schematic_tools(monkeypatch):
+    """Advanced profile adds manual schematic tools without raw geometry/debug aliases."""
     monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
     server = create_server()
     tools = await server.get_tools()
 
     assert get_tool_profile() == "advanced"
+    assert set(tools) == AGENT_PROFILE_TOOLS | ADVANCED_PROFILE_TOOLS
+    assert "schematic_add_symbol" in tools
+    assert "schematic_snap_to_grid" in tools
+    assert "list_symbol_libraries" in tools
+    assert "schematic_add_wire" not in tools
+    assert "schematic_get_pin_map" not in tools
+    assert "schematic_build_from_spec" not in tools
+    assert "pcb_add_track" not in tools
+
+    server_module.shutdown_server()
+
+
+@pytest.mark.asyncio
+async def test_create_server_debug_profile_exposes_raw_schematic_tools(monkeypatch):
+    """Debug profile adds raw schematic geometry and compatibility tools."""
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "debug")
+    server = create_server()
+    tools = await server.get_tools()
+
+    assert get_tool_profile() == "debug"
+    assert set(tools) == AGENT_PROFILE_TOOLS | ADVANCED_PROFILE_TOOLS | DEBUG_PROFILE_TOOLS
     assert "schematic_add_wire" in tools
     assert "schematic_get_pin_map" in tools
     assert "schematic_build_from_spec" in tools
     assert "list_symbol_libraries" in tools
+    assert "pcb_add_track" not in tools
+
+    server_module.shutdown_server()
+
+
+@pytest.mark.asyncio
+async def test_create_server_all_profile_exposes_full_legacy_surface(monkeypatch):
+    """All profile keeps every registered tool available for broad regression coverage."""
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "all")
+    server = create_server()
+    tools = await server.get_tools()
+
+    assert get_tool_profile() == "all"
+    assert "schematic_add_wire" in tools
+    assert "schematic_get_pin_map" in tools
+    assert "schematic_build_from_spec" in tools
+    assert "list_symbol_libraries" in tools
+    assert "pcb_add_track" in tools
+    assert "extract_schematic_netlist" in tools
 
     server_module.shutdown_server()
 
@@ -246,7 +286,7 @@ def test_extract_netlist_ignores_embedded_library_symbols(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_extract_schematic_netlist_reports_missing_file_via_async_ctx(monkeypatch):
     """Async tool paths should await ctx.info instead of leaking un-awaited coroutines."""
-    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "all")
     server = create_server()
     tools = await server.get_tools()
     fake_ctx = FakeContext()
@@ -417,7 +457,7 @@ def test_get_kicad_cli_path_can_return_none_when_not_required(monkeypatch):
 @pytest.mark.asyncio
 async def test_find_component_connections_marks_results_as_inferred(monkeypatch):
     """Connection lookup should expose incomplete connectivity explicitly."""
-    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "all")
     server = create_server()
     tools = await server.get_tools()
     fake_ctx = FakeContext()

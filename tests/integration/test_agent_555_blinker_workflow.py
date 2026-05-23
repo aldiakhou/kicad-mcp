@@ -101,7 +101,8 @@ def _555_blinker_spec() -> dict:
 
 
 @pytest.mark.asyncio
-async def test_agent_555_blinker_workflow(tmp_path: Path):
+async def test_agent_555_blinker_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "all")
     server = create_server()
     tools = await server.get_tools()
 
