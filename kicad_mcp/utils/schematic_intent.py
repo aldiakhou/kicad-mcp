@@ -62,7 +62,7 @@ def connect_pins(
     net_name: str | None = None,
     style: str = "auto",
 ) -> dict[str, Any]:
-    """Connect two symbol pins by applying the same generated net to both pins."""
+    """Connect two symbol pins by assigning both pins to the same named net."""
     resolved_net = net_name or _auto_net_name(ref_a, pin_a, ref_b, pin_b)
     return {
         "net_name": resolved_net,
@@ -95,6 +95,7 @@ def apply_connection_plan_v2(
     run_erc: bool = True,
     auto_snap: bool = True,
     rollback_on_failure: bool = True,
+    fail_on_erc_violations: bool = False,
 ) -> dict[str, Any]:
     """Apply normalized electrical-intent connections transactionally."""
     no_connects = no_connects or []
@@ -168,7 +169,7 @@ def apply_connection_plan_v2(
             normalized["connections"],
             verify_native_netlist=verify_native_netlist,
             run_erc=run_erc,
-            fail_on_erc_violations=False,
+            fail_on_erc_violations=fail_on_erc_violations,
         )
 
     result = apply_transactional_schematic_edit(
@@ -193,7 +194,7 @@ def apply_connection_plan_v2(
                 normalized["connections"],
                 verify_native_netlist=verify_native_netlist,
                 run_erc=run_erc,
-                fail_on_erc_violations=False,
+                fail_on_erc_violations=fail_on_erc_violations,
             )
             result.setdefault("validation", {})["post_write"] = verification
             native_verification = verification.get("native_verification", native_verification)

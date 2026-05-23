@@ -492,6 +492,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         stub_length_mm: float = 5.08,
         auto_snap: bool = True,
         verify: bool = True,
+        fail_on_erc_violations: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Connect one schematic symbol pin to a named net by electrical intent."""
@@ -512,6 +513,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             verify_native_netlist=verify,
             run_erc=verify,
             auto_snap=auto_snap,
+            fail_on_erc_violations=fail_on_erc_violations,
         )
         result["tool"] = "schematic_connect_pin_to_net"
         return result
@@ -527,9 +529,10 @@ def register_creation_tools(mcp: FastMCP) -> None:
         style: str = "auto",
         auto_snap: bool = True,
         verify: bool = True,
+        fail_on_erc_violations: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Connect two schematic symbol pins by electrical intent."""
+        """Connect two pins by assigning both to the same named net."""
         if ctx:
             await ctx.info(f"Connecting {ref_a}.{pin_a} to {ref_b}.{pin_b}")
         result = apply_connection_plan_v2(
@@ -546,6 +549,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             verify_native_netlist=verify,
             run_erc=verify,
             auto_snap=auto_snap,
+            fail_on_erc_violations=fail_on_erc_violations,
         )
         result["tool"] = "schematic_connect_pins"
         return result
@@ -557,6 +561,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         pin: str,
         ground_net: str = "GND",
         verify: bool = True,
+        fail_on_erc_violations: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Connect one schematic symbol pin to a ground net by electrical intent."""
@@ -568,6 +573,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             verify_native_netlist=verify,
             run_erc=verify,
             auto_snap=True,
+            fail_on_erc_violations=fail_on_erc_violations,
         )
         result["tool"] = "schematic_connect_pin_to_ground"
         return result
@@ -579,6 +585,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         pin: str,
         power_net: str,
         verify: bool = True,
+        fail_on_erc_violations: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Connect one schematic symbol pin to a power net by electrical intent."""
@@ -590,6 +597,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             verify_native_netlist=verify,
             run_erc=verify,
             auto_snap=True,
+            fail_on_erc_violations=fail_on_erc_violations,
         )
         result["tool"] = "schematic_connect_pin_to_power"
         return result
@@ -601,6 +609,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         no_connects: list[dict[str, Any]] | None = None,
         run_native_netlist: bool = True,
         rollback_on_failed_membership: bool = True,
+        fail_on_erc_violations: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Primary agent tool for schematic wiring. Prefer this over raw wire/point tools."""
@@ -612,6 +621,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             no_connects,
             run_native_netlist,
             rollback_on_failed_membership,
+            fail_on_erc_violations,
         )
 
     @mcp.tool()

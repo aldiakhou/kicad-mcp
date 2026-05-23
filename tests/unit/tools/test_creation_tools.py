@@ -438,6 +438,77 @@ async def test_apply_connection_plan_rolls_back_failed_required_membership(
 
 
 @pytest.mark.asyncio
+async def test_apply_connection_plan_can_strictly_roll_back_on_erc_violations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "erc_strict_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+    symbol = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        25.4,
+        25.4,
+        0.0,
+        "Resistor_SMD:R_0603_1608Metric",
+        None,
+        None,
+    )
+    assert symbol["success"] is True
+
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda _path: {
+            "success": True,
+            "components": {},
+            "nets": {"NET1": {"nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1"}]}},
+            "component_count": 1,
+            "net_count": 1,
+            "connectivity_complete": True,
+        },
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_intent.run_erc_via_cli",
+        lambda _path: {
+            "success": True,
+            "total_violations": 1,
+            "violation_categories": {"label_dangling": 1},
+            "violations": [{"type": "label_dangling"}],
+        },
+    )
+
+    non_strict = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NET1"}],
+        None,
+        True,
+        True,
+        False,
+        None,
+    )
+    assert non_strict["success"] is True
+    assert non_strict["erc"]["total_violations"] == 1
+
+    strict = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NET1"}],
+        None,
+        True,
+        True,
+        True,
+        None,
+    )
+    assert strict["success"] is False
+    assert strict["rolled_back"] is True
+    assert strict["recoverable"] is True
+
+
+@pytest.mark.asyncio
 async def test_schematic_quality_report_detects_generic_authoring_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

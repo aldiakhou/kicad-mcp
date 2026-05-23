@@ -253,6 +253,7 @@ def apply_connection_plan(
     no_connects: list[dict[str, Any]] | None = None,
     run_native_netlist: bool = True,
     rollback_on_failed_membership: bool = True,
+    fail_on_erc_violations: bool = False,
 ) -> dict[str, Any]:
     """Apply a batch connection plan transactionally through the v2 intent engine."""
     # Preserve existing tests and callers that monkeypatch this module's native
@@ -268,6 +269,7 @@ def apply_connection_plan(
         run_erc=True,
         auto_snap=True,
         rollback_on_failure=rollback_on_failed_membership,
+        fail_on_erc_violations=fail_on_erc_violations,
     )
 
 
