@@ -69,6 +69,7 @@ from kicad_mcp.utils.schematic_pins import (
     get_symbol_pin_map_from_schematic,
     verify_native_net_membership,
 )
+from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
 from kicad_mcp.utils.transactional_edit import (
     create_file_backup,
     get_file_diff_against_backup,
@@ -141,6 +142,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
             detail="compact",
             include_expanded_spec=False,
             tool_name="schematic_preview_design_intent",
+            visual_layout=True,
+            visual_style="readable",
         )
 
     @mcp.tool()
@@ -152,6 +155,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         strict: bool = False,
         detail: str = "compact",
         include_expanded_spec: bool = False,
+        visual_layout: bool = True,
+        visual_style: str = "readable",
     ) -> dict[str, Any]:
         """Compile and apply generic bulk schematic design intent.
 
@@ -168,6 +173,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
             detail=detail,
             include_expanded_spec=include_expanded_spec,
             tool_name="schematic_apply_design_intent",
+            visual_layout=visual_layout,
+            visual_style=visual_style,
         )
 
     @mcp.tool()
@@ -1167,8 +1174,22 @@ def _schematic_design_intent_response(
     detail: str,
     include_expanded_spec: bool,
     tool_name: str,
+    visual_layout: bool = True,
+    visual_style: str = "readable",
 ) -> dict[str, Any]:
     compiled = compile_design_intent(project_path, intent, strict=strict)
+    expanded_spec = compiled.get("expanded_spec")
+    visual_summary = {"enabled": False}
+    if compiled.get("success") and isinstance(expanded_spec, dict) and visual_layout:
+        expanded_spec = apply_visual_layout_to_v2_spec(
+            expanded_spec,
+            page=str(expanded_spec.get("paper") or "A3"),
+            style=visual_style,
+        )
+        visual_summary = expanded_spec.get("layout_hints", {}).get(
+            "visual_layout",
+            {"enabled": True, "style": visual_style},
+        )
     base: dict[str, Any] = {
         "success": compiled.get("success", False),
         "tool": tool_name,
@@ -1183,12 +1204,13 @@ def _schematic_design_intent_response(
         "expanded_spec_path": compiled.get("expanded_spec_path"),
         "normalized_intent_path": compiled.get("normalized_intent_path"),
         "report_path": compiled.get("report_path"),
+        "visual_layout": visual_summary,
         "recommended_next_tool": (
             "schematic_apply_design_intent" if dry_run else "schematic_quality_report"
         ),
     }
     if include_expanded_spec:
-        base["expanded_spec"] = compiled.get("expanded_spec")
+        base["expanded_spec"] = expanded_spec
     if not compiled.get("success"):
         base["recoverable"] = compiled.get("recoverable", True)
         return base
@@ -1198,7 +1220,7 @@ def _schematic_design_intent_response(
 
     built = build_schematic_from_spec_v2(
         project_path,
-        compiled["expanded_spec"],
+        expanded_spec,
         mode=mode,
         run_erc=strict,
         allow_destructive_replace=False,

@@ -369,6 +369,27 @@ def build_schematic_from_spec_v2(
     )
 
 
+def cleanup_schematic_visuals(
+    schematic_path: str,
+    *,
+    preserve_connectivity: bool = True,
+    arrange_labels: bool = True,
+    arrange_generated_parts: bool = True,
+    run_quality_report: bool = True,
+) -> dict[str, Any]:
+    """Internal visual cleanup hook for future post-build readability passes."""
+    quality = schematic_quality_report(schematic_path, run_erc=False) if run_quality_report else None
+    return {
+        "success": True,
+        "schematic_path": schematic_path,
+        "preserve_connectivity": preserve_connectivity,
+        "arrange_labels": arrange_labels,
+        "arrange_generated_parts": arrange_generated_parts,
+        "changed": False,
+        "quality_report": quality,
+    }
+
+
 def normalize_build_spec_v2(spec: dict[str, Any]) -> dict[str, Any]:
     """Translate the agent-friendly v2 spec format into the internal builder spec."""
     if not _is_v2_spec(spec):
@@ -430,15 +451,24 @@ def normalize_build_spec_v2(spec: dict[str, Any]) -> dict[str, Any]:
                 warnings,
             )
             if endpoint:
-                connections.append(
-                    {
-                        "type": "pin_to_net",
-                        "ref": endpoint["ref"],
-                        "pin": endpoint["pin"],
-                        "net": str(net_name),
-                        "allow_hidden_power": endpoint.get("allow_hidden_power", False),
-                    }
-                )
+                connection = {
+                    "type": "pin_to_net",
+                    "ref": endpoint["ref"],
+                    "pin": endpoint["pin"],
+                    "net": str(net_name),
+                    "allow_hidden_power": endpoint.get("allow_hidden_power", False),
+                }
+                layout_hints = spec.get("layout_hints", {})
+                if isinstance(layout_hints, dict):
+                    power_symbol_net = _known_power_symbol_net(str(net_name))
+                    rail_like_net = str(net_name).startswith("+")
+                    if layout_hints.get("label_strategy") and not rail_like_net and not power_symbol_net:
+                        connection["label_placement"] = layout_hints["label_strategy"]
+                    if layout_hints.get("connection_style") and (not rail_like_net or power_symbol_net):
+                        connection["connection_style"] = layout_hints["connection_style"]
+                    if layout_hints.get("label_clearance_mm") and not rail_like_net and not power_symbol_net:
+                        connection["label_clearance_mm"] = layout_hints["label_clearance_mm"]
+                connections.append(connection)
     no_connects = []
     for index, item in enumerate(spec.get("no_connects", [])):
         endpoint = _normalize_v2_endpoint(
@@ -611,7 +641,8 @@ def _library_pin(
     left_side = index < math.ceil(total / 2)
     local_index = index if left_side else index - math.ceil(total / 2)
     x = -7.62 if left_side else 7.62
-    y = _snap((local_index - max(total / 4, 1)) * -2.54)
+    pin_pitch = 7.62 if total >= 8 else 5.08
+    y = _snap((local_index - max(total / 4, 1)) * -pin_pitch)
     angle = 180 if left_side else 0
     items: list[Any] = [
         SExprAtom("pin"),
@@ -646,6 +677,20 @@ def _normalize_pin_type(pin_type: str) -> str:
         "unspecified": "unspecified",
     }
     return aliases.get(normalized, "passive")
+
+
+def _known_power_symbol_net(net_name: str) -> bool:
+    return net_name.upper() in {
+        "GND",
+        "AGND",
+        "DGND",
+        "+3V3",
+        "+3.3V",
+        "+5V",
+        "VBUS",
+        "VCC",
+        "VDD",
+    }
 
 
 def add_no_connect_marker(
@@ -846,6 +891,10 @@ def _visual_quality(
     pin_points = _schematic_pin_points(schematic, schematic_path)
     tiny_stubs = _tiny_stubs(wires)
     duplicate_labels = _duplicate_nearby_labels(labels)
+    label_overlaps = _overlapping_labels(labels)
+    symbol_overlaps = _symbol_overlaps(schematic, schematic_path)
+    labels_inside_symbols = _labels_inside_symbols(schematic, schematic_path)
+    unreadable_labels = _unreadable_label_orientations(labels)
     dangling_labels = _dangling_labels(schematic, schematic_path)
     short_wires = [
         wire for wire in wires if _wire_length(wire) < 1.0 and wire not in tiny_stubs
@@ -860,6 +909,14 @@ def _visual_quality(
             warnings.append({"type": "many_tiny_stubs", "reference": ref, "count": count})
     for item in duplicate_labels:
         warnings.append({"type": "duplicate_label_near_pin", **item})
+    for item in label_overlaps:
+        warnings.append({"type": "label_overlap", **item})
+    for item in labels_inside_symbols:
+        blocking.append({"type": "label_inside_symbol", **item})
+    for item in symbol_overlaps:
+        blocking.append({"type": "symbol_overlap", **item})
+    for item in unreadable_labels:
+        warnings.append({"type": "unreadable_label_orientation", **item})
     for label in dangling_labels:
         blocking.append({"type": "label_not_attached", "label": label})
     for wire in short_wires:
@@ -875,6 +932,10 @@ def _visual_quality(
     penalty = (
         len(tiny_stubs) * 1.5
         + len(duplicate_labels) * 5
+        + len(label_overlaps) * 4
+        + len(labels_inside_symbols) * 8
+        + len(symbol_overlaps) * 20
+        + len(unreadable_labels) * 3
         + len(short_wires) * 2
         + len(floating_wires) * 4
         + len(blocking) * 25
@@ -884,6 +945,12 @@ def _visual_quality(
         "tiny_stub_count": len(tiny_stubs),
         "overlapping_label_count": len(duplicate_labels),
         "duplicate_label_count": len(duplicate_labels),
+        "label_overlap_count": len(label_overlaps),
+        "symbol_overlap_count": len(symbol_overlaps),
+        "label_inside_symbol_count": len(labels_inside_symbols),
+        "long_wire_count": len(_long_wires(wires)),
+        "crossing_wire_count": 0,
+        "unreadable_label_orientation_count": len(unreadable_labels),
         "unusually_short_wire_count": len(short_wires),
         "floating_wire_count": len(floating_wires),
         "power_symbol_count": power_symbol_count,
@@ -911,6 +978,9 @@ def _build_in_memory_schematic(schematic_path: str, spec: dict[str, Any]) -> KiC
             connection.get("label_type", "global"),
             connection.get("stub_length_mm", 5.08),
             connection.get("allow_hidden_power", False),
+            label_placement=connection.get("label_placement", "pin_anchor"),
+            label_clearance_mm=connection.get("label_clearance_mm", 5.08),
+            connection_style=connection.get("connection_style", "label"),
         )
     for marker in spec.get("no_connects", []):
         add_no_connect_to_pin(
@@ -956,6 +1026,9 @@ def _apply_spec_to_existing_schematic(
             connection.get("label_type", "global"),
             connection.get("stub_length_mm", 5.08),
             connection.get("allow_hidden_power", False),
+            label_placement=connection.get("label_placement", "pin_anchor"),
+            label_clearance_mm=connection.get("label_clearance_mm", 5.08),
+            connection_style=connection.get("connection_style", "label"),
         )
     for marker in spec.get("no_connects", []):
         if _pin_has_no_connect(schematic, schematic_path, marker["ref"], marker["pin"]):
@@ -1052,6 +1125,16 @@ def _is_v2_spec(spec: dict[str, Any]) -> bool:
 def _v2_layout_positions(spec: dict[str, Any]) -> dict[str, tuple[float, float]]:
     positions: dict[str, tuple[float, float]] = {}
     parts = [*spec.get("parts", []), *spec.get("custom_parts", [])]
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        ref = part.get("ref") or part.get("reference")
+        if ref is None or part.get("x") is None or part.get("y") is None:
+            continue
+        try:
+            positions[str(ref)] = (float(part["x"]), float(part["y"]))
+        except (TypeError, ValueError):
+            continue
     part_index = {str(part.get("ref")): index for index, part in enumerate(parts)}
     blocks = spec.get("layout_hints", {}).get("functional_blocks", [])
     if not isinstance(blocks, list) or not blocks:
@@ -1061,10 +1144,10 @@ def _v2_layout_positions(spec: dict[str, Any]) -> dict[str, tuple[float, float]]
         for local_index, ref in enumerate(parts):
             if str(ref) not in part_index:
                 continue
-            positions[str(ref)] = (
+            positions.setdefault(str(ref), (
                 35.56 + block_index * 63.5,
                 38.1 + local_index * 17.78,
-            )
+            ))
     return positions
 
 
@@ -1144,15 +1227,16 @@ def _symbol_extends(node: Any) -> str | None:
 
 
 def _membership_from_native(native: dict[str, Any], reference: str, pin: str, net_name: str) -> bool:
-    net = native.get("nets", {}).get(net_name)
-    if not net:
-        return False
-    for node in net.get("nodes", []):
-        pinfunction = node.get("pinfunction", "")
-        if node.get("ref") == reference and (
-            node.get("pin") == pin or pinfunction == pin or pinfunction.startswith(f"{pin}_")
-        ):
-            return True
+    for candidate_name in (net_name, f"/{net_name}"):
+        net = native.get("nets", {}).get(candidate_name)
+        if not net:
+            continue
+        for node in net.get("nodes", []):
+            pinfunction = node.get("pinfunction", "")
+            if node.get("ref") == reference and (
+                node.get("pin") == pin or pinfunction == pin or pinfunction.startswith(f"{pin}_")
+            ):
+                return True
     return False
 
 
@@ -1304,6 +1388,161 @@ def _wire_touches_pin_or_label(
         if xy in pin_points or xy in label_points:
             return True
     return False
+
+
+def _symbol_overlaps(schematic: KiCadSchematic, schematic_path: str) -> list[dict[str, Any]]:
+    symbols = [
+        symbol
+        for symbol in schematic.list_symbols()
+        if not str(symbol.get("reference", "")).startswith("#")
+    ]
+    boxes = [
+        (symbol["reference"], _approx_symbol_rect(schematic, schematic_path, symbol))
+        for symbol in symbols
+    ]
+    overlaps = []
+    for index, (first_ref, first_box) in enumerate(boxes):
+        for second_ref, second_box in boxes[index + 1 :]:
+            if _rects_intersect(first_box, second_box, padding=0.0):
+                overlaps.append(
+                    {
+                        "first_reference": first_ref,
+                        "second_reference": second_ref,
+                        "first_box": _rect_to_dict(first_box),
+                        "second_box": _rect_to_dict(second_box),
+                    }
+                )
+    return overlaps
+
+
+def _labels_inside_symbols(
+    schematic: KiCadSchematic, schematic_path: str
+) -> list[dict[str, Any]]:
+    symbol_boxes = [
+        (
+            symbol["reference"],
+            _approx_symbol_rect(schematic, schematic_path, symbol),
+        )
+        for symbol in schematic.list_symbols()
+        if not str(symbol.get("reference", "")).startswith("#")
+    ]
+    inside = []
+    for label in schematic.list_labels():
+        if _is_rail_like_label(str(label.get("text") or "")):
+            continue
+        pos = label.get("position", {})
+        point = (float(pos.get("x", 0.0)), float(pos.get("y", 0.0)))
+        for ref, box in symbol_boxes:
+            if ref[:1] in {"R", "C", "L", "D"}:
+                continue
+            if _point_in_rect(point, box):
+                inside.append(
+                    {
+                        "label": label,
+                        "reference": ref,
+                        "symbol_box": _rect_to_dict(box),
+                    }
+                )
+                break
+    return inside
+
+
+def _overlapping_labels(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    boxes = [(label, _label_rect(label)) for label in labels]
+    overlaps = []
+    for index, (first, first_box) in enumerate(boxes):
+        for second, second_box in boxes[index + 1 :]:
+            if _rects_intersect(first_box, second_box, padding=0.5):
+                overlaps.append(
+                    {
+                        "first_text": first.get("text"),
+                        "second_text": second.get("text"),
+                        "first_uuid": first.get("uuid"),
+                        "second_uuid": second.get("uuid"),
+                    }
+                )
+    return overlaps
+
+
+def _unreadable_label_orientations(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unreadable = []
+    for label in labels:
+        angle = float(label.get("position", {}).get("angle", 0.0)) % 360
+        if angle not in {0.0, 90.0, 180.0, 270.0}:
+            unreadable.append({"label": label, "angle": angle})
+    return unreadable
+
+
+def _long_wires(wires: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [wire for wire in wires if _wire_length(wire) > 50.8]
+
+
+def _approx_symbol_rect(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    symbol: dict[str, Any],
+) -> tuple[float, float, float, float]:
+    pin_map = get_symbol_pin_map_from_schematic(schematic, schematic_path, symbol["reference"])
+    if pin_map.get("success") and pin_map.get("pins"):
+        xs = [pin["connection_point"]["x"] for pin in pin_map["pins"]]
+        ys = [pin["connection_point"]["y"] for pin in pin_map["pins"]]
+        return (
+            min(xs) - 3.81,
+            min(ys) - 3.81,
+            max(xs) + 3.81,
+            max(ys) + 3.81,
+        )
+    pos = symbol["position"]
+    return (
+        pos["x"] - 7.62,
+        pos["y"] - 7.62,
+        pos["x"] + 7.62,
+        pos["y"] + 7.62,
+    )
+
+
+def _label_rect(label: dict[str, Any]) -> tuple[float, float, float, float]:
+    pos = label.get("position", {})
+    x = float(pos.get("x", 0.0))
+    y = float(pos.get("y", 0.0))
+    text = str(label.get("text") or "")
+    width = max(3.0, len(text) * 0.9)
+    height = 2.0
+    angle = float(pos.get("angle", 0.0)) % 360
+    if angle in {90.0, 270.0}:
+        return (x - height / 2.0, y, x + height / 2.0, y + width)
+    if angle == 180.0:
+        return (x - width, y - height / 2.0, x, y + height / 2.0)
+    return (x, y - height / 2.0, x + width, y + height / 2.0)
+
+
+def _rects_intersect(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    *,
+    padding: float = 0.0,
+) -> bool:
+    return not (
+        first[2] + padding <= second[0]
+        or first[0] - padding >= second[2]
+        or first[3] + padding <= second[1]
+        or first[1] - padding >= second[3]
+    )
+
+
+def _point_in_rect(
+    point: tuple[float, float], rect: tuple[float, float, float, float]
+) -> bool:
+    return rect[0] <= point[0] <= rect[2] and rect[1] <= point[1] <= rect[3]
+
+
+def _rect_to_dict(rect: tuple[float, float, float, float]) -> dict[str, float]:
+    return {"left": rect[0], "top": rect[1], "right": rect[2], "bottom": rect[3]}
+
+
+def _is_rail_like_label(text: str) -> bool:
+    upper = text.upper()
+    return upper in {"GND", "AGND", "DGND", "VCC", "VDD", "VBUS"} or upper.startswith("+")
 
 
 def _tiny_stubs_by_symbol(

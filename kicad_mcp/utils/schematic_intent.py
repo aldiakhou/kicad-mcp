@@ -31,6 +31,9 @@ def connect_pin_to_net(
     stub_length_mm: float = 5.08,
     direction: str = "auto",
     allow_hidden_power: bool = False,
+    label_placement: str = "pin_anchor",
+    label_clearance_mm: float = 5.08,
+    connection_style: str = "label",
 ) -> dict[str, Any]:
     """Connect one symbol pin to a named net using pin-resolved label placement."""
     if direction != "auto":
@@ -46,6 +49,9 @@ def connect_pin_to_net(
         label_type,
         stub_length_mm,
         allow_hidden_power,
+        label_placement=label_placement,
+        label_clearance_mm=label_clearance_mm,
+        connection_style=connection_style,
     )
     result["direction"] = direction
     return result
@@ -438,6 +444,9 @@ def _pin_to_net(source: dict[str, Any], ref: Any, pin: Any, net: Any) -> dict[st
         "net": str(net),
         "label_type": source.get("label_type", "global"),
         "stub_length_mm": float(source.get("stub_length_mm", 5.08)),
+        "label_placement": source.get("label_placement", "pin_anchor"),
+        "label_clearance_mm": float(source.get("label_clearance_mm", 5.08)),
+        "connection_style": source.get("connection_style", "label"),
         "allow_hidden_power": bool(source.get("allow_hidden_power", False)),
         "required": bool(source.get("required", True)),
         "source": source,
@@ -456,6 +465,9 @@ def _apply_normalized_connection(
         label_type=connection.get("label_type", "global"),
         stub_length_mm=connection.get("stub_length_mm", 5.08),
         allow_hidden_power=connection.get("allow_hidden_power", False),
+        label_placement=connection.get("label_placement", "pin_anchor"),
+        label_clearance_mm=connection.get("label_clearance_mm", 5.08),
+        connection_style=connection.get("connection_style", "label"),
     )
 
 

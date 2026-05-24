@@ -316,8 +316,9 @@ class _DesignIntentCompiler:
             else:
                 value = str(pullups.get("value") or "4.7k")
                 footprint = str(pullups.get("footprint") or DEFAULT_FOOTPRINTS["resistor"])
-                self._add_two_pin_part("R", value, footprint, scl_net, str(rail), "i2c_pullups")
-                self._add_two_pin_part("R", value, footprint, sda_net, str(rail), "i2c_pullups")
+                target = str(controller.get("ref") or "")
+                self._add_two_pin_part("R", value, footprint, scl_net, str(rail), "i2c_pullups", {"target": target, "rail": str(rail)})
+                self._add_two_pin_part("R", value, footprint, sda_net, str(rail), "i2c_pullups", {"target": target, "rail": str(rail)})
 
     def _expand_spi(self, interface: dict[str, Any], path: str) -> None:
         name = str(interface.get("name") or "SPI")
@@ -389,7 +390,7 @@ class _DesignIntentCompiler:
         header = interface.get("header") if isinstance(interface.get("header"), dict) else {}
         ref = str(header.get("ref") or self._allocate("J", "swd_header"))
         pin_count = int(header.get("pin_count") or (5 if rail else 4))
-        self._add_header_part(ref, pin_count, str(header.get("footprint") or _header_footprint(pin_count)), header.get("value") or "SWD")
+        self._add_header_part(ref, pin_count, str(header.get("footprint") or _header_footprint(pin_count)), header.get("value") or "SWD", {"generated_by": "swd_header", "target": target})
         assignments = [("1", str(rail) if rail else None), ("2", nets["swdio"]), ("3", ground), ("4", nets["swclk"])]
         if pin_count >= 5:
             assignments.append(("5", nets["reset"]))
@@ -461,7 +462,7 @@ class _DesignIntentCompiler:
         for value in caps:
             value_str = str(value)
             footprint = str(footprints.get(value_str) or circuit.get("footprint") or DEFAULT_FOOTPRINTS["capacitor"])
-            self._add_two_pin_part("C", value_str, footprint, str(rail), str(ground), "decoupling")
+            self._add_two_pin_part("C", value_str, footprint, str(rail), str(ground), "decoupling", {"target": circuit.get("target"), "rail": str(rail)})
 
     def _support_pullup(self, circuit: dict[str, Any], path: str) -> None:
         self._support_resistor_to_rail(circuit, path, "rail", "pullups")
@@ -482,6 +483,7 @@ class _DesignIntentCompiler:
             str(net),
             str(rail),
             bucket,
+            {"target": circuit.get("target"), "rail": str(rail)},
         )
 
     def _support_series_resistor(self, circuit: dict[str, Any], path: str) -> None:
@@ -490,7 +492,7 @@ class _DesignIntentCompiler:
         if not in_net or not out_net:
             self.errors.append({"path": path, "error": "series_resistor requires in_net/from and out_net/to"})
             return
-        self._add_two_pin_part("R", str(circuit.get("value") or "0"), str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["resistor"]), str(in_net), str(out_net), "series_resistors")
+        self._add_two_pin_part("R", str(circuit.get("value") or "0"), str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["resistor"]), str(in_net), str(out_net), "series_resistors", {"target": circuit.get("target")})
 
     def _support_reset_button(self, circuit: dict[str, Any], path: str) -> None:
         target = circuit.get("target")
@@ -499,9 +501,9 @@ class _DesignIntentCompiler:
         if target and pin:
             self._add_connection(net, str(target), str(pin), path)
         if circuit.get("pullup") and circuit.get("rail"):
-            self._add_two_pin_part("R", str(circuit["pullup"]), str(circuit.get("resistor_footprint") or DEFAULT_FOOTPRINTS["resistor"]), net, str(circuit["rail"]), "reset")
+            self._add_two_pin_part("R", str(circuit["pullup"]), str(circuit.get("resistor_footprint") or DEFAULT_FOOTPRINTS["resistor"]), net, str(circuit["rail"]), "reset", {"target": target, "rail": str(circuit["rail"])})
         sw_ref = str(circuit.get("ref") or self._allocate("SW", "reset"))
-        self._add_part({"ref": sw_ref, "lib_id": "Switch:SW_Push", "value": str(circuit.get("value") or "RESET"), "footprint": str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["switch"])})
+        self._add_part({"ref": sw_ref, "lib_id": "Switch:SW_Push", "value": str(circuit.get("value") or "RESET"), "footprint": str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["switch"]), "generated_by": "reset", "target": target})
         self._add_connection(net, sw_ref, "1", path)
         self._add_connection(str(circuit.get("ground") or "GND"), sw_ref, "2", path)
 
@@ -512,9 +514,9 @@ class _DesignIntentCompiler:
             self.errors.append({"path": path, "error": "led_indicator requires rail"})
             return
         led_net = str(circuit.get("net") or f"{circuit.get('name') or 'LED'}_K")
-        self._add_two_pin_part("R", str(circuit.get("resistor") or "1k"), str(circuit.get("resistor_footprint") or DEFAULT_FOOTPRINTS["resistor"]), str(rail), led_net, "led_indicators")
+        self._add_two_pin_part("R", str(circuit.get("resistor") or "1k"), str(circuit.get("resistor_footprint") or DEFAULT_FOOTPRINTS["resistor"]), str(rail), led_net, "led_indicators", {"target": circuit.get("target"), "rail": str(rail)})
         led_ref = self._allocate("D", "led_indicators")
-        self._add_part({"ref": led_ref, "lib_id": "Device:LED", "value": str(circuit.get("led_color") or "LED"), "footprint": str(circuit.get("led_footprint") or DEFAULT_FOOTPRINTS["led"])})
+        self._add_part({"ref": led_ref, "lib_id": "Device:LED", "value": str(circuit.get("led_color") or "LED"), "footprint": str(circuit.get("led_footprint") or DEFAULT_FOOTPRINTS["led"]), "generated_by": "led_indicators", "target": circuit.get("target")})
         self._add_connection(led_net, led_ref, "2", path)
         self._add_connection(str(ground), led_ref, "1", path)
 
@@ -522,7 +524,7 @@ class _DesignIntentCompiler:
         pins = circuit.get("pins", [])
         pin_count = int(circuit.get("pin_count") or len(pins) or 2)
         ref = str(circuit.get("ref") or self._allocate("J", "headers"))
-        self._add_header_part(ref, pin_count, str(circuit.get("footprint") or _header_footprint(pin_count)), circuit.get("value") or circuit.get("name") or "HEADER")
+        self._add_header_part(ref, pin_count, str(circuit.get("footprint") or _header_footprint(pin_count)), circuit.get("value") or circuit.get("name") or "HEADER", {"generated_by": "headers", "target": circuit.get("target")})
         if isinstance(pins, list):
             for index, net in enumerate(pins, start=1):
                 if net:
@@ -534,7 +536,7 @@ class _DesignIntentCompiler:
             self.errors.append({"path": path, "error": "test_point requires net"})
             return
         ref = str(circuit.get("ref") or self._allocate("TP", "test_points"))
-        self._add_part({"ref": ref, "lib_id": "Connector:TestPoint", "value": str(circuit.get("value") or net), "footprint": str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["test_point"])})
+        self._add_part({"ref": ref, "lib_id": "Connector:TestPoint", "value": str(circuit.get("value") or net), "footprint": str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["test_point"]), "generated_by": "test_points", "target": circuit.get("target")})
         self._add_connection(str(net), ref, "1", path)
 
     def _support_power_flag(self, circuit: dict[str, Any], path: str) -> None:
@@ -553,8 +555,8 @@ class _DesignIntentCompiler:
         if not in_net or not out_net:
             self.errors.append({"path": path, "error": "rc_filter requires in_net and out_net"})
             return
-        self._add_two_pin_part("R", str(circuit.get("resistor") or "100"), str(circuit.get("resistor_footprint") or DEFAULT_FOOTPRINTS["resistor"]), str(in_net), str(out_net), "rc_filters")
-        self._add_two_pin_part("C", str(circuit.get("capacitor") or "100n"), str(circuit.get("capacitor_footprint") or DEFAULT_FOOTPRINTS["capacitor"]), str(out_net), str(ground), "rc_filters")
+        self._add_two_pin_part("R", str(circuit.get("resistor") or "100"), str(circuit.get("resistor_footprint") or DEFAULT_FOOTPRINTS["resistor"]), str(in_net), str(out_net), "rc_filters", {"target": circuit.get("target")})
+        self._add_two_pin_part("C", str(circuit.get("capacitor") or "100n"), str(circuit.get("capacitor_footprint") or DEFAULT_FOOTPRINTS["capacitor"]), str(out_net), str(ground), "rc_filters", {"target": circuit.get("target")})
 
     def _support_ferrite_filter(self, circuit: dict[str, Any], path: str) -> None:
         in_net = circuit.get("in_net")
@@ -562,7 +564,7 @@ class _DesignIntentCompiler:
         if not in_net or not out_net:
             self.errors.append({"path": path, "error": "ferrite_filter requires in_net and out_net"})
             return
-        self._add_two_pin_part("FB", str(circuit.get("value") or "Ferrite"), str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["ferrite"]), str(in_net), str(out_net), "ferrite_filters")
+        self._add_two_pin_part("FB", str(circuit.get("value") or "Ferrite"), str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["ferrite"]), str(in_net), str(out_net), "ferrite_filters", {"target": circuit.get("target")})
 
     def _support_crystal(self, circuit: dict[str, Any], path: str) -> None:
         ref = str(circuit.get("ref") or self._allocate("Y", "crystals"))
@@ -570,7 +572,7 @@ class _DesignIntentCompiler:
         if len(pins) < 2:
             self.errors.append({"path": path, "error": "crystal requires two nets in pins"})
             return
-        self._add_part({"ref": ref, "lib_id": "Device:Crystal", "value": str(circuit.get("value") or "Crystal"), "footprint": circuit.get("footprint")})
+        self._add_part({"ref": ref, "lib_id": "Device:Crystal", "value": str(circuit.get("value") or "Crystal"), "footprint": circuit.get("footprint"), "generated_by": "crystals", "target": circuit.get("target")})
         self._add_connection(str(pins[0]), ref, "1", path)
         self._add_connection(str(pins[1]), ref, "2", path)
 
@@ -581,7 +583,7 @@ class _DesignIntentCompiler:
             self.errors.append({"path": path, "error": "esd_diode requires net"})
             return
         ref = str(circuit.get("ref") or self._allocate("D", "esd_diodes"))
-        self._add_part({"ref": ref, "lib_id": str(circuit.get("lib_id") or "Diode:ESD5Zxx"), "value": str(circuit.get("value") or "ESD"), "footprint": circuit.get("footprint")})
+        self._add_part({"ref": ref, "lib_id": str(circuit.get("lib_id") or "Diode:ESD5Zxx"), "value": str(circuit.get("value") or "ESD"), "footprint": circuit.get("footprint"), "generated_by": "esd_diodes", "target": circuit.get("target")})
         self._add_connection(str(net), ref, "1", path)
         self._add_connection(str(ground), ref, "2", path)
 
@@ -658,17 +660,23 @@ class _DesignIntentCompiler:
         for pin, net in mapping.items():
             self._add_connection(str(net), str(ref), str(pin), path)
 
-    def _add_two_pin_part(self, prefix: str, value: str, footprint: str, net_1: str, net_2: str, bucket: str) -> str:
+    def _add_two_pin_part(self, prefix: str, value: str, footprint: str, net_1: str, net_2: str, bucket: str, metadata: dict[str, Any] | None = None) -> str:
         ref = self._allocate(prefix, bucket)
         symbol_template, _ = PASSIVE_SYMBOLS[prefix]
-        self._add_part({"ref": ref, "lib_id": symbol_template, "value": value, "footprint": footprint})
+        part = {"ref": ref, "lib_id": symbol_template, "value": value, "footprint": footprint, "generated_by": bucket}
+        if metadata:
+            part.update({key: value for key, value in metadata.items() if value is not None})
+        self._add_part(part)
         self._add_connection(net_1, ref, "1", bucket)
         self._add_connection(net_2, ref, "2", bucket)
         return ref
 
-    def _add_header_part(self, ref: str, pin_count: int, footprint: str, value: Any) -> None:
+    def _add_header_part(self, ref: str, pin_count: int, footprint: str, value: Any, metadata: dict[str, Any] | None = None) -> None:
         lib_id = f"Connector_Generic:Conn_01x{pin_count:02d}"
-        self._add_part({"ref": ref, "lib_id": lib_id, "value": str(value), "footprint": footprint})
+        part = {"ref": ref, "lib_id": lib_id, "value": str(value), "footprint": footprint}
+        if metadata:
+            part.update({key: value for key, value in metadata.items() if value is not None})
+        self._add_part(part)
         self._record_generated_ref("headers", ref)
 
     def _add_part(self, part: dict[str, Any]) -> None:

@@ -81,6 +81,11 @@ def attach_net_to_pin(
     label_type: str = "global",
     stub_length_mm: float = 5.08,
     allow_hidden_power: bool = False,
+    *,
+    label_placement: str = "pin_anchor",
+    label_clearance_mm: float = 5.08,
+    label_side: str = "auto",
+    connection_style: str = "label",
 ) -> dict[str, Any]:
     """Attach a short wire and label to a symbol pin in a loaded schematic."""
     pin_map = get_symbol_pin_map_from_schematic(schematic, schematic_path, reference)
@@ -103,16 +108,36 @@ def attach_net_to_pin(
         )
     angle = selected["position"].get("angle", 0.0)
     start = selected["connection_point"]
+    if connection_style == "auto" and _is_power_net(net_name):
+        power = _attach_power_symbol_to_pin(schematic, net_name, start, angle)
+        if power is not None:
+            return {
+                "reference": reference,
+                "pin": selected,
+                "net_name": net_name,
+                "wire": None,
+                "label": None,
+                "power_symbol": power,
+                "stub_endpoint": start,
+            }
     end = {
-        "x": _snap(start["x"] + math.cos(math.radians(angle)) * stub_length_mm),
-        "y": _snap(start["y"] + math.sin(math.radians(angle)) * stub_length_mm),
+        "x": _snap(start["x"] + math.cos(math.radians(angle)) * max(stub_length_mm, label_clearance_mm)),
+        "y": _snap(start["y"] + math.sin(math.radians(angle)) * max(stub_length_mm, label_clearance_mm)),
     }
-    # Pin-anchored labels are the most reliable KiCad-native way to bind a
-    # labeled net to a symbol pin. Generated wire stubs are intentionally not
-    # added here because they can merge nearby power nets when many hidden or
-    # overlapping pins share one connection point.
-    wire = None
-    label = schematic.add_label(net_name, start["x"], start["y"], label_type, angle)
+    if label_placement == "external_stubs":
+        end = _place_external_label_endpoint(schematic, start, angle, net_name, label_side, label_clearance_mm)
+        stub_points = _external_stub_points(start, end, angle, label_side, label_clearance_mm)
+        wire = _add_stub_wires(schematic, stub_points)
+        label = schematic.add_label(
+            net_name,
+            end["x"],
+            end["y"],
+            "local" if label_type == "global" else label_type,
+            _readable_label_angle(angle),
+        )
+    else:
+        wire = None
+        label = schematic.add_label(net_name, start["x"], start["y"], label_type, angle)
     return {
         "reference": reference,
         "pin": selected,
@@ -121,6 +146,145 @@ def attach_net_to_pin(
         "label": label,
         "stub_endpoint": end,
     }
+
+
+def _is_power_net(net_name: str) -> bool:
+    normalized = net_name.upper()
+    return normalized in {"GND", "AGND", "DGND", "+3V3", "+3.3V", "+5V", "VBUS", "VCC", "VDD"}
+
+
+def _power_symbol_lib_id(net_name: str) -> str | None:
+    aliases = {
+        "GND": "power:GND",
+        "AGND": "power:GNDA",
+        "DGND": "power:GNDD",
+        "+3V3": "power:+3V3",
+        "+3.3V": "power:+3V3",
+        "+5V": "power:+5V",
+        "VBUS": "power:VBUS",
+        "VCC": "power:VCC",
+        "VDD": "power:VDD",
+    }
+    return aliases.get(net_name.upper())
+
+
+def _attach_power_symbol_to_pin(
+    schematic: KiCadSchematic,
+    net_name: str,
+    point: dict[str, float],
+    pin_angle: float,
+) -> dict[str, Any] | None:
+    lib_id = _power_symbol_lib_id(net_name)
+    if lib_id is None:
+        return None
+    try:
+        resolved = resolve_symbol(lib_id)
+    except Exception:
+        return None
+    ref = _next_power_reference(schematic)
+    # Place the power symbol origin at the pin point. KiCad power-symbol pins are
+    # defined at the symbol origin, so coincident placement gives a direct net tie.
+    return schematic.add_symbol(
+        lib_id,
+        ref,
+        net_name,
+        point["x"],
+        point["y"],
+        _power_symbol_angle(pin_angle, net_name),
+        None,
+        None,
+        resolved["node"],
+    )
+
+
+def _next_power_reference(schematic: KiCadSchematic) -> str:
+    used = {symbol["reference"] for symbol in schematic.list_symbols()}
+    for index in range(1, 10000):
+        ref = f"#PWR{index:03d}"
+        if ref not in used:
+            return ref
+    raise ValueError("Unable to allocate power symbol reference")
+
+
+def _power_symbol_angle(pin_angle: float, net_name: str) -> float:
+    if net_name.upper() in {"GND", "AGND", "DGND"}:
+        return 0.0
+    if int(pin_angle) % 360 == 90:
+        return 180.0
+    if int(pin_angle) % 360 == 270:
+        return 0.0
+    return 0.0
+
+
+def _place_external_label_endpoint(
+    schematic: KiCadSchematic,
+    start: dict[str, float],
+    angle: float,
+    text: str,
+    label_side: str,
+    clearance_mm: float,
+) -> dict[str, float]:
+    direction = _direction_from_angle(angle, label_side)
+    length = max(clearance_mm, 7.62)
+    base = {
+        "x": _snap(start["x"] + direction["dx"] * length),
+        "y": _snap(start["y"] + direction["dy"] * length),
+    }
+    return base
+
+
+def _external_stub_points(
+    start: dict[str, float],
+    end: dict[str, float],
+    angle: float,
+    label_side: str,
+    clearance_mm: float,
+) -> list[dict[str, float]]:
+    direction = _direction_from_angle(angle, label_side)
+    base = {
+        "x": _snap(start["x"] + direction["dx"] * max(clearance_mm, 7.62)),
+        "y": _snap(start["y"] + direction["dy"] * max(clearance_mm, 7.62)),
+    }
+    if base == end:
+        return [start, end]
+    return [start, base, end]
+
+
+def _add_stub_wires(schematic: KiCadSchematic, points: list[dict[str, float]]) -> Any:
+    wires = []
+    for start, end in zip(points, points[1:]):
+        if start == end:
+            continue
+        wires.append(schematic.add_wire([start, end]))
+    if len(wires) == 1:
+        return wires[0]
+    return {"segments": wires, "points": points}
+
+
+def _direction_from_angle(angle: float, label_side: str) -> dict[str, float]:
+    if label_side == "right":
+        return {"dx": 1.0, "dy": 0.0}
+    if label_side == "left":
+        return {"dx": -1.0, "dy": 0.0}
+    if label_side == "top":
+        return {"dx": 0.0, "dy": -1.0}
+    if label_side == "bottom":
+        return {"dx": 0.0, "dy": 1.0}
+    normalized = int(round(angle / 90.0) * 90) % 360
+    if normalized == 180:
+        return {"dx": -1.0, "dy": 0.0}
+    if normalized == 90:
+        return {"dx": 0.0, "dy": 1.0}
+    if normalized == 270:
+        return {"dx": 0.0, "dy": -1.0}
+    return {"dx": 1.0, "dy": 0.0}
+
+
+def _readable_label_angle(angle: float) -> float:
+    normalized = int(round(angle / 90.0) * 90) % 360
+    if normalized == 180:
+        return 0.0
+    return float(normalized if normalized in {0, 90, 180, 270} else 0)
 
 
 def add_no_connect_to_pin(
