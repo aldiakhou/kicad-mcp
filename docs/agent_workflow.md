@@ -5,14 +5,13 @@ This server is intended to be agent-first: declare electrical intent, let the MC
 Recommended order:
 
 1. `project_design_state`
-2. `create_kicad_project`, if needed
-3. `find_symbols` / `find_footprints` for unknown library IDs
-4. `schematic_preview_build_from_spec_v2`
-5. `schematic_build_from_spec_v2`
+2. `find_symbols` / `find_footprints` for unknown library IDs
+3. `schematic_preview_design_intent`, when you want to inspect expansion first
+4. `schematic_apply_design_intent`
+5. `schematic_build_from_spec_v2`, only when you already have explicit parts/nets
 6. `schematic_apply_connection_plan`, only for incremental edits
 7. `schematic_quality_report`
-8. `run_erc_check`
-9. `project_design_state`
+8. `project_design_state`
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 
@@ -27,7 +26,43 @@ Use this schematic connection shape for incremental work:
 }
 ```
 
-Use this v2 build shape for complete circuits:
+Use this bulk design-intent shape for normal complete circuits:
+
+```json
+{
+  "parts": [
+    {
+      "ref": "U1",
+      "lib_id": "MCU_ST_STM32F1:STM32F103C8Tx",
+      "value": "STM32F103C8T6",
+      "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm"
+    }
+  ],
+  "pin_rules": [
+    {"ref": "U1", "match": {"name_regex": "VDD|VDDA|VBAT"}, "net": "+3V3"},
+    {"ref": "U1", "match": {"name_regex": "VSS|VSSA|GND"}, "net": "GND"}
+  ],
+  "interfaces": [
+    {
+      "type": "i2c",
+      "name": "SENSOR_I2C",
+      "controller": {"ref": "U1", "scl": "PB6", "sda": "PB7"},
+      "devices": [{"ref": "U2", "scl": "SCL", "sda": "SDA"}],
+      "pullups": {"rail": "+3V3", "value": "4.7k"}
+    }
+  ],
+  "support_circuits": [
+    {"type": "decoupling", "target": "U1", "rail": "+3V3", "ground": "GND", "capacitors": ["100n", "4.7u"]}
+  ],
+  "no_connect_rules": [
+    {"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PB6", "PB7"], "action": "mark_no_connect"}
+  ]
+}
+```
+
+`schematic_apply_design_intent` compiles this into v2 `parts`, generated passives/connectors, expanded net memberships, and no-connect markers. It always saves the normalized intent, expanded spec, and report under `.kicad_mcp/`.
+
+Use this lower-level v2 build shape when every connection is already explicit:
 
 ```json
 {
@@ -74,7 +109,7 @@ The MCP layer resolves symbols, resolves pins, snaps generated geometry to the s
 
 ## Tool Profiles
 
-By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only the intent-first schematic/project tools needed for normal design work plus compact fuzzy library search. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
+By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only `schematic_apply_design_intent`, `schematic_preview_design_intent`, `schematic_build_from_spec_v2`, `schematic_apply_connection_plan`, `schematic_quality_report`, `find_symbols`, `find_footprints`, and `project_design_state`. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
 
 Use this for manual schematic edits or library exploration:
 

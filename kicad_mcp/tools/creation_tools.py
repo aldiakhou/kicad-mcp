@@ -15,6 +15,7 @@ from fastmcp import Context, FastMCP
 
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
+from kicad_mcp.utils.design_intent_compiler import compile_design_intent
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb, validate_pcb_text
@@ -127,6 +128,47 @@ def register_creation_tools(mcp: FastMCP) -> None:
         first when unsure. Nets may use ["U1", "1"] or {"ref": "U1", "pin": "1"} endpoints.
         """
         return preview_build_from_spec_v2(project_path, spec)
+
+    @mcp.tool()
+    def schematic_preview_design_intent(project_path: str, intent: dict[str, Any]) -> dict[str, Any]:
+        """Compile generic bulk design intent into a v2 schematic spec without writing."""
+        return _schematic_design_intent_response(
+            project_path,
+            intent,
+            mode="update",
+            dry_run=True,
+            strict=False,
+            detail="compact",
+            include_expanded_spec=False,
+            tool_name="schematic_preview_design_intent",
+        )
+
+    @mcp.tool()
+    def schematic_apply_design_intent(
+        project_path: str,
+        intent: dict[str, Any],
+        mode: str = "update",
+        dry_run: bool = False,
+        strict: bool = False,
+        detail: str = "compact",
+        include_expanded_spec: bool = False,
+    ) -> dict[str, Any]:
+        """Compile and apply generic bulk schematic design intent.
+
+        Prefer this high-level tool for agent schematic generation. Intent may describe
+        parts, rails, pin_rules, interfaces, support_circuits, bulk_connections, and
+        no_connect_rules; the compiler expands those into the v2 build spec.
+        """
+        return _schematic_design_intent_response(
+            project_path,
+            intent,
+            mode=mode,
+            dry_run=dry_run,
+            strict=strict,
+            detail=detail,
+            include_expanded_spec=include_expanded_spec,
+            tool_name="schematic_apply_design_intent",
+        )
 
     @mcp.tool()
     def schematic_build_from_spec(
@@ -1113,6 +1155,91 @@ def _schematic_file_path(project_or_schematic_path: str) -> str:
     if "schematic" not in files:
         raise FileNotFoundError("Schematic file not found")
     return files["schematic"]
+
+
+def _schematic_design_intent_response(
+    project_path: str,
+    intent: dict[str, Any],
+    *,
+    mode: str,
+    dry_run: bool,
+    strict: bool,
+    detail: str,
+    include_expanded_spec: bool,
+    tool_name: str,
+) -> dict[str, Any]:
+    compiled = compile_design_intent(project_path, intent, strict=strict)
+    base: dict[str, Any] = {
+        "success": compiled.get("success", False),
+        "tool": tool_name,
+        "stage": "compiled" if dry_run else "compile_failed",
+        "mode": mode,
+        "dry_run": dry_run,
+        "changed": False,
+        "summary": compiled.get("summary", {}),
+        "generated_refs": compiled.get("generated_refs", {}),
+        "warnings": compiled.get("warnings", []),
+        "errors": compiled.get("errors", []),
+        "expanded_spec_path": compiled.get("expanded_spec_path"),
+        "normalized_intent_path": compiled.get("normalized_intent_path"),
+        "report_path": compiled.get("report_path"),
+        "recommended_next_tool": (
+            "schematic_apply_design_intent" if dry_run else "schematic_quality_report"
+        ),
+    }
+    if include_expanded_spec:
+        base["expanded_spec"] = compiled.get("expanded_spec")
+    if not compiled.get("success"):
+        base["recoverable"] = compiled.get("recoverable", True)
+        return base
+    if dry_run:
+        base["stage"] = "preview"
+        return base
+
+    built = build_schematic_from_spec_v2(
+        project_path,
+        compiled["expanded_spec"],
+        mode=mode,
+        run_erc=strict,
+        allow_destructive_replace=False,
+        detail=detail,
+        include_diff=False,
+        include_preview=False,
+        include_full_native_netlist=False,
+        run_quality_report=False,
+    )
+    base["stage"] = "schematic_built" if built.get("success") else "build_failed"
+    base["success"] = bool(built.get("success"))
+    base["changed"] = bool(built.get("success"))
+    if not built.get("success"):
+        base["error"] = built.get("error", "schematic build failed")
+        if detail == "full":
+            base["build_result"] = built
+        return base
+
+    try:
+        quality = build_quality_report(project_path, run_erc=strict)
+    except Exception as exc:
+        quality = {"success": False, "error": str(exc)}
+    validation = built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
+    post_write = (
+        validation.get("post_write", {})
+        if isinstance(validation.get("post_write"), dict)
+        else {}
+    )
+    native = quality.get("native_netlist", {}) if isinstance(quality.get("native_netlist"), dict) else {}
+    erc = quality.get("erc", {}) if isinstance(quality.get("erc"), dict) else {}
+    gate = quality.get("quality_gate", {}) if isinstance(quality.get("quality_gate"), dict) else {}
+    base["verification"] = {
+        "native_netlist_success": native.get("success"),
+        "missing_connection_count": len(post_write.get("missing", [])),
+        "erc_total_violations": erc.get("total_violations", 0),
+        "quality_gate_passed": gate.get("passed"),
+    }
+    if detail == "full":
+        base["build_result"] = built
+        base["quality_report"] = quality
+    return base
 
 
 def _schematic_explain_erc(

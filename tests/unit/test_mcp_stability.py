@@ -80,8 +80,10 @@ async def test_create_server_registers_smoke_resources_and_tools():
     resource_templates = await server.get_resource_templates()
 
     assert set(tools) == AGENT_PROFILE_TOOLS
+    assert "schematic_apply_design_intent" in tools
+    assert "schematic_preview_design_intent" in tools
     assert "schematic_build_from_spec_v2" in tools
-    assert "schematic_connect_pin_to_net" in tools
+    assert "schematic_connect_pin_to_net" not in tools
     assert "schematic_add_wire" not in tools
     assert "schematic_get_pin_map" not in tools
     assert "schematic_build_from_spec" not in tools

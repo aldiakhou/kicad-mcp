@@ -60,26 +60,13 @@ SUPPORTED_TOOL_PROFILES = {"agent", "default", "advanced", "debug", "all"}
 DEFAULT_TOOL_PROFILE = "agent"
 AGENT_PROFILE_TOOLS = {
     "project_design_state",
-    "create_kicad_project",
-    "discover_projects",
-    "get_project_structure",
-    "schematic_preview_build_from_spec_v2",
+    "schematic_apply_design_intent",
+    "schematic_preview_design_intent",
     "schematic_build_from_spec_v2",
     "schematic_apply_connection_plan",
-    "schematic_connect_pin_to_net",
-    "schematic_connect_pins",
-    "schematic_connect_pin_to_power",
-    "schematic_connect_pin_to_ground",
-    "schematic_add_no_connect",
     "schematic_quality_report",
-    "schematic_explain_erc",
-    "schematic_plan_erc_fixes",
-    "schematic_apply_safe_erc_fixes",
-    "run_erc_check",
     "find_symbols",
     "find_footprints",
-    "resolve_symbol",
-    "resolve_footprint",
 }
 ADVANCED_PROFILE_TOOLS = {
     "create_schematic_file",
