@@ -1164,6 +1164,21 @@ def _schematic_file_path(project_or_schematic_path: str) -> str:
     return files["schematic"]
 
 
+def _design_intent_artifact_dir(project_path: str) -> Path:
+    path = Path(project_path)
+    if path.suffix in {".kicad_pro", ".kicad_sch"}:
+        return path.parent / ".kicad_mcp"
+    return path / ".kicad_mcp"
+
+
+def _save_visual_expanded_spec(project_path: str, spec: dict[str, Any]) -> str:
+    artifact_dir = _design_intent_artifact_dir(project_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    output_path = artifact_dir / "design_intent.visual_expanded_spec.json"
+    output_path.write_text(json.dumps(spec, indent=2, sort_keys=True), encoding="utf-8")
+    return str(output_path)
+
+
 def _schematic_design_intent_response(
     project_path: str,
     intent: dict[str, Any],
@@ -1180,6 +1195,7 @@ def _schematic_design_intent_response(
     compiled = compile_design_intent(project_path, intent, strict=strict)
     expanded_spec = compiled.get("expanded_spec")
     visual_summary = {"enabled": False}
+    visual_expanded_spec_path: str | None = None
     if compiled.get("success") and isinstance(expanded_spec, dict) and visual_layout:
         expanded_spec = apply_visual_layout_to_v2_spec(
             expanded_spec,
@@ -1190,6 +1206,15 @@ def _schematic_design_intent_response(
             "visual_layout",
             {"enabled": True, "style": visual_style},
         )
+        try:
+            visual_expanded_spec_path = _save_visual_expanded_spec(project_path, expanded_spec)
+        except Exception as exc:
+            compiled.setdefault("warnings", []).append(
+                {
+                    "path": ".kicad_mcp/design_intent.visual_expanded_spec.json",
+                    "warning": f"failed to save visual expanded spec: {exc}",
+                }
+            )
     base: dict[str, Any] = {
         "success": compiled.get("success", False),
         "tool": tool_name,
@@ -1202,6 +1227,7 @@ def _schematic_design_intent_response(
         "warnings": compiled.get("warnings", []),
         "errors": compiled.get("errors", []),
         "expanded_spec_path": compiled.get("expanded_spec_path"),
+        "visual_expanded_spec_path": visual_expanded_spec_path,
         "normalized_intent_path": compiled.get("normalized_intent_path"),
         "report_path": compiled.get("report_path"),
         "visual_layout": visual_summary,

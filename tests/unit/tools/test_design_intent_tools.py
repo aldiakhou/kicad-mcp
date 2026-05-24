@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,10 @@ async def test_schematic_preview_design_intent_returns_compact_expanded_summary(
     assert "expanded_spec" not in result
     assert "diff" not in result
     assert Path(result["expanded_spec_path"]).exists()
+    assert Path(result["visual_expanded_spec_path"]).exists()
+    visual_spec = json.loads(Path(result["visual_expanded_spec_path"]).read_text(encoding="utf-8"))
+    assert visual_spec["layout_hints"]["label_strategy"] == "external_stubs"
+    assert visual_spec["parts"][0]["x"] is not None
 
 
 @pytest.mark.asyncio
@@ -87,6 +92,7 @@ async def test_schematic_apply_design_intent_dry_run_can_include_expanded_spec(t
     assert result["recommended_next_tool"] == "schematic_apply_design_intent"
     assert "expanded_spec" in result
     assert result["expanded_spec"]["nets"]["SENSOR_I2C_SCL"]
+    assert Path(result["visual_expanded_spec_path"]).exists()
 
 
 @pytest.mark.asyncio

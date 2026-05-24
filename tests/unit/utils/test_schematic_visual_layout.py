@@ -6,6 +6,11 @@ from kicad_mcp.utils.schematic_builder import (
     normalize_build_spec_v2,
     schematic_quality_report,
 )
+from kicad_mcp.utils.schematic_pins import (
+    _place_external_label_endpoint,
+    _rects_intersect,
+    _text_rect,
+)
 from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
 
 
@@ -99,3 +104,22 @@ def test_external_stub_labels_are_outside_symbol_body(tmp_path: Path, monkeypatc
     assert len(KiCadSchematic.from_file(str(schematic_path)).list_wires()) == 2
     assert quality["visual_quality"]["label_inside_symbol_count"] == 0
     assert quality["visual_quality"]["unreadable_label_orientation_count"] == 0
+
+
+def test_external_stub_label_endpoint_shifts_away_from_existing_label():
+    schematic = KiCadSchematic.empty()
+    schematic.add_label("GPIO_A", 10.16, 10.16, "local", 0)
+
+    endpoint = _place_external_label_endpoint(
+        schematic,
+        {"x": 2.54, "y": 10.16},
+        0,
+        "GPIO_B",
+        "auto",
+        7.62,
+    )
+
+    assert endpoint != {"x": 10.16, "y": 10.16}
+    existing_rect = _text_rect({"x": 10.16, "y": 10.16}, "GPIO_A", 0)
+    new_rect = _text_rect(endpoint, "GPIO_B", 0)
+    assert not _rects_intersect(existing_rect, new_rect, padding=0.5)

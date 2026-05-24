@@ -230,6 +230,22 @@ def _place_external_label_endpoint(
         "x": _snap(start["x"] + direction["dx"] * length),
         "y": _snap(start["y"] + direction["dy"] * length),
     }
+    occupied = [_label_rect(label) for label in schematic.list_labels()]
+    if not occupied:
+        return base
+    label_angle = _readable_label_angle(angle)
+    perpendicular = {"dx": -direction["dy"], "dy": direction["dx"]}
+    for step in range(0, 18):
+        offset = step * SCHEMATIC_GRID_MM * 2.0
+        signs = [1.0] if step == 0 else [1.0, -1.0]
+        for sign in signs:
+            candidate = {
+                "x": _snap(base["x"] + perpendicular["dx"] * offset * sign),
+                "y": _snap(base["y"] + perpendicular["dy"] * offset * sign),
+            }
+            candidate_rect = _text_rect(candidate, text, label_angle)
+            if not any(_rects_intersect(candidate_rect, rect, padding=0.5) for rect in occupied):
+                return candidate
     return base
 
 
@@ -285,6 +301,47 @@ def _readable_label_angle(angle: float) -> float:
     if normalized == 180:
         return 0.0
     return float(normalized if normalized in {0, 90, 180, 270} else 0)
+
+
+def _label_rect(label: dict[str, Any]) -> tuple[float, float, float, float]:
+    position = label.get("position", {})
+    return _text_rect(
+        {
+            "x": float(position.get("x", 0.0)),
+            "y": float(position.get("y", 0.0)),
+        },
+        str(label.get("text") or ""),
+        float(position.get("angle", 0.0)),
+    )
+
+
+def _text_rect(
+    position: dict[str, float], text: str, angle: float
+) -> tuple[float, float, float, float]:
+    x = float(position.get("x", 0.0))
+    y = float(position.get("y", 0.0))
+    width = max(3.0, len(text) * 0.9)
+    height = 2.0
+    normalized = float(angle) % 360
+    if normalized in {90.0, 270.0}:
+        return (x - height / 2.0, y, x + height / 2.0, y + width)
+    if normalized == 180.0:
+        return (x - width, y - height / 2.0, x, y + height / 2.0)
+    return (x, y - height / 2.0, x + width, y + height / 2.0)
+
+
+def _rects_intersect(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    *,
+    padding: float = 0.0,
+) -> bool:
+    return not (
+        first[2] + padding <= second[0]
+        or first[0] - padding >= second[2]
+        or first[3] + padding <= second[1]
+        or first[1] - padding >= second[3]
+    )
 
 
 def add_no_connect_to_pin(
