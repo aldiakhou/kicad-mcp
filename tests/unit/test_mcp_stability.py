@@ -80,10 +80,16 @@ async def test_create_server_registers_smoke_resources_and_tools():
     resource_templates = await server.get_resource_templates()
 
     assert set(tools) == AGENT_PROFILE_TOOLS
+    assert "create_kicad_project" in tools
+    assert "discover_projects" in tools
+    assert "get_project_structure" in tools
     assert "schematic_apply_design_intent" in tools
     assert "schematic_preview_design_intent" in tools
     assert "schematic_build_from_spec_v2" in tools
+    assert "run_erc_check" in tools
     assert "schematic_connect_pin_to_net" not in tools
+    assert "resolve_symbol" in tools
+    assert "resolve_footprint" in tools
     assert "schematic_add_wire" not in tools
     assert "schematic_get_pin_map" not in tools
     assert "schematic_build_from_spec" not in tools

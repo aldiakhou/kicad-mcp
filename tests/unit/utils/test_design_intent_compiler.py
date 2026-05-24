@@ -198,6 +198,39 @@ def test_swd_interface_generates_header_connections(tmp_path: Path):
     assert ["J1", "2"] in result["expanded_spec"]["nets"]["SWDIO"]
 
 
+def test_interface_endpoint_typo_fails_during_compile(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": _base_parts()[:2],
+            "interfaces": [
+                {
+                    "type": "i2c",
+                    "name": "SENSOR_I2C",
+                    "controller": {"ref": "U1", "scl": "P86", "sda": "PB7"},
+                    "devices": [{"ref": "U2", "scl": "SCL", "sda": "SDA"}],
+                }
+            ],
+        },
+    )
+
+    assert result["success"] is False
+    assert any(error["error"] == "unknown pin" and error["pin"] == "P86" for error in result["errors"])
+
+
+def test_bulk_connection_pin_typo_fails_during_compile(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [_base_parts()[0]],
+            "bulk_connections": [{"net": "RESET_N", "pins": [["U1", "NRST_BAD"]]}],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["errors"][0]["error"] == "unknown pin"
+
+
 def test_decoupling_support_circuit_generates_capacitors_and_nets(tmp_path: Path):
     result = compile_design_intent(
         str(tmp_path),
@@ -219,6 +252,47 @@ def test_decoupling_support_circuit_generates_capacitors_and_nets(tmp_path: Path
     assert result["generated_refs"]["decoupling"] == ["C1", "C2", "C3"]
     assert ["C1", "1"] in result["expanded_spec"]["nets"]["+3V3"]
     assert ["C1", "2"] in result["expanded_spec"]["nets"]["GND"]
+
+
+def test_led_indicator_uses_led_anode_toward_rail_and_cathode_to_ground(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "support_circuits": [
+                {
+                    "type": "led_indicator",
+                    "name": "POWER_LED",
+                    "rail": "+3V3",
+                    "ground": "GND",
+                    "resistor": "1k",
+                }
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    assert ["D1", "2"] in result["expanded_spec"]["nets"]["POWER_LED_K"]
+    assert ["D1", "1"] in result["expanded_spec"]["nets"]["GND"]
+
+
+def test_ferrite_filter_uses_kicad_ferrite_bead_symbol(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "support_circuits": [
+                {
+                    "type": "ferrite_filter",
+                    "in_net": "+3V3",
+                    "out_net": "+3V3_FILTERED",
+                    "footprint": "Inductor_SMD:L_0603_1608Metric",
+                }
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    ferrite = next(part for part in result["expanded_spec"]["parts"] if part["ref"] == "FB1")
+    assert ferrite["lib_id"] == "Device:FerriteBead"
 
 
 def test_no_connect_rules_mark_unused_gpio_pins(tmp_path: Path):

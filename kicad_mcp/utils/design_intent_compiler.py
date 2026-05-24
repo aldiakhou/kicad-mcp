@@ -33,7 +33,7 @@ PASSIVE_SYMBOLS = {
     "SW": ("Switch:SW_Push", "switch"),
     "J": ("Connector_Generic:Conn_01x{pin_count}", "header_1x{pin_count:02d}"),
     "TP": ("Connector:TestPoint", "test_point"),
-    "FB": ("Device:Ferrite_Bead", "ferrite"),
+    "FB": ("Device:FerriteBead", "ferrite"),
     "#FLG": ("power:PWR_FLAG", None),
 }
 
@@ -515,8 +515,8 @@ class _DesignIntentCompiler:
         self._add_two_pin_part("R", str(circuit.get("resistor") or "1k"), str(circuit.get("resistor_footprint") or DEFAULT_FOOTPRINTS["resistor"]), str(rail), led_net, "led_indicators")
         led_ref = self._allocate("D", "led_indicators")
         self._add_part({"ref": led_ref, "lib_id": "Device:LED", "value": str(circuit.get("led_color") or "LED"), "footprint": str(circuit.get("led_footprint") or DEFAULT_FOOTPRINTS["led"])})
-        self._add_connection(led_net, led_ref, "1", path)
-        self._add_connection(str(ground), led_ref, "2", path)
+        self._add_connection(led_net, led_ref, "2", path)
+        self._add_connection(str(ground), led_ref, "1", path)
 
     def _support_connector_header(self, circuit: dict[str, Any], path: str) -> None:
         pins = circuit.get("pins", [])
@@ -705,6 +705,50 @@ class _DesignIntentCompiler:
             return name
         return number or name
 
+    def _resolve_pin_identifier(
+        self, ref: str, requested_pin: str, path: str
+    ) -> tuple[str, dict[str, Any] | None] | None:
+        pins = self.pin_maps.get(ref)
+        if pins is None:
+            return requested_pin, None
+        matches = [
+            pin
+            for pin in pins
+            if str(pin.get("number") or "") == requested_pin
+            or str(pin.get("name") or "") == requested_pin
+            or str(pin.get("pinfunction") or "") == requested_pin
+        ]
+        if not matches:
+            self.errors.append(
+                {
+                    "path": path,
+                    "error": "unknown pin",
+                    "ref": ref,
+                    "pin": requested_pin,
+                }
+            )
+            return None
+        if len(matches) > 1:
+            self.errors.append(
+                {
+                    "path": path,
+                    "error": "pin identifier is ambiguous",
+                    "ref": ref,
+                    "pin": requested_pin,
+                    "matches": [
+                        {
+                            "number": pin.get("number"),
+                            "name": pin.get("name"),
+                            "pinfunction": pin.get("pinfunction"),
+                        }
+                        for pin in matches
+                    ],
+                }
+            )
+            return None
+        pin_info = matches[0]
+        return self._pin_identifier(ref, pin_info), pin_info
+
     def _add_connection(self, net: str, ref: str, pin: str, path: str, pin_info: dict[str, Any] | None = None) -> None:
         if not net or not ref or not pin:
             self.errors.append({"path": path, "error": "connection requires net, ref, and pin"})
@@ -712,13 +756,19 @@ class _DesignIntentCompiler:
         if ref not in self.pin_maps and ref not in {str(part.get("ref")) for part in self.parts}:
             self.errors.append({"path": path, "error": "unknown ref", "ref": ref})
             return
+        resolved_pin_info = pin_info
+        if pin_info is None:
+            resolved = self._resolve_pin_identifier(ref, pin, path)
+            if resolved is None:
+                return
+            pin, resolved_pin_info = resolved
         key = (ref, pin)
         existing = self.pin_assignments.get(key)
         if existing and existing != net:
             self.errors.append({"path": path, "error": "same ref/pin assigned to two different nets", "ref": ref, "pin": pin, "first_net": existing, "second_net": net})
             return
         self.pin_assignments[key] = net
-        mismatch = _power_ground_mismatch(pin_info if pin_info is not None else {"name": pin, "number": pin}, net)
+        mismatch = _power_ground_mismatch(resolved_pin_info if resolved_pin_info is not None else {"name": pin, "number": pin}, net)
         if mismatch:
             self.errors.append({"path": path, **mismatch, "ref": ref, "pin": pin, "net": net})
             return

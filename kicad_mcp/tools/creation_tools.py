@@ -1236,6 +1236,22 @@ def _schematic_design_intent_response(
         "erc_total_violations": erc.get("total_violations", 0),
         "quality_gate_passed": gate.get("passed"),
     }
+    if strict and (
+        base["verification"]["native_netlist_success"] is not True
+        or base["verification"]["missing_connection_count"] > 0
+        or base["verification"]["quality_gate_passed"] is not True
+        or int(base["verification"]["erc_total_violations"] or 0) > 0
+    ):
+        base["success"] = False
+        base["stage"] = "verification_failed"
+        base["recoverable"] = True
+        base["errors"].append(
+            {
+                "path": "verification",
+                "error": "strict mode verification failed",
+                "verification": base["verification"],
+            }
+        )
     if detail == "full":
         base["build_result"] = built
         base["quality_report"] = quality

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from kicad_mcp.server import create_server
+from kicad_mcp.tools import creation_tools
 
 
 def _tool_intent() -> dict:
@@ -107,3 +108,106 @@ async def test_schematic_apply_design_intent_reports_compile_errors_before_build
     assert result["stage"] == "compile_failed"
     assert result["recoverable"] is True
     assert result["errors"][0]["error"] == "selector matched zero pins"
+
+
+def test_schematic_apply_design_intent_strict_fails_on_bad_quality_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        creation_tools,
+        "compile_design_intent",
+        lambda project_path, intent, strict=False: {
+            "success": True,
+            "expanded_spec": {"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}},
+            "summary": {},
+            "generated_refs": {},
+            "warnings": [],
+            "errors": [],
+            "expanded_spec_path": str(tmp_path / "expanded.json"),
+        },
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_schematic_from_spec_v2",
+        lambda *args, **kwargs: {
+            "success": True,
+            "validation": {"post_write": {"missing": []}},
+        },
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_quality_report",
+        lambda *args, **kwargs: {
+            "success": True,
+            "native_netlist": {"success": True},
+            "erc": {"total_violations": 1},
+            "quality_gate": {"passed": False},
+        },
+    )
+
+    result = creation_tools._schematic_design_intent_response(
+        str(tmp_path),
+        {},
+        mode="update",
+        dry_run=False,
+        strict=True,
+        detail="compact",
+        include_expanded_spec=False,
+        tool_name="schematic_apply_design_intent",
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "verification_failed"
+    assert result["recoverable"] is True
+    assert result["errors"][0]["error"] == "strict mode verification failed"
+
+
+def test_schematic_apply_design_intent_non_strict_reports_but_allows_bad_quality_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        creation_tools,
+        "compile_design_intent",
+        lambda project_path, intent, strict=False: {
+            "success": True,
+            "expanded_spec": {"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}},
+            "summary": {},
+            "generated_refs": {},
+            "warnings": [],
+            "errors": [],
+            "expanded_spec_path": str(tmp_path / "expanded.json"),
+        },
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_schematic_from_spec_v2",
+        lambda *args, **kwargs: {
+            "success": True,
+            "validation": {"post_write": {"missing": []}},
+        },
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_quality_report",
+        lambda *args, **kwargs: {
+            "success": True,
+            "native_netlist": {"success": True},
+            "erc": {"total_violations": 1},
+            "quality_gate": {"passed": False},
+        },
+    )
+
+    result = creation_tools._schematic_design_intent_response(
+        str(tmp_path),
+        {},
+        mode="update",
+        dry_run=False,
+        strict=False,
+        detail="compact",
+        include_expanded_spec=False,
+        tool_name="schematic_apply_design_intent",
+    )
+
+    assert result["success"] is True
+    assert result["verification"]["erc_total_violations"] == 1
+    assert result["verification"]["quality_gate_passed"] is False

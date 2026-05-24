@@ -60,13 +60,19 @@ SUPPORTED_TOOL_PROFILES = {"agent", "default", "advanced", "debug", "all"}
 DEFAULT_TOOL_PROFILE = "agent"
 AGENT_PROFILE_TOOLS = {
     "project_design_state",
+    "create_kicad_project",
+    "discover_projects",
+    "get_project_structure",
     "schematic_apply_design_intent",
     "schematic_preview_design_intent",
     "schematic_build_from_spec_v2",
     "schematic_apply_connection_plan",
     "schematic_quality_report",
+    "run_erc_check",
     "find_symbols",
     "find_footprints",
+    "resolve_symbol",
+    "resolve_footprint",
 }
 ADVANCED_PROFILE_TOOLS = {
     "create_schematic_file",

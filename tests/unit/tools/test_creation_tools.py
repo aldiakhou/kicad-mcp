@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from kicad_mcp.server import create_server
-from kicad_mcp.tools.creation_tools import _create_kicad_project
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 
 
@@ -1095,7 +1094,7 @@ async def test_agent_search_tools_and_compact_v2_build_defaults(
     assert footprints["success"] is True
     assert footprints["matches"][0]["footprint_id"] == "Resistor_SMD:R_0603_1608Metric"
 
-    project = _create_kicad_project(str(tmp_path), "compact_demo", True, True, "A4")
+    project = tools["create_kicad_project"].fn(str(tmp_path), "compact_demo", True, True, "A4")
     built = tools["schematic_build_from_spec_v2"].fn(
         project["project_path"],
         {
