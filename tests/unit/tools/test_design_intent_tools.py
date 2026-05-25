@@ -124,6 +124,9 @@ async def test_schematic_design_intent_schema_returns_executable_examples(tmp_pa
     schema = tools["schematic_design_intent_schema"].fn("all")
 
     assert schema["success"] is True
+    assert "intent" in schema["schemas"]
+    assert "interfaces" in schema["schemas"]["intent"]["accepted_top_level_shape"]
+    assert isinstance(schema["schemas"]["intent"]["accepted_top_level_shape"]["interfaces"], dict)
     assert "support_circuits.decoupling" in schema["schemas"]
     assert schema["schemas"]["rails"]["alternate_example"] == [
         {"name": "+3V3", "pins": [["U1", "VDD"]]}

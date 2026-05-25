@@ -9,9 +9,11 @@ Recommended order:
 3. `schematic_preview_design_intent`, when you want to inspect expansion first
 4. `schematic_apply_design_intent`
 5. `schematic_build_from_spec_v2`, only when you already have explicit parts/nets
-6. `schematic_apply_connection_plan`, only for incremental edits
-7. `schematic_quality_report`
-8. `project_design_state`
+6. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
+7. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
+8. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
+9. `schematic_quality_report`
+10. `project_design_state`
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 
@@ -118,7 +120,7 @@ The MCP layer resolves symbols, resolves pins, snaps generated geometry to the s
 
 ## Tool Profiles
 
-By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes the design-intent workflow tools, footprint assignment/report tools, ERC explanation/fix planning tools, symbol/footprint search and resolve tools, and `project_design_state`. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
+By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes the design-intent workflow tools, schematic preview/export, functional layout, safe delete/grid helpers, simple pin connection wrappers, footprint assignment/report tools, ERC explanation/fix planning tools, symbol/footprint search and resolve tools, and `project_design_state`. Raw coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, broad export helpers, and analysis tools are hidden from the normal LLM tool list.
 
 Use this for manual schematic edits or library exploration:
 

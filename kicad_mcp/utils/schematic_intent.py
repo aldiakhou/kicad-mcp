@@ -284,7 +284,10 @@ def normalize_connections(connections: list[dict[str, Any]]) -> dict[str, Any]:
         try:
             normalized.extend(_normalize_connection(connection))
         except Exception as exc:
-            failed.append({"index": index, "connection": connection, "reason": str(exc)})
+            failure = {"index": index, "connection": connection, "reason": str(exc)}
+            if str(exc).startswith("Unsupported connection type"):
+                failure["supported_examples"] = _supported_connection_examples()
+            failed.append(failure)
     return {"connections": normalized, "failed_connections": failed}
 
 
@@ -510,6 +513,20 @@ def _normalize_connection(connection: dict[str, Any]) -> list[dict[str, Any]]:
             _pin_to_net(connection, end["ref"], end["pin"], net_name),
         ]
     raise ValueError(f"Unsupported connection type: {ctype or '<missing>'}")
+
+
+def _supported_connection_examples() -> list[dict[str, Any]]:
+    return [
+        {"type": "pin_to_net", "ref": "U1", "pin": "PA13", "net": "SWDIO"},
+        {
+            "type": "pin_to_pin",
+            "from": {"ref": "U1", "pin": "PA13"},
+            "to": {"ref": "J1", "pin": "2"},
+            "net": "SWDIO",
+        },
+        {"type": "pin_to_ground", "ref": "U1", "pin": "VSS", "net": "GND"},
+        {"type": "pin_to_power", "ref": "U1", "pin": "VDD", "net": "+3V3"},
+    ]
 
 
 def _pin_to_net(source: dict[str, Any], ref: Any, pin: Any, net: Any) -> dict[str, Any]:

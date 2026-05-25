@@ -39,6 +39,44 @@ PASSIVE_SYMBOLS = {
 }
 
 
+DESIGN_INTENT_TOP_LEVEL_SCHEMA = {
+    "accepted_top_level_shape": {
+        "parts": [],
+        "rails": {},
+        "pin_rules": [],
+        "interfaces": {
+            "i2c": [],
+            "spi": [],
+            "uart": [],
+            "usb2": [],
+            "swd": [],
+            "gpio": [],
+            "interrupt": [],
+            "analog": [],
+            "power": [],
+        },
+        "support_circuits": {
+            "decoupling": [],
+            "pullup": [],
+            "pulldown": [],
+            "crystal": [],
+            "reset_button": [],
+            "led_indicator": [],
+            "ferrite_filter": [],
+            "power_flag": [],
+            "connector_header": [],
+        },
+        "bulk_connections": [],
+        "no_connect_rules": [],
+        "layout_hints": {},
+    },
+    "alternate_flat_shape": {
+        "interfaces": [{"type": "i2c"}],
+        "support_circuits": [{"type": "decoupling"}],
+    },
+}
+
+
 DESIGN_INTENT_SCHEMA = {
     "parts": {
         "example": [
@@ -132,10 +170,11 @@ DESIGN_INTENT_SCHEMA = {
     },
     "support_circuits.crystal": {
         "example": [{"type": "crystal", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "value": "8MHz"}],
+        "grounded_example": [{"type": "crystal", "lib_id": "Device:Crystal_GND2", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "ground": "GND", "value": "8MHz"}],
         "required_fields": ["type", "pins"],
-        "optional_fields": ["target", "ref", "value", "footprint"],
+        "optional_fields": ["target", "ref", "value", "footprint", "lib_id", "symbol", "ground"],
         "generated_parts_summary": "One crystal.",
-        "generated_nets_summary": "Crystal pins 1 and 2 connect to the two listed nets.",
+        "generated_nets_summary": "Crystal pins 1 and 2 connect to the two listed nets; grounded symbols also connect ground pins.",
     },
     "support_circuits.reset_button": {
         "example": [{"type": "reset_button", "target": "U1", "pin": "NRST", "net": "RESET_N", "rail": "+3V3", "pullup": "10k", "ground": "GND"}],
@@ -189,7 +228,15 @@ def design_intent_schema(section: str = "all") -> dict[str, Any]:
     """Return compact design-intent examples and field metadata for agents."""
     normalized = str(section or "all").strip().lower()
     if normalized == "all":
-        return {"success": True, "section": "all", "schemas": deepcopy(DESIGN_INTENT_SCHEMA)}
+        schemas = {"intent": deepcopy(DESIGN_INTENT_TOP_LEVEL_SCHEMA)}
+        schemas.update(deepcopy(DESIGN_INTENT_SCHEMA))
+        return {"success": True, "section": "all", "schemas": schemas}
+    if normalized in {"intent", "top_level", "top-level"}:
+        return {
+            "success": True,
+            "section": "intent",
+            "schema": deepcopy(DESIGN_INTENT_TOP_LEVEL_SCHEMA),
+        }
     if normalized in DESIGN_INTENT_SCHEMA:
         return {"success": True, "section": normalized, "schema": deepcopy(DESIGN_INTENT_SCHEMA[normalized])}
     prefix = f"{normalized}."
@@ -320,22 +367,59 @@ class _DesignIntentCompiler:
             return _empty_intent()
         normalized = _empty_intent()
         normalized.update({key: deepcopy(value) for key, value in self.intent.items() if key in normalized})
-        for key in (
-            "parts",
-            "pin_rules",
-            "interfaces",
-            "support_circuits",
-            "bulk_connections",
-            "no_connect_rules",
-        ):
+        for key in ("parts", "pin_rules", "bulk_connections", "no_connect_rules"):
             if not isinstance(normalized[key], list):
                 self.errors.append({"path": key, "error": f"{key} must be a list"})
                 normalized[key] = []
+        normalized["interfaces"] = self._normalize_grouped_entries(
+            normalized["interfaces"],
+            "interfaces",
+        )
+        normalized["support_circuits"] = self._normalize_grouped_entries(
+            normalized["support_circuits"],
+            "support_circuits",
+        )
         normalized["rails"] = self._normalize_rails(normalized["rails"])
         if not isinstance(normalized["layout_hints"], dict):
             self.errors.append({"path": "layout_hints", "error": "layout_hints must be an object"})
             normalized["layout_hints"] = {}
         return normalized
+
+    def _normalize_grouped_entries(self, value: Any, path: str) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        if not isinstance(value, dict):
+            self.errors.append({"path": path, "error": f"{path} must be a list or grouped object"})
+            return []
+
+        flattened: list[Any] = []
+        for group, entries in value.items():
+            group_path = f"{path}.{group}"
+            if isinstance(entries, dict):
+                candidate_entries = [entries]
+            elif isinstance(entries, list):
+                candidate_entries = entries
+            else:
+                self.errors.append(
+                    {
+                        "path": group_path,
+                        "error": f"{path} group must be a list or object",
+                    }
+                )
+                continue
+            for index, entry in enumerate(candidate_entries):
+                if not isinstance(entry, dict):
+                    self.errors.append(
+                        {
+                            "path": f"{group_path}[{index}]",
+                            "error": f"{path} entry must be an object",
+                        }
+                    )
+                    continue
+                normalized_entry = deepcopy(entry)
+                normalized_entry.setdefault("type", str(group))
+                flattened.append(normalized_entry)
+        return flattened
 
     def _normalize_rails(self, rails: Any) -> dict[str, Any]:
         if isinstance(rails, dict):
@@ -761,9 +845,90 @@ class _DesignIntentCompiler:
         if len(pins) < 2:
             self.errors.append({"path": path, "error": "crystal requires two nets in pins"})
             return
-        self._add_part({"ref": ref, "lib_id": "Device:Crystal", "value": str(circuit.get("value") or "Crystal"), "footprint": circuit.get("footprint") or DEFAULT_FOOTPRINTS["crystal"], "generated_by": "crystals", "target": circuit.get("target")})
+        lib_id = str(circuit.get("lib_id") or circuit.get("symbol") or "Device:Crystal")
+        ground_pins = self._crystal_ground_pins(lib_id, circuit, path)
+        if ground_pins is None:
+            return
+        self._add_part({"ref": ref, "lib_id": lib_id, "value": str(circuit.get("value") or "Crystal"), "footprint": circuit.get("footprint") or DEFAULT_FOOTPRINTS["crystal"], "generated_by": "crystals", "target": circuit.get("target")})
         self._add_connection(str(pins[0]), ref, "1", path)
         self._add_connection(str(pins[1]), ref, "2", path)
+        ground_net = str(circuit.get("ground") or "GND")
+        for pin in ground_pins:
+            self._add_connection(ground_net, ref, pin, path)
+
+    def _crystal_ground_pins(
+        self,
+        lib_id: str,
+        circuit: dict[str, Any],
+        path: str,
+    ) -> list[str] | None:
+        grounded_requested = bool(circuit.get("ground")) or "GND" in lib_id.upper()
+        resolved_pins: list[dict[str, Any]] | None = None
+        try:
+            resolved_pins = _resolve_symbol_pins(lib_id)
+        except Exception as exc:
+            if self.strict:
+                self.errors.append(
+                    {
+                        "path": f"{path}.lib_id",
+                        "error": "unable to resolve crystal symbol pins",
+                        "lib_id": lib_id,
+                        "detail": str(exc),
+                    }
+                )
+                return None
+            self.warnings.append(
+                {
+                    "path": f"{path}.lib_id",
+                    "warning": "unable to resolve crystal symbol pins; using KiCad crystal pin convention",
+                    "lib_id": lib_id,
+                    "detail": str(exc),
+                }
+            )
+
+        if resolved_pins is not None:
+            pin_numbers = {str(pin.get("number") or pin.get("pin") or "") for pin in resolved_pins}
+            missing_signal_pins = [pin for pin in ("1", "2") if pin not in pin_numbers]
+            if missing_signal_pins:
+                self.errors.append(
+                    {
+                        "path": f"{path}.lib_id",
+                        "error": "crystal symbol does not expose required signal pins",
+                        "lib_id": lib_id,
+                        "missing_pins": missing_signal_pins,
+                    }
+                )
+                return None
+            detected_ground_pins = [
+                str(pin.get("number") or pin.get("pin"))
+                for pin in resolved_pins
+                if _pin_looks_like_ground(pin)
+            ]
+            if not detected_ground_pins and "GND2" in lib_id.upper() and {"3", "4"}.issubset(pin_numbers):
+                detected_ground_pins = ["3", "4"]
+            if grounded_requested and not detected_ground_pins:
+                self.errors.append(
+                    {
+                        "path": f"{path}.ground",
+                        "error": "grounded crystal requested but symbol has no ground pins",
+                        "lib_id": lib_id,
+                    }
+                )
+                return None
+            return detected_ground_pins if grounded_requested else []
+
+        if grounded_requested:
+            if "GND2" in lib_id.upper():
+                return ["3", "4"]
+            self.errors.append(
+                {
+                    "path": f"{path}.ground",
+                    "error": "grounded crystal requested but symbol pin topology could not be validated",
+                    "lib_id": lib_id,
+                }
+            )
+            return None
+        return []
 
     def _support_esd_diode(self, circuit: dict[str, Any], path: str) -> None:
         net = circuit.get("net")
@@ -1091,6 +1256,15 @@ def _pin_name_counts(pins: list[dict[str, Any]]) -> dict[str, int]:
         if name:
             counts[name] = counts.get(name, 0) + 1
     return counts
+
+
+def _pin_looks_like_ground(pin: dict[str, Any]) -> bool:
+    tokens = {
+        str(pin.get("name") or ""),
+        str(pin.get("pinfunction") or ""),
+        str(pin.get("function") or ""),
+    }
+    return any(token.upper() in {"GND", "VSS", "GNDA", "DGND"} for token in tokens)
 
 
 def _power_ground_mismatch(pin: dict[str, Any], net: str) -> dict[str, Any] | None:

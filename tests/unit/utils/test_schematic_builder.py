@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_mcp.utils import schematic_builder
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.library_resolver import resolve_symbol
@@ -96,6 +97,64 @@ def test_v2_normalizer_accepts_lib_id_alias_and_rsplit_string_endpoint():
     assert normalized["connections"][0]["ref"] == "R10"
     assert normalized["connections"][0]["pin"] == "1"
     assert normalized["normalization_warnings"]
+
+
+def test_v2_builder_applies_readable_defaults_without_explicit_layout(monkeypatch):
+    captured: dict = {}
+
+    def fake_build(project_path, spec, **kwargs):
+        captured["spec"] = spec
+        return {"success": True, "project_path": project_path, **kwargs}
+
+    monkeypatch.setattr(schematic_builder, "build_schematic_from_spec", fake_build)
+
+    result = schematic_builder.build_schematic_from_spec_v2(
+        "demo.kicad_pro",
+        {
+            "custom_parts": [
+                {
+                    "ref": "U1",
+                    "value": "IC",
+                    "pins": [{"number": "1", "name": "A"}, {"number": "2", "name": "B"}],
+                }
+            ],
+            "nets": {"SIG": [["U1", "A"]]},
+        },
+    )
+
+    assert result["success"] is True
+    assert captured["spec"]["paper"] == "A3"
+    assert captured["spec"]["connections"][0]["label_placement"] == "external_stubs"
+    assert captured["spec"]["connections"][0]["connection_style"] == "auto"
+
+
+def test_v2_builder_preserves_explicit_pin_anchor_layout(monkeypatch):
+    captured: dict = {}
+
+    def fake_build(project_path, spec, **kwargs):
+        captured["spec"] = spec
+        return {"success": True, "project_path": project_path, **kwargs}
+
+    monkeypatch.setattr(schematic_builder, "build_schematic_from_spec", fake_build)
+
+    schematic_builder.build_schematic_from_spec_v2(
+        "demo.kicad_pro",
+        {
+            "custom_parts": [
+                {
+                    "ref": "U1",
+                    "value": "IC",
+                    "pins": [{"number": "1", "name": "A"}, {"number": "2", "name": "B"}],
+                }
+            ],
+            "nets": {"SIG": [["U1", "A"]]},
+            "layout_hints": {"label_strategy": "pin_anchor", "connection_style": "label"},
+        },
+    )
+
+    assert captured["spec"]["paper"] == "A4"
+    assert captured["spec"]["connections"][0]["label_placement"] == "pin_anchor"
+    assert captured["spec"]["connections"][0]["connection_style"] == "label"
 
 
 def test_v2_normalizer_rejects_unit_name_without_lib_id():

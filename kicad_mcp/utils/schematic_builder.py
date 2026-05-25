@@ -28,6 +28,7 @@ from kicad_mcp.utils.schematic_pins import (
     get_symbol_pin_map_from_schematic,
     remove_no_connect_at_pin,
 )
+from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
 from kicad_mcp.utils.transactional_edit import export_schematic_svg_file
 
 UNACCEPTABLE_ERC_TYPES = {
@@ -382,6 +383,7 @@ def build_schematic_from_spec_v2(
     run_quality_report: bool = False,
 ) -> dict[str, Any]:
     """Build a schematic from the v2 parts/nets/no_connects spec format."""
+    spec = _apply_default_v2_visual_layout(spec)
     return build_schematic_from_spec(
         project_path,
         normalize_build_spec_v2(spec),
@@ -394,6 +396,15 @@ def build_schematic_from_spec_v2(
         include_full_native_netlist=include_full_native_netlist,
         run_quality_report=run_quality_report,
     )
+
+
+def _apply_default_v2_visual_layout(spec: dict[str, Any]) -> dict[str, Any]:
+    if not _is_v2_spec(spec):
+        return spec
+    layout_hints = spec.get("layout_hints")
+    if isinstance(layout_hints, dict) and layout_hints:
+        return spec
+    return apply_visual_layout_to_v2_spec(spec, page=str(spec.get("paper") or "A3"), style="readable")
 
 
 def cleanup_schematic_visuals(

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import kicad_mcp.utils.design_intent_compiler as compiler
 from kicad_mcp.utils.design_intent_compiler import (
     ReferenceAllocator,
     compile_design_intent,
@@ -158,6 +159,28 @@ def test_i2c_interface_expands_devices_interrupt_address_and_pullups(tmp_path: P
     assert any(part["ref"] == "R1" and part["value"] == "4.7k" for part in result["expanded_spec"]["parts"])
 
 
+def test_grouped_interfaces_inject_type_and_expand(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": _base_parts()[:2],
+            "interfaces": {
+                "i2c": [
+                    {
+                        "name": "SENSOR_I2C",
+                        "controller": {"ref": "U1", "scl": "PB6", "sda": "PB7"},
+                        "devices": [{"ref": "U2", "scl": "SCL", "sda": "SDA"}],
+                    }
+                ]
+            },
+        },
+    )
+
+    assert result["success"] is True
+    assert ["U1", "PB6"] in result["expanded_spec"]["nets"]["SENSOR_I2C_SCL"]
+    assert ["U2", "SDA"] in result["expanded_spec"]["nets"]["SENSOR_I2C_SDA"]
+
+
 def test_spi_interface_expands_controller_and_chip_select(tmp_path: Path):
     result = compile_design_intent(
         str(tmp_path),
@@ -307,6 +330,122 @@ def test_decoupling_support_circuit_generates_capacitors_and_nets(tmp_path: Path
     assert result["generated_refs"]["decoupling"] == ["C1", "C2", "C3"]
     assert ["C1", "1"] in result["expanded_spec"]["nets"]["+3V3"]
     assert ["C1", "2"] in result["expanded_spec"]["nets"]["GND"]
+
+
+def test_grouped_support_circuits_inject_type_and_expand(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [_base_parts()[0]],
+            "support_circuits": {
+                "decoupling": [
+                    {
+                        "target": "U1",
+                        "rail": "+3V3",
+                        "ground": "GND",
+                        "capacitors": ["100n"],
+                    }
+                ]
+            },
+        },
+    )
+
+    assert result["success"] is True
+    assert result["generated_refs"]["decoupling"] == ["C1"]
+    assert ["C1", "1"] in result["expanded_spec"]["nets"]["+3V3"]
+
+
+def test_grouped_design_intent_rejects_invalid_group_values(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [_base_parts()[0]],
+            "interfaces": {"i2c": "bad"},
+            "support_circuits": {"decoupling": ["bad"]},
+        },
+    )
+
+    assert result["success"] is False
+    assert any(error["path"] == "interfaces.i2c" for error in result["errors"])
+    assert any(error["path"] == "support_circuits.decoupling[0]" for error in result["errors"])
+
+
+def test_crystal_preserves_requested_default_symbol(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        compiler,
+        "_resolve_symbol_pins",
+        lambda _lib_id: [{"number": "1", "name": "1"}, {"number": "2", "name": "2"}],
+    )
+
+    result = compile_design_intent(
+        str(tmp_path),
+        {"support_circuits": [{"type": "crystal", "pins": ["OSC_IN", "OSC_OUT"]}]},
+    )
+
+    assert result["success"] is True
+    crystal = next(part for part in result["expanded_spec"]["parts"] if part["ref"] == "Y1")
+    assert crystal["lib_id"] == "Device:Crystal"
+    assert result["expanded_spec"]["nets"]["OSC_IN"] == [["Y1", "1"]]
+    assert result["expanded_spec"]["nets"]["OSC_OUT"] == [["Y1", "2"]]
+
+
+def test_crystal_gnd2_connects_ground_pins(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        compiler,
+        "_resolve_symbol_pins",
+        lambda _lib_id: [
+            {"number": "1", "name": "1"},
+            {"number": "2", "name": "2"},
+            {"number": "3", "name": "3"},
+            {"number": "4", "name": "4"},
+        ],
+    )
+
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "support_circuits": {
+                "crystal": [
+                    {
+                        "lib_id": "Device:Crystal_GND2",
+                        "pins": ["OSC_IN", "OSC_OUT"],
+                        "ground": "GNDA",
+                    }
+                ]
+            }
+        },
+    )
+
+    assert result["success"] is True
+    crystal = next(part for part in result["expanded_spec"]["parts"] if part["ref"] == "Y1")
+    assert crystal["lib_id"] == "Device:Crystal_GND2"
+    assert ["Y1", "3"] in result["expanded_spec"]["nets"]["GNDA"]
+    assert ["Y1", "4"] in result["expanded_spec"]["nets"]["GNDA"]
+
+
+def test_grounded_crystal_errors_when_symbol_has_no_ground_pins(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        compiler,
+        "_resolve_symbol_pins",
+        lambda _lib_id: [{"number": "1", "name": "1"}, {"number": "2", "name": "2"}],
+    )
+
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "support_circuits": [
+                {
+                    "type": "crystal",
+                    "lib_id": "Device:Crystal",
+                    "pins": ["OSC_IN", "OSC_OUT"],
+                    "ground": "GND",
+                }
+            ]
+        },
+    )
+
+    assert result["success"] is False
+    assert result["errors"][0]["error"] == "grounded crystal requested but symbol has no ground pins"
 
 
 def test_led_indicator_uses_led_anode_toward_rail_and_cathode_to_ground(tmp_path: Path):

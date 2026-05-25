@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 
 from kicad_mcp.server import create_server
+from kicad_mcp.tools import creation_tools
 from kicad_mcp.utils import library_resolver
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
+from kicad_mcp.utils.schematic_intent import normalize_connections
 
 
 def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,6 +147,50 @@ def _skip_cli_validation(monkeypatch: pytest.MonkeyPatch) -> None:
         "kicad_mcp.utils.transactional_edit.validate_schematic_with_cli_export",
         lambda path: {"success": True, "skipped": True, "reason": "test"},
     )
+
+
+def test_connection_plan_missing_type_returns_supported_examples():
+    normalized = normalize_connections([{"from": {"ref": "U1", "pin": "1"}, "net": "N1"}])
+
+    assert normalized["connections"] == []
+    failure = normalized["failed_connections"][0]
+    assert failure["reason"] == "Unsupported connection type: <missing>"
+    assert {"type": "pin_to_net", "ref": "U1", "pin": "PA13", "net": "SWDIO"} in failure[
+        "supported_examples"
+    ]
+
+
+def test_quality_report_detail_modes_are_compact_and_summary():
+    report = {
+        "success": True,
+        "schematic_path": "demo.kicad_sch",
+        "page": {"paper": "A4"},
+        "symbol_count": 1,
+        "wire_count": 2,
+        "label_count": 3,
+        "no_connect_count": 0,
+        "missing_footprint_count": 0,
+        "outside_page_count": 0,
+        "off_grid_count": 0,
+        "dangling_label_count": 1,
+        "isolated_label_count": 0,
+        "power_ground_mismatch_count": 0,
+        "dangling_labels": [{"text": "FLOATING"}],
+        "quality_gate": {"passed": False},
+        "erc": {"success": True, "total_violations": 1, "violation_categories": {"label_dangling": 1}},
+        "native_netlist": {"success": True, "component_count": 1, "net_count": 1, "non_empty_nets": 1},
+        "visual_quality": {"readability_score": 80, "blocking_count": 1, "warning_count": 0},
+    }
+
+    summary = creation_tools._format_quality_report(report, "summary")
+    compact = creation_tools._format_quality_report(report, "compact")
+    full = creation_tools._format_quality_report(report, "full")
+
+    assert summary["detail"] == "summary"
+    assert "dangling_labels" not in summary
+    assert compact["detail"] == "compact"
+    assert compact["dangling_labels"] == [{"text": "FLOATING"}]
+    assert full is report
 
 
 @pytest.mark.asyncio
@@ -1155,6 +1201,52 @@ async def test_schematic_apply_safe_erc_fixes_deletes_explicit_dangling_label(
     )
     assert applied["success"] is True
     assert "FLOATING" not in Path(schematic_path).read_text(encoding="utf-8")
+
+
+def test_schematic_plan_erc_fixes_marks_unique_dangling_label_auto_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    schematic_path = tmp_path / "dangling.kicad_sch"
+    schematic_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        creation_tools,
+        "run_erc_via_cli",
+        lambda _path, timeout_seconds=None: {
+            "success": True,
+            "total_violations": 1,
+            "violation_categories": {"label_dangling": 1},
+            "severity_counts": {"error": 1},
+            "violations": [
+                {
+                    "type": "label_dangling",
+                    "severity": "error",
+                    "description": "Label is dangling",
+                    "items": [{"description": "Label 'FLOATING'"}],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_quality_report",
+        lambda _path, run_erc=False: {
+            "success": True,
+            "dangling_labels": [
+                {
+                    "text": "FLOATING",
+                    "type": "global_label",
+                    "uuid": "label-1",
+                    "position": {"x": 1, "y": 1},
+                }
+            ],
+        },
+    )
+
+    plan = creation_tools._schematic_plan_erc_fixes(str(schematic_path), detail="full")
+
+    assert plan["safe_auto_fix_count"] == 1
+    assert plan["safe_auto_fixes"][0]["label_uuid"] == "label-1"
+    assert plan["safe_auto_fixes"][0]["action"]["kind"] == "delete_dangling_label"
 
 
 @pytest.mark.asyncio

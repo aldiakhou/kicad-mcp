@@ -86,8 +86,16 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "schematic_apply_design_intent" in tools
     assert "schematic_preview_design_intent" in tools
     assert "schematic_build_from_spec_v2" in tools
+    assert "export_schematic_preview" in tools
+    assert "export_schematic_svg" in tools
+    assert "schematic_apply_functional_layout" in tools
+    assert "schematic_delete_item" in tools
+    assert "schematic_snap_to_grid" in tools
+    assert "schematic_connect_pin_to_net" in tools
+    assert "schematic_connect_pins" in tools
+    assert "schematic_connect_pin_to_ground" in tools
+    assert "schematic_connect_pin_to_power" in tools
     assert "run_erc_check" in tools
-    assert "schematic_connect_pin_to_net" not in tools
     assert "resolve_symbol" in tools
     assert "resolve_footprint" in tools
     assert "schematic_add_wire" not in tools

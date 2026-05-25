@@ -52,6 +52,7 @@ from kicad_mcp.utils.library_resolver import (
     symbol_footprint_suggestions as resolve_symbol_footprint_suggestions,
 )
 from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
+from kicad_mcp.utils.preview_metadata import svg_preview_metadata
 from kicad_mcp.utils.schematic_builder import (
     add_no_connect_marker,
     apply_connection_plan,
@@ -77,6 +78,7 @@ from kicad_mcp.utils.schematic_pins import (
 from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
 from kicad_mcp.utils.transactional_edit import (
     create_file_backup,
+    export_schematic_svg_file,
     get_file_diff_against_backup,
     restore_backup_manifest,
     validate_local_directory,
@@ -314,11 +316,12 @@ def register_creation_tools(mcp: FastMCP) -> None:
         project_path: str | None = None,
         run_erc: bool = True,
         schematic_path: str | None = None,
+        detail: str = "compact",
     ) -> dict[str, Any]:
         """Summarize schematic ERC, netlist, footprint, page-bound, and grid quality."""
         resolved_project = _resolve_project_alias(project_path, schematic_path)
         try:
-            return build_quality_report(resolved_project, run_erc=run_erc)
+            return _format_quality_report(build_quality_report(resolved_project, run_erc=run_erc), detail)
         except Exception as exc:
             return {"success": False, "project_path": resolved_project, "error": str(exc)}
 
@@ -356,17 +359,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
         project_path: str,
         include_suggestions: bool = True,
         timeout_seconds: float | None = None,
+        detail: str = "compact",
     ) -> dict[str, Any]:
         """Explain KiCad ERC violations as generic blocking, accepted-warning, or manual-fix findings."""
-        return _schematic_explain_erc(project_path, include_suggestions, timeout_seconds)
+        return _schematic_explain_erc(project_path, include_suggestions, timeout_seconds, detail)
 
     @mcp.tool()
     def schematic_plan_erc_fixes(
         project_path: str,
         timeout_seconds: float | None = None,
+        detail: str = "compact",
     ) -> dict[str, Any]:
         """Produce a non-destructive generic ERC repair plan."""
-        return _schematic_plan_erc_fixes(project_path, timeout_seconds)
+        return _schematic_plan_erc_fixes(project_path, timeout_seconds, detail)
 
     @mcp.tool()
     async def schematic_apply_functional_layout(
@@ -1769,7 +1774,7 @@ def _schematic_design_intent_response(
         allow_destructive_replace=False,
         detail=detail,
         include_diff=False,
-        include_preview=False,
+        include_preview=True,
         include_full_native_netlist=False,
         run_quality_report=False,
     )
@@ -1820,13 +1825,98 @@ def _schematic_design_intent_response(
     if detail == "full":
         base["build_result"] = built
         base["quality_report"] = quality
+    if built.get("schematic_preview"):
+        base["schematic_preview"] = built["schematic_preview"]
+    elif built.get("schematic_preview_error"):
+        base["schematic_preview_error"] = built["schematic_preview_error"]
+    else:
+        try:
+            schematic_path = get_project_files(project_path).get("schematic")
+            if schematic_path:
+                svg_result = export_schematic_svg_file(schematic_path, None)
+                if svg_result.get("success"):
+                    base["schematic_preview"] = svg_preview_metadata(svg_result["svg_path"])
+                else:
+                    base["schematic_preview_error"] = svg_result.get("error")
+        except Exception as exc:
+            base["schematic_preview_error"] = str(exc)
     return base
+
+
+def _format_quality_report(report: dict[str, Any], detail: str = "compact") -> dict[str, Any]:
+    normalized = str(detail or "compact").lower()
+    if normalized == "full":
+        return report
+    if normalized not in {"summary", "compact"}:
+        return {
+            "success": False,
+            "error": 'detail must be one of: "summary", "compact", "full"',
+            "detail": detail,
+        }
+
+    visual = report.get("visual_quality", {}) if isinstance(report.get("visual_quality"), dict) else {}
+    erc = report.get("erc", {}) if isinstance(report.get("erc"), dict) else {}
+    native = report.get("native_netlist", {}) if isinstance(report.get("native_netlist"), dict) else {}
+    compact = {
+        "success": report.get("success"),
+        "schematic_path": report.get("schematic_path"),
+        "detail": normalized,
+        "page": report.get("page"),
+        "symbol_count": report.get("symbol_count", 0),
+        "wire_count": report.get("wire_count", 0),
+        "label_count": report.get("label_count", 0),
+        "no_connect_count": report.get("no_connect_count", 0),
+        "missing_footprint_count": report.get("missing_footprint_count", 0),
+        "outside_page_count": report.get("outside_page_count", 0),
+        "off_grid_count": report.get("off_grid_count", 0),
+        "dangling_label_count": report.get("dangling_label_count", 0),
+        "isolated_label_count": report.get("isolated_label_count", 0),
+        "power_ground_mismatch_count": report.get("power_ground_mismatch_count", 0),
+        "quality_gate": report.get("quality_gate", {}),
+        "erc": {
+            "success": erc.get("success"),
+            "total_violations": erc.get("total_violations"),
+            "unacceptable_categories": erc.get("unacceptable_categories", {}),
+            "error": erc.get("error"),
+        },
+        "native_netlist": {
+            "success": native.get("success"),
+            "component_count": native.get("component_count"),
+            "net_count": native.get("net_count"),
+            "non_empty_nets": native.get("non_empty_nets"),
+            "error": native.get("error"),
+        },
+        "visual_quality": {
+            "readability_score": visual.get("readability_score"),
+            "blocking_count": visual.get("blocking_count"),
+            "warning_count": visual.get("warning_count"),
+            "symbol_overlap_count": visual.get("symbol_overlap_count"),
+            "label_inside_symbol_count": visual.get("label_inside_symbol_count"),
+            "floating_wire_count": visual.get("floating_wire_count"),
+        },
+        "recommended_next_tool": "schematic_quality_report"
+        if report.get("quality_gate", {}).get("passed")
+        else "schematic_plan_erc_fixes",
+    }
+    if normalized == "compact":
+        compact.update(
+            {
+                "missing_footprints": report.get("missing_footprints", []),
+                "invalid_footprints": report.get("invalid_footprints", []),
+                "symbols_outside_page": report.get("symbols_outside_page", []),
+                "dangling_labels": report.get("dangling_labels", []),
+                "isolated_labels": report.get("isolated_labels", []),
+                "power_ground_mismatches": report.get("power_ground_mismatches", []),
+            }
+        )
+    return compact
 
 
 def _schematic_explain_erc(
     project_or_schematic_path: str,
     include_suggestions: bool = True,
     timeout_seconds: float | None = None,
+    detail: str = "compact",
 ) -> dict[str, Any]:
     try:
         schematic_path = _schematic_file_path(project_or_schematic_path)
@@ -1866,7 +1956,7 @@ def _schematic_explain_erc(
             classification_counts[finding["classification"]] = (
                 classification_counts.get(finding["classification"], 0) + 1
             )
-        return {
+        result = {
             "success": True,
             "project_path": project_or_schematic_path,
             "schematic_path": schematic_path,
@@ -1884,6 +1974,7 @@ def _schematic_explain_erc(
                 "severity_counts": erc.get("severity_counts"),
             },
         }
+        return _format_erc_explanation(result, detail)
     except Exception as exc:
         return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
 
@@ -1891,18 +1982,31 @@ def _schematic_explain_erc(
 def _schematic_plan_erc_fixes(
     project_or_schematic_path: str,
     timeout_seconds: float | None = None,
+    detail: str = "compact",
 ) -> dict[str, Any]:
     explanation = _schematic_explain_erc(
-        project_or_schematic_path, include_suggestions=True, timeout_seconds=timeout_seconds
+        project_or_schematic_path, include_suggestions=True, timeout_seconds=timeout_seconds, detail="full"
     )
     if not explanation.get("success"):
         return explanation
+    dangling_label_fixes = _unique_dangling_label_fixes(explanation["schematic_path"])
     safe_auto_fixes = []
     manual_decisions = []
     accepted_warnings = []
     blocked_reasons = []
     for finding in explanation["findings"]:
         action = finding.get("suggested_action", {})
+        if finding.get("type") == "label_dangling":
+            labels = finding.get("affected_labels", [])
+            if len(labels) == 1 and labels[0] in dangling_label_fixes:
+                matched = dangling_label_fixes[labels[0]]
+                action = {
+                    "kind": "delete_dangling_label",
+                    "auto_safe": True,
+                    "details": "Delete exactly matched dangling label that is not attached to a pin or wire.",
+                    "label_uuid": matched["label_uuid"],
+                }
+                finding["suggested_action"] = action
         classification = finding["classification"]
         if classification == "accepted_warning":
             accepted_warnings.append(
@@ -1919,6 +2023,7 @@ def _schematic_plan_erc_fixes(
                     "type": finding["type"],
                     "refs": finding["affected_refs"],
                     "labels": finding["affected_labels"],
+                    "label_uuid": action.get("label_uuid"),
                     "action": action,
                 }
             )
@@ -1936,7 +2041,7 @@ def _schematic_plan_erc_fixes(
             blocked_reasons.append(
                 f"{finding['type']}: {finding['explanation']}"
             )
-    return {
+    result = {
         "success": True,
         "project_path": explanation["project_path"],
         "schematic_path": explanation["schematic_path"],
@@ -1950,6 +2055,92 @@ def _schematic_plan_erc_fixes(
         "blocked_reasons": blocked_reasons,
         "blocked": bool(manual_decisions or safe_auto_fixes),
         "explanation": explanation,
+    }
+    return _format_erc_plan(result, detail)
+
+
+def _format_erc_explanation(report: dict[str, Any], detail: str = "compact") -> dict[str, Any]:
+    normalized = str(detail or "compact").lower()
+    if normalized == "full":
+        return report
+    if normalized not in {"summary", "compact"}:
+        return {
+            "success": False,
+            "error": 'detail must be one of: "summary", "compact", "full"',
+            "detail": detail,
+        }
+    result = {
+        "success": report.get("success"),
+        "project_path": report.get("project_path"),
+        "schematic_path": report.get("schematic_path"),
+        "detail": normalized,
+        "total_violations": report.get("total_violations", 0),
+        "blocking_count": report.get("blocking_count", 0),
+        "manual_count": report.get("manual_count", 0),
+        "accepted_warning_count": report.get("accepted_warning_count", 0),
+        "classification_counts": report.get("classification_counts", {}),
+        "erc": report.get("erc", {}),
+        "recommended_next_tool": "schematic_plan_erc_fixes"
+        if report.get("blocking_count", 0) or report.get("manual_count", 0)
+        else "schematic_quality_report",
+    }
+    if normalized == "compact":
+        result["groups"] = report.get("groups", [])
+        result["findings"] = report.get("findings", [])
+    return result
+
+
+def _format_erc_plan(plan: dict[str, Any], detail: str = "compact") -> dict[str, Any]:
+    normalized = str(detail or "compact").lower()
+    if normalized == "full":
+        return plan
+    if normalized not in {"summary", "compact"}:
+        return {
+            "success": False,
+            "error": 'detail must be one of: "summary", "compact", "full"',
+            "detail": detail,
+        }
+    result = {
+        "success": plan.get("success"),
+        "project_path": plan.get("project_path"),
+        "schematic_path": plan.get("schematic_path"),
+        "detail": normalized,
+        "erc_total_violations": plan.get("erc_total_violations", 0),
+        "safe_auto_fix_count": plan.get("safe_auto_fix_count", 0),
+        "manual_decision_count": plan.get("manual_decision_count", 0),
+        "accepted_warning_count": plan.get("accepted_warning_count", 0),
+        "blocked": plan.get("blocked", False),
+        "recommended_next_tool": "schematic_apply_safe_erc_fixes"
+        if plan.get("safe_auto_fix_count", 0)
+        else "schematic_explain_erc",
+    }
+    if normalized == "compact":
+        result.update(
+            {
+                "safe_auto_fixes": plan.get("safe_auto_fixes", []),
+                "manual_decisions": plan.get("manual_decisions", []),
+                "accepted_warnings": plan.get("accepted_warnings", []),
+                "blocked_reasons": plan.get("blocked_reasons", []),
+            }
+        )
+    return result
+
+
+def _unique_dangling_label_fixes(schematic_path: str) -> dict[str, dict[str, Any]]:
+    try:
+        quality = build_quality_report(schematic_path, run_erc=False)
+    except Exception:
+        return {}
+    by_text: dict[str, list[dict[str, Any]]] = {}
+    for label in quality.get("dangling_labels", []):
+        text = str(label.get("text") or "")
+        label_uuid = label.get("uuid")
+        if text and label_uuid:
+            by_text.setdefault(text, []).append(label)
+    return {
+        text: {"label_uuid": labels[0]["uuid"], "label": labels[0]}
+        for text, labels in by_text.items()
+        if len(labels) == 1
     }
 
 
@@ -2800,7 +2991,7 @@ def _schematic_apply_safe_erc_fixes(
     dry_run: bool,
     timeout_seconds: float | None,
 ) -> dict[str, Any]:
-    plan = _schematic_plan_erc_fixes(project_or_schematic_path, timeout_seconds)
+    plan = _schematic_plan_erc_fixes(project_or_schematic_path, timeout_seconds, detail="full")
     if not plan.get("success"):
         return plan
     requested_fixes = fixes or plan.get("safe_auto_fixes", [])
