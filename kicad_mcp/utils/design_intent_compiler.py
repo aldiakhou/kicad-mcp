@@ -10,7 +10,7 @@ from typing import Any
 
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
-from kicad_mcp.utils.schematic_pins import _resolve_symbol_pins
+from kicad_mcp.utils.schematic_pins import PinVisibility, _resolve_symbol_pins, classify_pin
 
 DEFAULT_FOOTPRINTS = {
     "capacitor": "Capacitor_SMD:C_0603_1608Metric",
@@ -94,6 +94,7 @@ class _DesignIntentCompiler:
         self.pin_maps: dict[str, list[dict[str, Any]]] = {}
         self.pin_name_counts: dict[str, dict[str, int]] = {}
         self.pin_assignments: dict[tuple[str, str], str] = {}
+        self.skipped_hidden_pins: list[dict[str, Any]] = []
         self.existing_refs = _existing_schematic_refs(project_path)
         self.allocator = ReferenceAllocator(self.existing_refs)
 
@@ -126,6 +127,8 @@ class _DesignIntentCompiler:
             "connection_count": sum(len(pins) for pins in self.nets.values()),
             "net_count": len(self.nets),
             "no_connect_count": len(self.no_connects),
+            "skipped_hidden_pin_count": len(self.skipped_hidden_pins),
+            "skipped_hidden_pins": self.skipped_hidden_pins,
         }
         success = not self.errors
         result = {
@@ -135,6 +138,8 @@ class _DesignIntentCompiler:
             "generated_refs": self.generated_refs,
             "warnings": self.warnings,
             "errors": self.errors,
+            "skipped_hidden_pin_count": len(self.skipped_hidden_pins),
+            "skipped_hidden_pins": self.skipped_hidden_pins,
         }
         if not success:
             result["recoverable"] = True
@@ -623,13 +628,45 @@ class _DesignIntentCompiler:
             ref = str(rule.get("ref") or "")
             pins = self._select_rule_pins(ref, rule.get("match", {}), path)
             except_pins = {str(item) for item in rule.get("except", [])}
+            include_hidden = bool(rule.get("include_hidden", False))
+            allow_hidden_no_connect = bool(rule.get("allow_hidden_no_connect", False))
             for pin in pins:
                 ident = self._pin_identifier(ref, pin)
                 if ident in except_pins or pin.get("name") in except_pins or pin.get("number") in except_pins:
                     continue
+                visibility = classify_pin(pin)
+                if visibility != PinVisibility.VISIBLE and not include_hidden:
+                    self.skipped_hidden_pins.append(
+                        {
+                            "ref": ref,
+                            "pin": ident,
+                            "name": pin.get("name"),
+                            "visibility": visibility,
+                            "reason": "hidden pins are skipped by no_connect_rules",
+                        }
+                    )
+                    continue
+                if (
+                    visibility not in {PinVisibility.VISIBLE, PinVisibility.HIDDEN_NO_CONNECT}
+                    and not allow_hidden_no_connect
+                ):
+                    self.errors.append(
+                        {
+                            "path": path,
+                            "error": "hidden pin no-connect requires allow_hidden_no_connect",
+                            "ref": ref,
+                            "pin": ident,
+                            "name": pin.get("name"),
+                            "visibility": visibility,
+                        }
+                    )
+                    continue
                 if (ref, ident) in connected:
                     continue
-                self.no_connects.append({"ref": ref, "pin": ident})
+                marker = {"ref": ref, "pin": ident}
+                if allow_hidden_no_connect:
+                    marker["allow_hidden_no_connect"] = True
+                self.no_connects.append(marker)
 
     def _select_rule_pins(self, ref: str, selector: Any, path: str) -> list[dict[str, Any]]:
         if ref not in self.pin_maps:
@@ -743,6 +780,12 @@ class _DesignIntentCompiler:
                     "error": "pin identifier is ambiguous",
                     "ref": ref,
                     "pin": requested_pin,
+                    "suggestion": "Use pin_rules to connect all matching pins, or use a pin number.",
+                    "example": {
+                        "pin_rules": [
+                            {"ref": ref, "match": {"pin": requested_pin}, "net": "<NET_NAME>"}
+                        ]
+                    },
                     "matches": [
                         {
                             "number": pin.get("number"),

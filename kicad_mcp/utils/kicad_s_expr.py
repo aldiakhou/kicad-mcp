@@ -360,8 +360,16 @@ class KiCadSchematic:
                     and item.head() in {"label", "global_label", "hierarchical_label"}
                     and self._get_uuid(item) == item_id
                 )
+        elif item_type == "no_connect":
+
+            def predicate(item: SExprNode) -> bool:
+                return (
+                    isinstance(item, SExprList)
+                    and item.head() == "no_connect"
+                    and self._get_uuid(item) == item_id
+                )
         else:
-            raise ValueError("item_type must be one of: symbol, wire, label")
+            raise ValueError("item_type must be one of: symbol, wire, label, no_connect")
 
         for index, item in enumerate(self.root.items):
             if predicate(item):

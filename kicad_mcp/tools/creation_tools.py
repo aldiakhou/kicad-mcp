@@ -741,12 +741,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
         reference: str,
         pin: str,
         allow_hidden_power: bool = False,
+        allow_hidden_no_connect: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Add a no-connect marker at an actual symbol pin coordinate."""
         if ctx:
             await ctx.info(f"Adding no-connect marker to {reference}.{pin}")
-        return add_no_connect_marker(schematic_path, reference, pin, allow_hidden_power)
+        return add_no_connect_marker(
+            schematic_path,
+            reference,
+            pin,
+            allow_hidden_power,
+            allow_hidden_no_connect=allow_hidden_no_connect,
+        )
 
     @mcp.tool()
     async def schematic_delete_item(
@@ -755,7 +762,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         item_id: str,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Delete a top-level schematic symbol, wire, or label."""
+        """Delete a top-level schematic symbol, wire, label, or no-connect marker."""
         if ctx:
             await ctx.info(f"Deleting schematic {item_type} {item_id}")
         return _apply_transactional_schematic_authoring(

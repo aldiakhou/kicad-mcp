@@ -15,6 +15,28 @@ from kicad_mcp.utils.native_netlist import export_native_netlist
 SCHEMATIC_GRID_MM = 1.27
 
 
+class PinVisibility:
+    VISIBLE = "visible"
+    HIDDEN_POWER = "hidden_power"
+    HIDDEN_NO_CONNECT = "hidden_no_connect"
+    HIDDEN_OTHER = "hidden_other"
+
+
+def classify_pin(pin: dict[str, Any]) -> str:
+    """Classify visible and hidden symbol pins for safe intent handling."""
+    if not pin.get("hidden"):
+        return PinVisibility.VISIBLE
+
+    name = str(pin.get("name") or "").upper()
+    pin_type = str(pin.get("pintype") or pin.get("type") or "").lower()
+
+    if name in {"NC", "DNC", "RES", "RESERVED", "N.C."} or "NC" in name:
+        return PinVisibility.HIDDEN_NO_CONNECT
+    if pin_type == "power_in" or name in {"VDD", "VCC", "VSS", "GND", "VBAT"}:
+        return PinVisibility.HIDDEN_POWER
+    return PinVisibility.HIDDEN_OTHER
+
+
 def get_symbol_pin_map(schematic_path: str, reference: str) -> dict[str, Any]:
     """Return transformed pin positions for a placed schematic symbol."""
     schematic = KiCadSchematic.from_file(schematic_path)
@@ -101,10 +123,13 @@ def attach_net_to_pin(
     if len(matches) > 1:
         raise ValueError(f"Pin selector is ambiguous on {reference}: {pin}")
     selected = matches[0]
-    if selected.get("hidden") and not allow_hidden_power:
+    visibility = classify_pin(selected)
+    if visibility != PinVisibility.VISIBLE and (
+        visibility != PinVisibility.HIDDEN_POWER or not allow_hidden_power
+    ):
         raise ValueError(
-            f"Pin {reference}.{selected['number']} is hidden; pass allow_hidden_power=True "
-            "only when this hidden attachment is intentional."
+            f"Pin {reference}.{selected['number']} is hidden ({visibility}); pass "
+            "allow_hidden_power=True only for intentional hidden power-pin attachments."
         )
     angle = selected["position"].get("angle", 0.0)
     start = selected["connection_point"]
@@ -350,6 +375,8 @@ def add_no_connect_to_pin(
     reference: str,
     pin: str,
     allow_hidden_power: bool = False,
+    *,
+    allow_hidden_no_connect: bool = False,
 ) -> dict[str, Any]:
     """Add a no-connect marker to an actual symbol pin coordinate."""
     pin_map = get_symbol_pin_map_from_schematic(schematic, schematic_path, reference)
@@ -365,12 +392,61 @@ def add_no_connect_to_pin(
     if len(matches) > 1:
         raise ValueError(f"Pin selector is ambiguous on {reference}: {pin}")
     selected = matches[0]
-    if selected.get("hidden") and not allow_hidden_power:
-        raise ValueError(f"Pin {reference}.{selected['number']} is hidden")
+    visibility = classify_pin(selected)
+    if visibility == PinVisibility.HIDDEN_NO_CONNECT:
+        return {
+            "reference": reference,
+            "pin": selected,
+            "no_connect": None,
+            "skipped": True,
+            "reason": "hidden NC pin does not require a no-connect marker",
+        }
+    if visibility != PinVisibility.VISIBLE and not allow_hidden_no_connect:
+        raise ValueError(
+            f"Pin {reference}.{selected['number']} is hidden; pass "
+            "allow_hidden_no_connect=True only when this hidden no-connect is intentional."
+        )
     marker = schematic.add_no_connect(
         selected["connection_point"]["x"], selected["connection_point"]["y"]
     )
     return {"reference": reference, "pin": selected, "no_connect": marker}
+
+
+def remove_no_connect_at_pin(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    reference: str,
+    pin: str,
+) -> dict[str, Any]:
+    """Remove no-connect markers located at a resolved symbol pin coordinate."""
+    pin_map = get_symbol_pin_map_from_schematic(schematic, schematic_path, reference)
+    if not pin_map.get("success"):
+        raise ValueError(str(pin_map.get("error", "Unable to resolve pin map")))
+    matches = [
+        item
+        for item in pin_map["pins"]
+        if item["number"] == pin or item["name"] == pin or item["pinfunction"] == pin
+    ]
+    if not matches:
+        raise ValueError(f"Pin not found on {reference}: {pin}")
+    if len(matches) > 1:
+        raise ValueError(f"Pin selector is ambiguous on {reference}: {pin}")
+    selected = matches[0]
+    point = selected["connection_point"]
+    removed = []
+    for marker in list(schematic.list_no_connects()):
+        marker_position = marker.get("position", {})
+        if marker_position.get("x") == point["x"] and marker_position.get("y") == point["y"]:
+            marker_uuid = marker.get("uuid")
+            if marker_uuid is None:
+                continue
+            removed.append(schematic.delete_item("no_connect", marker_uuid))
+    return {
+        "reference": reference,
+        "pin": selected,
+        "removed_count": len(removed),
+        "removed": removed,
+    }
 
 
 def verify_native_net_membership(

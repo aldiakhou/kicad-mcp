@@ -8,6 +8,7 @@ from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.library_resolver import resolve_symbol
 from kicad_mcp.utils.native_netlist import export_native_netlist
 from kicad_mcp.utils.schematic_builder import (
+    _apply_spec_to_existing_schematic,
     _build_in_memory_schematic,
     _resolve_symbol_embed_chain,
     card_reader_v1_spec,
@@ -16,6 +17,7 @@ from kicad_mcp.utils.schematic_builder import (
 )
 from kicad_mcp.utils.schematic_pins import (
     _resolve_symbol_pins_cached,
+    add_no_connect_to_pin,
     get_symbol_pin_map_from_schematic,
 )
 
@@ -130,6 +132,94 @@ def test_custom_part_pins_are_available_from_embedded_symbol(tmp_path: Path):
 
     assert pin_map["success"] is True
     assert {pin["name"] for pin in pin_map["pins"]} == {"SCL", "SDA", "GND"}
+
+
+def _hidden_pin_test_schematic(tmp_path: Path) -> tuple[KiCadSchematic, str]:
+    schematic_path = tmp_path / "hidden.kicad_sch"
+    spec = normalize_build_spec_v2(
+        {
+            "custom_parts": [
+                {
+                    "ref": "U2",
+                    "value": "HIDDEN_PINS",
+                    "footprint": "Package_DIP:DIP-4_W7.62mm",
+                    "pins": [
+                        {"number": "1", "name": "NC", "type": "no_connect", "hidden": True},
+                        {"number": "2", "name": "VDD", "type": "power_in", "hidden": True},
+                        {"number": "3", "name": "SCL", "type": "bidirectional"},
+                    ],
+                }
+            ],
+            "nets": {},
+        }
+    )
+    return _build_in_memory_schematic(str(schematic_path), spec), str(schematic_path)
+
+
+def test_explicit_hidden_nc_no_connect_is_noop(tmp_path: Path):
+    schematic, schematic_path = _hidden_pin_test_schematic(tmp_path)
+
+    result = add_no_connect_to_pin(schematic, schematic_path, "U2", "1")
+
+    assert result["skipped"] is True
+    assert result["reason"] == "hidden NC pin does not require a no-connect marker"
+    assert schematic.list_no_connects() == []
+
+
+def test_hidden_power_no_connect_requires_explicit_allow(tmp_path: Path):
+    schematic, schematic_path = _hidden_pin_test_schematic(tmp_path)
+
+    with pytest.raises(ValueError, match="allow_hidden_no_connect=True"):
+        add_no_connect_to_pin(schematic, schematic_path, "U2", "2")
+
+    result = add_no_connect_to_pin(
+        schematic,
+        schematic_path,
+        "U2",
+        "2",
+        allow_hidden_no_connect=True,
+    )
+    assert result.get("skipped") is not True
+    assert len(schematic.list_no_connects()) == 1
+
+
+def test_update_removes_existing_no_connect_before_connecting_pin(tmp_path: Path):
+    schematic_path = tmp_path / "update_nc.kicad_sch"
+    initial_spec = normalize_build_spec_v2(
+        {
+            "custom_parts": [
+                {
+                    "ref": "U1",
+                    "value": "I2C_DEVICE",
+                    "footprint": "Package_DIP:DIP-4_W7.62mm",
+                    "pins": [
+                        {"number": "1", "name": "SCL", "type": "bidirectional"},
+                        {"number": "2", "name": "SDA", "type": "bidirectional"},
+                    ],
+                }
+            ],
+            "nets": {},
+            "no_connects": [["U1", "SCL"]],
+        }
+    )
+    schematic = _build_in_memory_schematic(str(schematic_path), initial_spec)
+    assert len(schematic.list_no_connects()) == 1
+
+    update_spec = normalize_build_spec_v2({"nets": {"I2C_SCL": [["U1", "SCL"]]}})
+    edit_summary: dict = {}
+    _apply_spec_to_existing_schematic(
+        schematic,
+        str(schematic_path),
+        update_spec,
+        "update",
+        edit_summary=edit_summary,
+    )
+
+    assert schematic.list_no_connects() == []
+    assert any(label["text"] == "I2C_SCL" for label in schematic.list_labels())
+    assert edit_summary["removed_conflicting_no_connects"] == [
+        {"ref": "U1", "pin": "SCL", "removed_count": 1}
+    ]
 
 
 def test_card_reader_spec_native_netlist_has_required_members(tmp_path: Path):

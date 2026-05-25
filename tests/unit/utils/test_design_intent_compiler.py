@@ -325,6 +325,88 @@ def test_no_connect_rules_mark_unused_gpio_pins(tmp_path: Path):
     assert {"ref": "U1", "pin": "PA13"} not in result["expanded_spec"]["no_connects"]
 
 
+def test_no_connect_rules_skip_hidden_nc_pins(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [
+                {
+                    "ref": "U2",
+                    "value": "SENSOR",
+                    "footprint": "Package_LGA:LGA-6_2.0x2.5mm_P0.65mm",
+                    "pins": [
+                        {"number": "1", "name": "NC", "type": "no_connect", "hidden": True},
+                        {"number": "2", "name": "NC", "type": "no_connect", "hidden": True},
+                        {"number": "3", "name": "SCL", "type": "bidirectional"},
+                        {"number": "4", "name": "SDA", "type": "bidirectional"},
+                    ],
+                }
+            ],
+            "no_connect_rules": [
+                {"ref": "U2", "match": {"name_regex": "NC|SCL|SDA"}, "action": "mark_no_connect"}
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    assert result["summary"]["skipped_hidden_pin_count"] == 2
+    assert {item["pin"] for item in result["skipped_hidden_pins"]} == {"1", "2"}
+    assert result["expanded_spec"]["no_connects"] == [
+        {"ref": "U2", "pin": "SCL"},
+        {"ref": "U2", "pin": "SDA"},
+    ]
+
+
+def test_pin_rule_duplicate_vdd_expands_to_all_vdd_pins(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "DUAL_POWER",
+                    "footprint": "Package_DIP:DIP-4_W7.62mm",
+                    "pins": [
+                        {"number": "1", "name": "VDD", "type": "power_in"},
+                        {"number": "2", "name": "VDD", "type": "power_in"},
+                        {"number": "3", "name": "GND", "type": "power_in"},
+                    ],
+                }
+            ],
+            "pin_rules": [{"ref": "U1", "match": {"pin": "VDD"}, "net": "+3V3"}],
+        },
+    )
+
+    assert result["success"] is True
+    assert result["expanded_spec"]["nets"]["+3V3"] == [["U1", "1"], ["U1", "2"]]
+
+
+def test_explicit_duplicate_pin_name_returns_helpful_suggestion(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "DUAL_POWER",
+                    "footprint": "Package_DIP:DIP-4_W7.62mm",
+                    "pins": [
+                        {"number": "1", "name": "VDD", "type": "power_in"},
+                        {"number": "2", "name": "VDD", "type": "power_in"},
+                    ],
+                }
+            ],
+            "bulk_connections": [{"net": "+3V3", "pins": [["U1", "VDD"]]}],
+        },
+    )
+
+    assert result["success"] is False
+    error = result["errors"][0]
+    assert error["error"] == "pin identifier is ambiguous"
+    assert error["suggestion"] == "Use pin_rules to connect all matching pins, or use a pin number."
+    assert error["example"]["pin_rules"][0]["match"] == {"pin": "VDD"}
+
+
 def test_conflict_detection_catches_same_pin_assigned_to_two_nets(tmp_path: Path):
     result = compile_design_intent(
         str(tmp_path),

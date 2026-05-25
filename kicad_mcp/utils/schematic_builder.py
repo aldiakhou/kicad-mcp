@@ -21,6 +21,7 @@ from kicad_mcp.utils.schematic_pins import (
     add_no_connect_to_pin,
     attach_net_to_pin,
     get_symbol_pin_map_from_schematic,
+    remove_no_connect_at_pin,
 )
 from kicad_mcp.utils.transactional_edit import export_schematic_svg_file
 
@@ -247,10 +248,17 @@ def build_schematic_from_spec(
     built_summary: dict[str, Any] = {}
 
     def mutate(schematic: KiCadSchematic) -> dict[str, Any]:
+        edit_summary: dict[str, Any] = {}
         built = (
             _build_in_memory_schematic(schematic_path, spec)
             if mode == "replace"
-            else _apply_spec_to_existing_schematic(schematic, schematic_path, spec, mode)
+            else _apply_spec_to_existing_schematic(
+                schematic,
+                schematic_path,
+                spec,
+                mode,
+                edit_summary=edit_summary,
+            )
         )
         schematic.root = built.root
         built_summary.update(
@@ -259,6 +267,10 @@ def build_schematic_from_spec(
                 "labels": built.list_labels(),
                 "wires": built.list_wires(),
                 "no_connects": built.list_no_connects(),
+                "removed_conflicting_no_connects": edit_summary.get(
+                    "removed_conflicting_no_connects", []
+                ),
+                "skipped_no_connects": edit_summary.get("skipped_no_connects", []),
             }
         )
         return {
@@ -291,6 +303,14 @@ def build_schematic_from_spec(
     result["symbol_count"] = len(built_summary["symbols"])
     result["connection_count"] = len(spec.get("connections", []))
     result["no_connect_count"] = len(built_summary["no_connects"])
+    result["removed_conflicting_no_connect_count"] = len(
+        built_summary.get("removed_conflicting_no_connects", [])
+    )
+    result["removed_conflicting_no_connects"] = built_summary.get(
+        "removed_conflicting_no_connects", []
+    )
+    result["skipped_no_connect_count"] = len(built_summary.get("skipped_no_connects", []))
+    result["skipped_no_connects"] = built_summary.get("skipped_no_connects", [])
     result["native_netlist"] = native if include_full_native_netlist else _compact_native_netlist(native)
     if run_quality_report:
         quality = schematic_quality_report(schematic_path, run_erc=run_erc)
@@ -536,10 +556,12 @@ def _normalize_v2_endpoint(
     warnings: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     allow_hidden = False
+    allow_hidden_no_connect = False
     if isinstance(item, dict):
         ref = item.get("ref") or item.get("reference")
         pin = item.get("pin") or item.get("pin_number") or item.get("pin_name")
         allow_hidden = bool(item.get("allow_hidden_power", False))
+        allow_hidden_no_connect = bool(item.get("allow_hidden_no_connect", False))
     elif isinstance(item, str):
         if "_" not in item:
             errors.append(
@@ -567,7 +589,12 @@ def _normalize_v2_endpoint(
     if not ref or not pin:
         errors.append({"path": path, "error": "endpoint requires ref and pin", "value": item})
         return None
-    return {"ref": str(ref), "pin": str(pin), "allow_hidden_power": allow_hidden}
+    return {
+        "ref": str(ref),
+        "pin": str(pin),
+        "allow_hidden_power": allow_hidden,
+        "allow_hidden_no_connect": allow_hidden_no_connect,
+    }
 
 
 def _custom_symbol_node(
@@ -694,7 +721,12 @@ def _known_power_symbol_net(net_name: str) -> bool:
 
 
 def add_no_connect_marker(
-    schematic_path: str, reference: str, pin: str, allow_hidden_power: bool = False
+    schematic_path: str,
+    reference: str,
+    pin: str,
+    allow_hidden_power: bool = False,
+    *,
+    allow_hidden_no_connect: bool = False,
 ) -> dict[str, Any]:
     """Add a no-connect marker to a resolved symbol pin."""
     from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
@@ -703,7 +735,12 @@ def add_no_connect_marker(
         schematic_path,
         lambda schematic: {
             "no_connect": add_no_connect_to_pin(
-                schematic, schematic_path, reference, pin, allow_hidden_power
+                schematic,
+                schematic_path,
+                reference,
+                pin,
+                allow_hidden_power,
+                allow_hidden_no_connect=allow_hidden_no_connect,
             )
         },
         run_cli_validation=True,
@@ -988,7 +1025,7 @@ def _build_in_memory_schematic(schematic_path: str, spec: dict[str, Any]) -> KiC
             schematic_path,
             marker["ref"],
             marker["pin"],
-            marker.get("allow_hidden_power", False),
+            allow_hidden_no_connect=marker.get("allow_hidden_no_connect", False),
         )
     return schematic
 
@@ -998,7 +1035,13 @@ def _apply_spec_to_existing_schematic(
     schematic_path: str,
     spec: dict[str, Any],
     mode: str,
+    *,
+    edit_summary: dict[str, Any] | None = None,
 ) -> KiCadSchematic:
+    if edit_summary is None:
+        edit_summary = {}
+    removed_conflicting = edit_summary.setdefault("removed_conflicting_no_connects", [])
+    skipped_no_connects = edit_summary.setdefault("skipped_no_connects", [])
     existing_refs = {symbol["reference"] for symbol in schematic.list_symbols()}
     for symbol in spec.get("symbols", []):
         reference = symbol["reference"]
@@ -1009,6 +1052,20 @@ def _apply_spec_to_existing_schematic(
         _add_spec_symbol(schematic, symbol)
         existing_refs.add(reference)
     for connection in spec.get("connections", []):
+        removed_nc = remove_no_connect_at_pin(
+            schematic,
+            schematic_path,
+            connection["ref"],
+            connection["pin"],
+        )
+        if removed_nc.get("removed_count", 0) > 0:
+            removed_conflicting.append(
+                {
+                    "ref": connection["ref"],
+                    "pin": connection["pin"],
+                    "removed_count": removed_nc["removed_count"],
+                }
+            )
         if _pin_has_label(
             schematic,
             schematic_path,
@@ -1033,13 +1090,21 @@ def _apply_spec_to_existing_schematic(
     for marker in spec.get("no_connects", []):
         if _pin_has_no_connect(schematic, schematic_path, marker["ref"], marker["pin"]):
             continue
-        add_no_connect_to_pin(
+        applied_no_connect = add_no_connect_to_pin(
             schematic,
             schematic_path,
             marker["ref"],
             marker["pin"],
-            marker.get("allow_hidden_power", False),
+            allow_hidden_no_connect=marker.get("allow_hidden_no_connect", False),
         )
+        if applied_no_connect.get("skipped"):
+            skipped_no_connects.append(
+                {
+                    "ref": marker["ref"],
+                    "pin": marker["pin"],
+                    "reason": applied_no_connect.get("reason"),
+                }
+            )
     return schematic
 
 

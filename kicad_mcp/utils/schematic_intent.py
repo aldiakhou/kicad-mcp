@@ -149,7 +149,7 @@ def apply_connection_plan_v2(
                     schematic_path,
                     marker["ref"],
                     marker["pin"],
-                    marker.get("allow_hidden_power", False),
+                    allow_hidden_no_connect=marker.get("allow_hidden_no_connect", False),
                 )
             )
         return {
@@ -257,6 +257,7 @@ def normalize_no_connects(no_connects: list[Any]) -> dict[str, Any]:
                     "ref": str(marker["ref"]),
                     "pin": str(marker["pin"]),
                     "allow_hidden_power": bool(marker.get("allow_hidden_power", False)),
+                    "allow_hidden_no_connect": bool(marker.get("allow_hidden_no_connect", False)),
                 }
             )
         else:
