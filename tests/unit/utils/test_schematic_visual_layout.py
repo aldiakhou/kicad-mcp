@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from kicad_mcp.utils import schematic_builder
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.schematic_builder import (
     _build_in_memory_schematic,
@@ -233,6 +234,43 @@ def test_strict_visual_gate_blocks_build_when_fixed_page_layout_fails(monkeypatc
     assert result["success"] is False
     assert result["stage"] == "layout_failed"
     assert result["recommended_next_arguments"]["paper"] == "A3"
+
+
+def test_prewrite_visual_gate_resolves_real_project_schematic_path(tmp_path: Path, monkeypatch):
+    project_path = tmp_path / "sensor_fusion.kicad_pro"
+    schematic_path = tmp_path / "sensor_fusion.kicad_sch"
+    project_path.write_text("(kicad_project)\n", encoding="utf-8")
+    schematic_path.write_text(KiCadSchematic.empty().to_text(), encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    def fake_in_memory(path, normalized_spec):
+        captured["schematic_path"] = path
+        return _build_in_memory_schematic(path, normalized_spec)
+
+    monkeypatch.setattr(schematic_builder, "_build_in_memory_schematic", fake_in_memory)
+    monkeypatch.setattr(
+        schematic_builder,
+        "build_schematic_from_spec",
+        lambda *_args, **_kwargs: {"success": True},
+    )
+
+    result = build_schematic_from_spec_v2(
+        str(project_path),
+        {
+            "custom_parts": [
+                {
+                    "ref": "U1",
+                    "value": "IC",
+                    "pins": [{"number": "1", "name": "A"}, {"number": "2", "name": "B"}],
+                }
+            ],
+            "nets": {},
+            "layout_hints": {"visual_gate": "strict"},
+        },
+    )
+
+    assert result["success"] is True
+    assert captured["schematic_path"] == str(schematic_path)
 
 
 def test_top_bottom_pin_labels_use_horizontal_dogleg_strategy():

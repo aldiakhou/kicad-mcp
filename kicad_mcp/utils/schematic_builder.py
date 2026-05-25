@@ -486,7 +486,12 @@ def _prewrite_visual_gate(
         return None
     if normalized_spec.get("normalization_errors"):
         return None
-    schematic_path = project_path if project_path.endswith(".kicad_sch") else f"{project_path}.kicad_sch"
+    try:
+        schematic_path = _schematic_path(project_path)
+    except Exception:
+        schematic_path = (
+            project_path if project_path.endswith(".kicad_sch") else "generated_preview.kicad_sch"
+        )
     try:
         schematic = _build_in_memory_schematic(schematic_path, normalized_spec)
     except Exception:
