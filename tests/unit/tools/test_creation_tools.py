@@ -1268,11 +1268,13 @@ async def test_schematic_footprint_tools_assign_explicit_and_defaults(
 
     dry_run = tools["schematic_assign_default_footprints"].fn(
         project["project_path"],
-        ["C1"],
+        ["C1", "Z9"],
         "symbol_default_then_filter",
         True,
     )
     assert dry_run["success"] is True
+    assert dry_run["partial_success"] is True
+    assert dry_run["missing_refs"] == ["Z9"]
     assert dry_run["planned_assignments"] == [
         {"ref": "C1", "footprint": "Capacitor_SMD:C_0603_1608Metric", "source": "footprint_filter"}
     ]
@@ -1280,15 +1282,28 @@ async def test_schematic_footprint_tools_assign_explicit_and_defaults(
 
     defaulted = tools["schematic_assign_default_footprints"].fn(
         project["project_path"],
-        ["C1"],
+        ["C1", "Z9"],
         "symbol_default_then_filter",
         False,
     )
     assert defaulted["success"] is True
+    assert defaulted["partial_success"] is True
+    assert defaulted["missing_refs"] == ["Z9"]
     assert defaulted["assigned_count"] == 1
     final_report = tools["schematic_footprint_report"].fn(project["project_path"])
     assert final_report["missing_footprint_count"] == 0
     assert final_report["invalid_footprints"] == []
+
+    all_missing = tools["schematic_assign_default_footprints"].fn(
+        project["project_path"],
+        ["Z8", "Z9"],
+        "symbol_default_then_filter",
+        False,
+    )
+    assert all_missing["success"] is False
+    assert all_missing["partial_success"] is False
+    assert all_missing["missing_refs"] == ["Z8", "Z9"]
+    assert all_missing["error"] == "all requested refs were missing"
 
 
 @pytest.mark.asyncio

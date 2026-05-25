@@ -1364,6 +1364,7 @@ def _schematic_assign_default_footprints(
         }
         if wanted_refs is not None:
             missing_refs = sorted(ref for ref in wanted_refs if ref not in symbols_by_ref)
+        request_status = _default_footprint_request_status(wanted_refs, missing_refs)
         for symbol in symbols_by_ref.values():
             ref = symbol["reference"]
             if wanted_refs is not None and ref not in wanted_refs:
@@ -1382,6 +1383,21 @@ def _schematic_assign_default_footprints(
                     "source": suggestion["source"],
                 }
             )
+        if request_status["all_requested_refs_missing"]:
+            return {
+                "success": False,
+                "project_path": project_or_schematic_path,
+                "schematic_path": schematic_path,
+                "dry_run": dry_run,
+                "assigned_count": 0,
+                "planned_assignments": assignments,
+                "planned_assignment_count": len(assignments),
+                "missing_refs": missing_refs,
+                "partial_success": False,
+                "skipped": skipped,
+                "footprint_report": _compact_footprint_report(_schematic_footprint_report(schematic_path)),
+                "error": "all requested refs were missing",
+            }
         if dry_run:
             return {
                 "success": True,
@@ -1392,6 +1408,7 @@ def _schematic_assign_default_footprints(
                 "planned_assignments": assignments,
                 "planned_assignment_count": len(assignments),
                 "missing_refs": missing_refs,
+                "partial_success": request_status["partial_success"],
                 "skipped": skipped,
                 "footprint_report": _compact_footprint_report(_schematic_footprint_report(schematic_path)),
             }
@@ -1405,6 +1422,7 @@ def _schematic_assign_default_footprints(
         assign_result["planned_assignments"] = assignments
         assign_result["planned_assignment_count"] = len(assignments)
         assign_result["missing_refs"] = missing_refs or assign_result.get("missing_refs", [])
+        assign_result["partial_success"] = request_status["partial_success"]
         assign_result["skipped"] = skipped
         return assign_result
     except Exception as exc:
@@ -1420,6 +1438,18 @@ def _compact_footprint_report(report: dict[str, Any]) -> dict[str, Any]:
         "missing_footprints": report.get("missing_footprints", []),
         "invalid_footprints": report.get("invalid_footprints", []),
         "invalid_footprint_count": report.get("invalid_footprint_count", 0),
+    }
+
+
+def _default_footprint_request_status(
+    wanted_refs: set[str] | None, missing_refs: list[str]
+) -> dict[str, bool]:
+    if wanted_refs is None:
+        return {"all_requested_refs_missing": False, "partial_success": False}
+    missing = set(missing_refs)
+    return {
+        "all_requested_refs_missing": bool(wanted_refs) and missing == wanted_refs,
+        "partial_success": bool(missing) and missing != wanted_refs,
     }
 
 

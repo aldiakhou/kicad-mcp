@@ -128,6 +128,10 @@ async def test_schematic_design_intent_schema_returns_executable_examples(tmp_pa
     assert schema["schemas"]["rails"]["alternate_example"] == [
         {"name": "+3V3", "pins": [["U1", "VDD"]]}
     ]
+    assert (
+        schema["schemas"]["support_circuits.led_indicator"]["generated_nets_summary"]
+        == "Resistor connects rail to LED anode net; LED cathode connects to ground."
+    )
 
     custom_parts = [
         {

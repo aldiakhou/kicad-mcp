@@ -149,7 +149,7 @@ DESIGN_INTENT_SCHEMA = {
         "required_fields": ["type", "rail"],
         "optional_fields": ["name", "target", "ground", "net", "resistor", "resistor_footprint", "led_footprint", "led_color"],
         "generated_parts_summary": "One resistor and one LED.",
-        "generated_nets_summary": "Resistor connects rail to LED cathode net; LED connects that net to ground.",
+        "generated_nets_summary": "Resistor connects rail to LED anode net; LED cathode connects to ground.",
     },
     "support_circuits.ferrite_filter": {
         "example": [{"type": "ferrite_filter", "in_net": "+3V3", "out_net": "+3V3_A", "value": "Ferrite"}],
