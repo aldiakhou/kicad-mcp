@@ -144,6 +144,7 @@ def apply_connection_plan_v2(
     applied_no_connects: list[dict[str, Any]] = []
     removed_conflicting_connections: list[dict[str, Any]] = []
     removed_conflicting_no_connects: list[dict[str, Any]] = []
+    skipped_existing_connections: list[dict[str, Any]] = []
     snap_summary: dict[str, Any] = {}
 
     def mutate(schematic: KiCadSchematic) -> dict[str, Any]:
@@ -159,6 +160,16 @@ def apply_connection_plan_v2(
                 removed_conflicting_connections=removed_conflicting_connections,
                 removed_conflicting_no_connects=removed_conflicting_no_connects,
             )
+            if connection.get("_already_connected"):
+                skipped_existing_connections.append(
+                    {
+                        "ref": connection["ref"],
+                        "pin": connection["pin"],
+                        "net": connection["net"],
+                        "reason": "already connected to requested net",
+                    }
+                )
+                continue
             applied = _apply_normalized_connection(schematic, schematic_path, connection)
             applied_connections.append(applied)
         for marker in normalized_no_connects["no_connects"]:
@@ -177,8 +188,11 @@ def apply_connection_plan_v2(
             "no_connects": applied_no_connects,
             "removed_conflicting_connections": removed_conflicting_connections,
             "removed_conflicting_no_connects": removed_conflicting_no_connects,
+            "skipped_existing_connections": skipped_existing_connections,
             "plan_summary": {
                 "connection_count": len(normalized["connections"]),
+                "applied_connection_count": len(applied_connections),
+                "skipped_existing_connection_count": len(skipped_existing_connections),
                 "required_connection_count": sum(
                     1 for connection in normalized["connections"] if connection.get("required", True)
                 ),
@@ -235,6 +249,7 @@ def apply_connection_plan_v2(
             "failed_connections": [],
             "removed_conflicting_connections": removed_conflicting_connections,
             "removed_conflicting_no_connects": removed_conflicting_no_connects,
+            "skipped_existing_connections": skipped_existing_connections,
             "native_verification": native_verification,
             "erc": erc,
             "warnings": _verification_warnings(native_verification, erc),
@@ -565,6 +580,9 @@ def _prepare_incremental_connection(
             }
             for old_net in removed.get("old_nets", conflicting)
         )
+        return
+    if connection["net"] in attached["nets"]:
+        connection["_already_connected"] = True
         return
     removed_nc = remove_no_connect_at_pin(
         schematic,

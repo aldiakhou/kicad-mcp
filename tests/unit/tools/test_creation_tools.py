@@ -611,6 +611,76 @@ async def test_apply_connection_plan_replace_existing_rewires_pin(
 
 
 @pytest.mark.asyncio
+async def test_apply_connection_plan_skips_same_net_reapplication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_intent.run_erc_via_cli",
+        lambda _path: {"success": True, "total_violations": 0, "violation_categories": {}},
+    )
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "idempotent_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+    symbol = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        25.4,
+        25.4,
+        0.0,
+        "Resistor_SMD:R_0603_1608Metric",
+        None,
+        None,
+    )
+    assert symbol["success"] is True
+
+    first = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NET1"}],
+        None,
+        False,
+        True,
+        False,
+        False,
+        None,
+    )
+    second = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NET1"}],
+        None,
+        False,
+        True,
+        False,
+        False,
+        None,
+    )
+
+    labels = [
+        label
+        for label in KiCadSchematic.from_file(schematic_path).list_labels()
+        if label["text"] == "NET1"
+    ]
+    assert first["success"] is True
+    assert first["skipped_existing_connections"] == []
+    assert second["success"] is True
+    assert second["skipped_existing_connections"] == [
+        {
+            "ref": "R1",
+            "pin": "1",
+            "net": "NET1",
+            "reason": "already connected to requested net",
+        }
+    ]
+    assert second["changed_objects"]["plan_summary"]["applied_connection_count"] == 0
+    assert second["changed_objects"]["plan_summary"]["skipped_existing_connection_count"] == 1
+    assert len(labels) == 1
+
+
+@pytest.mark.asyncio
 async def test_apply_connection_plan_can_strictly_roll_back_on_erc_violations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
