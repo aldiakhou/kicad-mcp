@@ -15,7 +15,7 @@ from fastmcp import Context, FastMCP
 
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
-from kicad_mcp.utils.design_intent_compiler import compile_design_intent
+from kicad_mcp.utils.design_intent_compiler import compile_design_intent, design_intent_schema
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb, validate_pcb_text
@@ -45,6 +45,9 @@ from kicad_mcp.utils.library_resolver import (
 )
 from kicad_mcp.utils.library_resolver import (
     resolve_symbol as resolve_symbol_node,
+)
+from kicad_mcp.utils.library_resolver import (
+    symbol_footprint_suggestions as resolve_symbol_footprint_suggestions,
 )
 from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
 from kicad_mcp.utils.schematic_builder import (
@@ -250,6 +253,35 @@ def register_creation_tools(mcp: FastMCP) -> None:
             return {"success": False, "project_path": project_path, "error": str(exc)}
 
     @mcp.tool()
+    def schematic_assign_footprints(
+        project_path: str,
+        assignments: list[dict[str, str]],
+        verify: bool = True,
+    ) -> dict[str, Any]:
+        """Bulk-assign schematic Footprint properties by reference."""
+        return _schematic_assign_footprints(project_path, assignments, verify=verify)
+
+    @mcp.tool()
+    def schematic_assign_default_footprints(
+        project_path: str,
+        refs: list[str] | None = None,
+        strategy: str = "symbol_default_then_filter",
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Assign missing footprints from symbol defaults, then footprint filters."""
+        return _schematic_assign_default_footprints(project_path, refs, strategy, dry_run)
+
+    @mcp.tool()
+    def schematic_footprint_report(project_path: str) -> dict[str, Any]:
+        """Report missing and invalid schematic footprints with default suggestions."""
+        return _schematic_footprint_report(project_path)
+
+    @mcp.tool()
+    def schematic_design_intent_schema(section: str = "all") -> dict[str, Any]:
+        """Return compact schema examples for schematic_apply_design_intent."""
+        return design_intent_schema(section)
+
+    @mcp.tool()
     def schematic_explain_erc(
         project_path: str,
         include_suggestions: bool = True,
@@ -367,13 +399,16 @@ def register_creation_tools(mcp: FastMCP) -> None:
             return {"success": False, "lib_id": lib_id, "error": str(exc)}
 
     @mcp.tool()
-    def find_symbols(query: str, max_results: int = 10) -> dict[str, Any]:
+    def find_symbols(
+        query: str, max_results: int = 10, library: str | None = None
+    ) -> dict[str, Any]:
         """Fuzzy-search KiCad symbols before resolving an exact lib_id."""
         try:
-            matches = search_symbols(query, max_results=max_results)
+            matches = search_symbols(query, max_results=max_results, library=library)
             return {
                 "success": True,
                 "query": query,
+                "library": library,
                 "count": len(matches),
                 "matches": matches,
                 "recommended_next_tool": "resolve_symbol",
@@ -382,13 +417,16 @@ def register_creation_tools(mcp: FastMCP) -> None:
             return {"success": False, "query": query, "error": str(exc)}
 
     @mcp.tool()
-    def find_footprints(query: str, max_results: int = 10) -> dict[str, Any]:
+    def find_footprints(
+        query: str, max_results: int = 10, library: str | None = None
+    ) -> dict[str, Any]:
         """Fuzzy-search KiCad footprints before resolving an exact footprint_id."""
         try:
-            matches = search_footprints(query, max_results=max_results)
+            matches = search_footprints(query, max_results=max_results, library=library)
             return {
                 "success": True,
                 "query": query,
+                "library": library,
                 "count": len(matches),
                 "matches": matches,
                 "recommended_next_tool": "resolve_footprint",
@@ -1173,6 +1211,244 @@ def _schematic_file_path(project_or_schematic_path: str) -> str:
     if "schematic" not in files:
         raise FileNotFoundError("Schematic file not found")
     return files["schematic"]
+
+
+def _schematic_footprint_report(project_or_schematic_path: str) -> dict[str, Any]:
+    try:
+        schematic_path = _schematic_file_path(project_or_schematic_path)
+        schematic = KiCadSchematic.from_file(schematic_path)
+        symbols = [symbol for symbol in schematic.list_symbols() if _is_assignable_symbol(symbol)]
+        missing_footprints = [
+            symbol["reference"] for symbol in symbols if not str(symbol.get("footprint") or "").strip()
+        ]
+        invalid_footprints = []
+        for symbol in symbols:
+            footprint = str(symbol.get("footprint") or "").strip()
+            if not footprint:
+                continue
+            try:
+                resolve_footprint_node(footprint)
+            except Exception as exc:
+                invalid_footprints.append(
+                    {
+                        "ref": symbol["reference"],
+                        "footprint": footprint,
+                        "error": str(exc),
+                    }
+                )
+        suggested_assignments = []
+        for symbol in symbols:
+            if symbol["reference"] not in missing_footprints:
+                continue
+            suggestion = _symbol_default_footprint(symbol)
+            if suggestion is not None:
+                suggested_assignments.append(
+                    {
+                        "ref": symbol["reference"],
+                        "footprint": suggestion["footprint"],
+                        "source": suggestion["source"],
+                    }
+                )
+        return {
+            "success": True,
+            "project_path": project_or_schematic_path,
+            "schematic_path": schematic_path,
+            "symbol_count": len(symbols),
+            "missing_footprint_count": len(missing_footprints),
+            "missing_footprints": missing_footprints,
+            "invalid_footprints": invalid_footprints,
+            "invalid_footprint_count": len(invalid_footprints),
+            "suggested_assignments": suggested_assignments,
+        }
+    except Exception as exc:
+        return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
+
+
+def _schematic_assign_footprints(
+    project_or_schematic_path: str,
+    assignments: list[dict[str, str]],
+    *,
+    verify: bool,
+) -> dict[str, Any]:
+    try:
+        schematic_path = _schematic_file_path(project_or_schematic_path)
+        schematic = KiCadSchematic.from_file(schematic_path)
+        refs = {symbol["reference"] for symbol in schematic.list_symbols()}
+        normalized_assignments = []
+        malformed_assignments = []
+        missing_refs = []
+        invalid_footprints = []
+        for index, assignment in enumerate(assignments or []):
+            if not isinstance(assignment, dict):
+                malformed_assignments.append({"index": index, "error": "assignment must be an object"})
+                continue
+            ref = str(assignment.get("ref") or assignment.get("reference") or "").strip()
+            footprint = str(assignment.get("footprint") or "").strip()
+            if not ref or not footprint:
+                malformed_assignments.append(
+                    {"index": index, "ref": ref, "footprint": footprint, "error": "assignment requires ref and footprint"}
+                )
+                continue
+            if ref not in refs:
+                missing_refs.append(ref)
+                continue
+            if verify:
+                try:
+                    resolve_footprint_node(footprint)
+                except Exception as exc:
+                    invalid_footprints.append({"ref": ref, "footprint": footprint, "error": str(exc)})
+                    continue
+            normalized_assignments.append({"ref": ref, "footprint": footprint})
+        if malformed_assignments or missing_refs or invalid_footprints:
+            return {
+                "success": False,
+                "project_path": project_or_schematic_path,
+                "schematic_path": schematic_path,
+                "assigned_count": 0,
+                "missing_refs": sorted(set(missing_refs)),
+                "invalid_footprints": invalid_footprints,
+                "malformed_assignments": malformed_assignments,
+                "footprint_report": _compact_footprint_report(_schematic_footprint_report(schematic_path)),
+            }
+
+        def mutate(target: KiCadSchematic) -> dict[str, Any]:
+            assigned = []
+            for assignment in normalized_assignments:
+                property_data = target.set_property(
+                    assignment["ref"], "Footprint", assignment["footprint"]
+                )
+                assigned.append({**assignment, "property": property_data})
+            return {"assigned": assigned, "assigned_count": len(assigned)}
+
+        result = _apply_transactional_schematic_authoring(schematic_path, mutate)
+        report = _schematic_footprint_report(schematic_path)
+        result.update(
+            {
+                "tool": "schematic_assign_footprints",
+                "project_path": project_or_schematic_path,
+                "schematic_path": schematic_path,
+                "assigned_count": result.get("changed_objects", {}).get("assigned_count", 0),
+                "missing_refs": [],
+                "invalid_footprints": [],
+                "footprint_report": _compact_footprint_report(report),
+            }
+        )
+        return result
+    except Exception as exc:
+        return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
+
+
+def _schematic_assign_default_footprints(
+    project_or_schematic_path: str,
+    refs: list[str] | None,
+    strategy: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if strategy != "symbol_default_then_filter":
+        return {
+            "success": False,
+            "project_path": project_or_schematic_path,
+            "error": "strategy must be symbol_default_then_filter",
+        }
+    try:
+        schematic_path = _schematic_file_path(project_or_schematic_path)
+        schematic = KiCadSchematic.from_file(schematic_path)
+        wanted_refs = {str(ref) for ref in refs} if refs else None
+        assignments = []
+        skipped = []
+        missing_refs = []
+        symbols_by_ref = {
+            symbol["reference"]: symbol
+            for symbol in schematic.list_symbols()
+            if _is_assignable_symbol(symbol)
+        }
+        if wanted_refs is not None:
+            missing_refs = sorted(ref for ref in wanted_refs if ref not in symbols_by_ref)
+        for symbol in symbols_by_ref.values():
+            ref = symbol["reference"]
+            if wanted_refs is not None and ref not in wanted_refs:
+                continue
+            if str(symbol.get("footprint") or "").strip():
+                skipped.append({"ref": ref, "reason": "footprint already assigned"})
+                continue
+            suggestion = _symbol_default_footprint(symbol)
+            if suggestion is None:
+                skipped.append({"ref": ref, "reason": "no symbol default or matching footprint filter"})
+                continue
+            assignments.append(
+                {
+                    "ref": ref,
+                    "footprint": suggestion["footprint"],
+                    "source": suggestion["source"],
+                }
+            )
+        if dry_run:
+            return {
+                "success": True,
+                "project_path": project_or_schematic_path,
+                "schematic_path": schematic_path,
+                "dry_run": True,
+                "assigned_count": 0,
+                "planned_assignments": assignments,
+                "planned_assignment_count": len(assignments),
+                "missing_refs": missing_refs,
+                "skipped": skipped,
+                "footprint_report": _compact_footprint_report(_schematic_footprint_report(schematic_path)),
+            }
+        assign_result = _schematic_assign_footprints(
+            schematic_path,
+            [{"ref": item["ref"], "footprint": item["footprint"]} for item in assignments],
+            verify=True,
+        )
+        assign_result["tool"] = "schematic_assign_default_footprints"
+        assign_result["dry_run"] = False
+        assign_result["planned_assignments"] = assignments
+        assign_result["planned_assignment_count"] = len(assignments)
+        assign_result["missing_refs"] = missing_refs or assign_result.get("missing_refs", [])
+        assign_result["skipped"] = skipped
+        return assign_result
+    except Exception as exc:
+        return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
+
+
+def _compact_footprint_report(report: dict[str, Any]) -> dict[str, Any]:
+    if not report.get("success"):
+        return report
+    return {
+        "symbol_count": report.get("symbol_count", 0),
+        "missing_footprint_count": report.get("missing_footprint_count", 0),
+        "missing_footprints": report.get("missing_footprints", []),
+        "invalid_footprints": report.get("invalid_footprints", []),
+        "invalid_footprint_count": report.get("invalid_footprint_count", 0),
+    }
+
+
+def _symbol_default_footprint(symbol: dict[str, Any]) -> dict[str, str] | None:
+    lib_id = str(symbol.get("lib_id") or "")
+    if not lib_id:
+        return None
+    try:
+        for suggestion in resolve_symbol_footprint_suggestions(lib_id, max_results=5):
+            footprint = str(suggestion.get("footprint") or "").strip()
+            if not footprint:
+                continue
+            try:
+                resolve_footprint_node(footprint)
+            except Exception:
+                continue
+            return {
+                "footprint": footprint,
+                "source": str(suggestion.get("source") or "symbol_default"),
+            }
+    except Exception:
+        return None
+    return None
+
+
+def _is_assignable_symbol(symbol: dict[str, Any]) -> bool:
+    ref = str(symbol.get("reference") or "")
+    lib_id = str(symbol.get("lib_id") or "")
+    return bool(ref) and not ref.startswith("#") and not lib_id.startswith("power:")
 
 
 def _design_intent_artifact_dir(project_path: str) -> Path:

@@ -116,6 +116,97 @@ async def test_schematic_apply_design_intent_reports_compile_errors_before_build
     assert result["errors"][0]["error"] == "selector matched zero pins"
 
 
+@pytest.mark.asyncio
+async def test_schematic_design_intent_schema_returns_executable_examples(tmp_path: Path):
+    server = create_server()
+    tools = await server.get_tools()
+
+    schema = tools["schematic_design_intent_schema"].fn("all")
+
+    assert schema["success"] is True
+    assert "support_circuits.decoupling" in schema["schemas"]
+    assert schema["schemas"]["rails"]["alternate_example"] == [
+        {"name": "+3V3", "pins": [["U1", "VDD"]]}
+    ]
+
+    custom_parts = [
+        {
+            "ref": "U1",
+            "value": "MCU",
+            "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+            "pins": [
+                {"number": "1", "name": "VDD", "type": "power_in"},
+                {"number": "2", "name": "VSS", "type": "power_in"},
+                {"number": "3", "name": "PB6", "type": "bidirectional"},
+                {"number": "4", "name": "PB7", "type": "bidirectional"},
+                {"number": "5", "name": "PA5", "type": "bidirectional"},
+                {"number": "6", "name": "PA6", "type": "bidirectional"},
+                {"number": "7", "name": "PA7", "type": "bidirectional"},
+                {"number": "8", "name": "PA13", "type": "bidirectional"},
+                {"number": "9", "name": "PA14", "type": "bidirectional"},
+                {"number": "10", "name": "NRST", "type": "input"},
+                {"number": "11", "name": "PA0", "type": "bidirectional"},
+                {"number": "12", "name": "BOOT0", "type": "input"},
+            ],
+        },
+        {
+            "ref": "U2",
+            "value": "IMU",
+            "footprint": "Package_LGA:LGA-8_2.0x2.5mm_P0.65mm",
+            "pins": [
+                {"number": "1", "name": "SCL", "type": "bidirectional"},
+                {"number": "2", "name": "SDA", "type": "bidirectional"},
+                {"number": "3", "name": "INT", "type": "output"},
+                {"number": "4", "name": "VDD", "type": "power_in"},
+                {"number": "5", "name": "GND", "type": "power_in"},
+            ],
+        },
+        {
+            "ref": "U3",
+            "value": "FLASH",
+            "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+            "pins": [
+                {"number": "1", "name": "~{CS}", "type": "input"},
+                {"number": "2", "name": "SO", "type": "output"},
+                {"number": "4", "name": "GND", "type": "power_in"},
+                {"number": "5", "name": "SI", "type": "input"},
+                {"number": "6", "name": "SCK", "type": "input"},
+                {"number": "8", "name": "VCC", "type": "power_in"},
+            ],
+        },
+    ]
+    examples = schema["schemas"]
+    intent = {
+        "parts": custom_parts,
+        "rails": examples["rails"]["alternate_example"],
+        "pin_rules": examples["pin_rules"]["example"],
+        "interfaces": (
+            examples["interfaces.i2c"]["example"]
+            + examples["interfaces.spi"]["example"]
+            + examples["interfaces.swd"]["example"]
+        ),
+        "support_circuits": [
+            examples["support_circuits.decoupling"]["example"][0],
+            examples["support_circuits.pullup"]["example"][0],
+            examples["support_circuits.pulldown"]["example"][0],
+            examples["support_circuits.crystal"]["example"][0],
+            examples["support_circuits.reset_button"]["example"][0],
+            examples["support_circuits.led_indicator"]["example"][0],
+            examples["support_circuits.ferrite_filter"]["example"][0],
+            examples["support_circuits.power_flag"]["example"][0],
+            examples["support_circuits.connector_header"]["example"][0],
+        ],
+        "bulk_connections": examples["bulk_connections"]["example"],
+        "no_connect_rules": examples["no_connect_rules"]["example"],
+    }
+
+    preview = tools["schematic_preview_design_intent"].fn(str(tmp_path), intent)
+
+    assert preview["success"] is True
+    assert preview["summary"]["generated_part_count"] >= 12
+    assert preview["summary"]["net_count"] >= 10
+
+
 def test_schematic_apply_design_intent_strict_fails_on_bad_quality_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from kicad_mcp.server import create_server
+from kicad_mcp.utils import library_resolver
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 
 
@@ -11,7 +12,11 @@ def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     footprint_dir = tmp_path / "footprints"
     symbol_dir.mkdir()
     footprint_library = footprint_dir / "Resistor_SMD.pretty"
+    capacitor_footprint_library = footprint_dir / "Capacitor_SMD.pretty"
+    package_footprint_library = footprint_dir / "Package_QFP.pretty"
     footprint_library.mkdir(parents=True)
+    capacitor_footprint_library.mkdir(parents=True)
+    package_footprint_library.mkdir(parents=True)
 
     (symbol_dir / "Device.kicad_sym").write_text(
         """
@@ -23,13 +28,60 @@ def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     (on_board yes)
     (property "Reference" "R" (at 0 0 0))
     (property "Value" "R" (at 0 2.54 0))
-    (property "Footprint" "" (at 0 5.08 0))
+    (property "Footprint" "Resistor_SMD:R_0603_1608Metric" (at 0 5.08 0))
+    (property "ki_description" "Generic resistor" (at 0 7.62 0))
+    (property "ki_keywords" "resistor resistance" (at 0 10.16 0))
+    (property "ki_fp_filters" "R_*" (at 0 12.7 0))
     (pin passive line (at -2.54 0 180) (length 2.54)
       (name "~" (effects (font (size 1.27 1.27))))
       (number "1" (effects (font (size 1.27 1.27))))
     )
     (pin passive line (at 2.54 0 0) (length 2.54)
       (name "~" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27))))
+    )
+  )
+  (symbol "C"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "C" (at 0 0 0))
+    (property "Value" "C" (at 0 2.54 0))
+    (property "Footprint" "" (at 0 5.08 0))
+    (property "ki_description" "Generic capacitor" (at 0 7.62 0))
+    (property "ki_keywords" "capacitor capacitance" (at 0 10.16 0))
+    (property "ki_fp_filters" "C_*" (at 0 12.7 0))
+    (pin passive line (at -2.54 0 180) (length 2.54)
+      (name "~" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27))))
+    )
+    (pin passive line (at 2.54 0 0) (length 2.54)
+      (name "~" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27))))
+    )
+  )
+)
+""",
+        encoding="utf-8",
+    )
+    (symbol_dir / "MCU_Test.kicad_sym").write_text(
+        """
+(kicad_symbol_lib
+  (version 20240108)
+  (generator "pytest")
+  (symbol "MCU48"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "U" (at 0 0 0))
+    (property "Value" "MCU48" (at 0 2.54 0))
+    (property "Footprint" "Package_QFP:LQFP-48_7x7mm_P0.5mm" (at 0 5.08 0))
+    (property "ki_description" "USB capable microcontroller" (at 0 7.62 0))
+    (property "ki_keywords" "MCU USB Micro B SPI I2C" (at 0 10.16 0))
+    (pin power_in line (at -2.54 0 180) (length 2.54)
+      (name "VDD" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27))))
+    )
+    (pin power_in line (at 2.54 0 0) (length 2.54)
+      (name "GND" (effects (font (size 1.27 1.27))))
       (number "2" (effects (font (size 1.27 1.27))))
     )
   )
@@ -51,8 +103,37 @@ def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 """,
         encoding="utf-8",
     )
+    (capacitor_footprint_library / "C_0603_1608Metric.kicad_mod").write_text(
+        """
+(footprint "C_0603_1608Metric"
+  (version 20240108)
+  (generator "pytest")
+  (layer "F.Cu")
+  (property "Reference" "REF**" (at 0 -1 0) (layer "F.SilkS"))
+  (property "Value" "C_0603_1608Metric" (at 0 1 0) (layer "F.Fab"))
+  (pad "1" smd rect (at -0.8 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (pad "2" smd rect (at 0.8 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask"))
+)
+""",
+        encoding="utf-8",
+    )
+    (package_footprint_library / "LQFP-48_7x7mm_P0.5mm.kicad_mod").write_text(
+        """
+(footprint "LQFP-48_7x7mm_P0.5mm"
+  (version 20240108)
+  (generator "pytest")
+  (layer "F.Cu")
+  (property "Reference" "REF**" (at 0 -1 0) (layer "F.SilkS"))
+  (property "Value" "LQFP-48_7x7mm_P0.5mm" (at 0 1 0) (layer "F.Fab"))
+  (pad "1" smd rect (at -0.8 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask"))
+)
+""",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("KICAD_SYMBOL_DIR", str(symbol_dir))
     monkeypatch.setenv("KICAD_FOOTPRINT_DIR", str(footprint_dir))
+    library_resolver.find_symbols.cache_clear()
+    library_resolver.find_footprints.cache_clear()
 
 
 def _skip_cli_validation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,6 +168,10 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
         "schematic_attach_net_to_pin",
         "schematic_apply_connection_plan",
         "schematic_add_no_connect",
+        "schematic_assign_footprints",
+        "schematic_assign_default_footprints",
+        "schematic_footprint_report",
+        "schematic_design_intent_schema",
         "schematic_explain_erc",
         "schematic_plan_erc_fixes",
         "schematic_apply_functional_layout",
@@ -1088,11 +1173,19 @@ async def test_agent_search_tools_and_compact_v2_build_defaults(
 
     symbols = tools["find_symbols"].fn("Device", 5)
     footprints = tools["find_footprints"].fn("0603", 5)
+    library_symbols = tools["find_symbols"].fn("USB Micro B", 5, "MCU_Test")
+    library_footprints = tools["find_footprints"].fn("LQFP", 5, "Package_QFP")
 
     assert symbols["success"] is True
     assert any(match["lib_id"] == "Device:R" for match in symbols["matches"])
+    resistor_match = next(match for match in symbols["matches"] if match["lib_id"] == "Device:R")
+    assert resistor_match["default_footprint"] == "Resistor_SMD:R_0603_1608Metric"
+    assert "R_*" in resistor_match["footprint_filters"]
     assert footprints["success"] is True
     assert footprints["matches"][0]["footprint_id"] == "Resistor_SMD:R_0603_1608Metric"
+    assert library_symbols["matches"][0]["lib_id"] == "MCU_Test:MCU48"
+    assert library_symbols["matches"][0]["default_footprint"] == "Package_QFP:LQFP-48_7x7mm_P0.5mm"
+    assert library_footprints["matches"][0]["footprint_id"] == "Package_QFP:LQFP-48_7x7mm_P0.5mm"
 
     project = tools["create_kicad_project"].fn(str(tmp_path), "compact_demo", True, True, "A4")
     built = tools["schematic_build_from_spec_v2"].fn(
@@ -1116,6 +1209,86 @@ async def test_agent_search_tools_and_compact_v2_build_defaults(
     assert "diff" not in built
     assert "schematic_preview" not in built
     assert "quality_report" not in built
+
+
+@pytest.mark.asyncio
+async def test_schematic_footprint_tools_assign_explicit_and_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_symbol_roots", lambda: [])
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_footprint_roots", lambda: [])
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "footprints", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+
+    resistor = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        30.0,
+        30.0,
+        0.0,
+        None,
+        None,
+        None,
+    )
+    capacitor = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:C",
+        "C1",
+        "100n",
+        45.0,
+        30.0,
+        0.0,
+        None,
+        None,
+        None,
+    )
+    assert resistor["success"] is True
+    assert capacitor["success"] is True
+
+    report = tools["schematic_footprint_report"].fn(project["project_path"])
+    assert report["success"] is True
+    assert report["missing_footprints"] == ["R1", "C1"]
+    assert {"ref": "R1", "footprint": "Resistor_SMD:R_0603_1608Metric", "source": "symbol_default"} in report["suggested_assignments"]
+    assert {"ref": "C1", "footprint": "Capacitor_SMD:C_0603_1608Metric", "source": "footprint_filter"} in report["suggested_assignments"]
+
+    assigned = tools["schematic_assign_footprints"].fn(
+        project["project_path"],
+        [{"ref": "R1", "footprint": "Resistor_SMD:R_0603_1608Metric"}],
+        True,
+    )
+    assert assigned["success"] is True
+    assert assigned["assigned_count"] == 1
+    assert assigned["footprint_report"]["missing_footprint_count"] == 1
+
+    dry_run = tools["schematic_assign_default_footprints"].fn(
+        project["project_path"],
+        ["C1"],
+        "symbol_default_then_filter",
+        True,
+    )
+    assert dry_run["success"] is True
+    assert dry_run["planned_assignments"] == [
+        {"ref": "C1", "footprint": "Capacitor_SMD:C_0603_1608Metric", "source": "footprint_filter"}
+    ]
+    assert "Capacitor_SMD:C_0603_1608Metric" not in Path(schematic_path).read_text(encoding="utf-8")
+
+    defaulted = tools["schematic_assign_default_footprints"].fn(
+        project["project_path"],
+        ["C1"],
+        "symbol_default_then_filter",
+        False,
+    )
+    assert defaulted["success"] is True
+    assert defaulted["assigned_count"] == 1
+    final_report = tools["schematic_footprint_report"].fn(project["project_path"])
+    assert final_report["missing_footprint_count"] == 0
+    assert final_report["invalid_footprints"] == []
 
 
 @pytest.mark.asyncio

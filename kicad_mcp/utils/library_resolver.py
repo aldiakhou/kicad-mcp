@@ -10,6 +10,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 import platform
+import re
 from typing import Any
 
 from kicad_mcp.utils.kicad_s_expr import (
@@ -50,15 +51,20 @@ def list_footprint_libraries(query: str | None = None) -> list[dict[str, Any]]:
     return libraries
 
 
-@lru_cache(maxsize=128)
-def find_symbols(query: str, max_results: int = 10) -> list[dict[str, Any]]:
-    """Fuzzy-search installed KiCad symbols by library, symbol name, and properties."""
+@lru_cache(maxsize=256)
+def find_symbols(
+    query: str, max_results: int = 10, library: str | None = None
+) -> list[dict[str, Any]]:
+    """Fuzzy-search installed KiCad symbols by library, symbol name, and metadata."""
     normalized_query = _normalize_search_text(query)
+    normalized_library = _normalize_search_text(library or "")
     if not normalized_query:
         return []
     matches: list[tuple[float, dict[str, Any]]] = []
     for library in list_symbol_libraries():
         library_name = library["name"]
+        if normalized_library and normalized_library not in _normalize_search_text(library_name):
+            continue
         library_query_match = normalized_query in _normalize_search_text(library_name)
         try:
             library_text = Path(library["path"]).read_text(encoding="utf-8")
@@ -78,6 +84,8 @@ def find_symbols(query: str, max_results: int = 10) -> list[dict[str, Any]]:
             symbol_name = _atom_text(symbol.items[1] if len(symbol.items) > 1 else None) or ""
             lib_id = f"{library_name}:{symbol_name}"
             properties = _symbol_properties(symbol)
+            default_footprint = properties.get("Footprint", "")
+            footprint_filters = _split_footprint_filters(properties.get("ki_fp_filters", ""))
             searchable = " ".join(
                 [
                     lib_id,
@@ -85,7 +93,11 @@ def find_symbols(query: str, max_results: int = 10) -> list[dict[str, Any]]:
                     symbol_name,
                     properties.get("Value", ""),
                     properties.get("Description", ""),
+                    properties.get("ki_description", ""),
                     properties.get("Keywords", ""),
+                    properties.get("ki_keywords", ""),
+                    properties.get("ki_fp_filters", ""),
+                    default_footprint,
                 ]
             )
             score = _search_score(normalized_query, searchable, lib_id)
@@ -98,9 +110,12 @@ def find_symbols(query: str, max_results: int = 10) -> list[dict[str, Any]]:
                         "lib_id": lib_id,
                         "library": library_name,
                         "symbol": symbol_name,
-                        "description": properties.get("Description", ""),
-                        "keywords": properties.get("Keywords", ""),
-                        "default_footprint": properties.get("Footprint", ""),
+                        "description": properties.get("Description")
+                        or properties.get("ki_description", ""),
+                        "keywords": properties.get("Keywords")
+                        or properties.get("ki_keywords", ""),
+                        "footprint_filters": footprint_filters,
+                        "default_footprint": default_footprint,
                     },
                 )
             )
@@ -108,19 +123,25 @@ def find_symbols(query: str, max_results: int = 10) -> list[dict[str, Any]]:
     return [item for _, item in matches[: max(1, int(max_results))]]
 
 
-@lru_cache(maxsize=128)
-def find_footprints(query: str, max_results: int = 10) -> list[dict[str, Any]]:
+@lru_cache(maxsize=256)
+def find_footprints(
+    query: str, max_results: int = 10, library: str | None = None
+) -> list[dict[str, Any]]:
     """Fuzzy-search installed KiCad footprints by library and footprint name."""
     normalized_query = _normalize_search_text(query)
+    normalized_library = _normalize_search_text(library or "")
     if not normalized_query:
         return []
     matches: list[tuple[float, dict[str, Any]]] = []
     for library in list_footprint_libraries():
         library_name = library["name"]
+        if normalized_library and normalized_library not in _normalize_search_text(library_name):
+            continue
         for footprint_file in sorted(Path(library["path"]).glob("*.kicad_mod")):
             footprint_name = footprint_file.stem
             footprint_id = f"{library_name}:{footprint_name}"
-            score = _search_score(normalized_query, f"{footprint_id} {library_name}", footprint_id)
+            searchable = f"{footprint_id} {library_name} {footprint_name}"
+            score = _search_score(normalized_query, searchable, footprint_id)
             if score <= 0:
                 continue
             matches.append(
@@ -136,6 +157,29 @@ def find_footprints(query: str, max_results: int = 10) -> list[dict[str, Any]]:
             )
     matches.sort(key=lambda item: (-item[0], item[1]["footprint_id"]))
     return [item for _, item in matches[: max(1, int(max_results))]]
+
+
+def symbol_footprint_suggestions(lib_id: str, max_results: int = 5) -> list[dict[str, Any]]:
+    """Return footprint suggestions from a symbol's default Footprint and ki_fp_filters."""
+    symbol = resolve_symbol(lib_id)
+    properties = _symbol_properties(symbol["node"])
+    suggestions: list[dict[str, Any]] = []
+    default_footprint = properties.get("Footprint", "").strip()
+    if default_footprint:
+        suggestions.append({"footprint": default_footprint, "source": "symbol_default"})
+    for footprint_filter in _split_footprint_filters(properties.get("ki_fp_filters", "")):
+        for footprint in _footprints_matching_filter(footprint_filter):
+            if all(item["footprint"] != footprint for item in suggestions):
+                suggestions.append(
+                    {
+                        "footprint": footprint,
+                        "source": "footprint_filter",
+                        "filter": footprint_filter,
+                    }
+                )
+            if len(suggestions) >= max(1, int(max_results)):
+                return suggestions
+    return suggestions[: max(1, int(max_results))]
 
 
 def resolve_symbol(lib_id: str) -> dict[str, Any]:
@@ -203,6 +247,28 @@ def _symbol_properties(symbol: SExprList) -> dict[str, str]:
         if name:
             properties[name] = value or ""
     return properties
+
+
+def _split_footprint_filters(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split() if item.strip()]
+
+
+def _footprints_matching_filter(footprint_filter: str) -> list[str]:
+    regex = _footprint_filter_regex(footprint_filter)
+    matches = []
+    for library in list_footprint_libraries():
+        library_name = library["name"]
+        for footprint_file in sorted(Path(library["path"]).glob("*.kicad_mod")):
+            footprint_name = footprint_file.stem
+            footprint_id = f"{library_name}:{footprint_name}"
+            if regex.fullmatch(footprint_id) or regex.fullmatch(footprint_name):
+                matches.append(footprint_id)
+    return matches
+
+
+def _footprint_filter_regex(footprint_filter: str) -> Any:
+    pattern = re.escape(footprint_filter).replace(r"\*", ".*").replace(r"\?", ".")
+    return re.compile(pattern, re.IGNORECASE)
 
 
 def _normalize_search_text(value: str) -> str:

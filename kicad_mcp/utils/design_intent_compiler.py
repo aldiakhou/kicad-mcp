@@ -24,6 +24,7 @@ DEFAULT_FOOTPRINTS = {
     "header_1x06": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
     "test_point": "TestPoint:TestPoint_Pad_D1.0mm",
     "ferrite": "Inductor_SMD:L_0603_1608Metric",
+    "crystal": "Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm",
 }
 
 PASSIVE_SYMBOLS = {
@@ -36,6 +37,173 @@ PASSIVE_SYMBOLS = {
     "FB": ("Device:FerriteBead", "ferrite"),
     "#FLG": ("power:PWR_FLAG", None),
 }
+
+
+DESIGN_INTENT_SCHEMA = {
+    "parts": {
+        "example": [
+            {
+                "ref": "U1",
+                "lib_id": "MCU_ST_STM32F1:STM32F103C8Tx",
+                "value": "STM32F103C8T6",
+                "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+            }
+        ],
+        "required_fields": ["ref", "lib_id or pins", "value", "footprint for non-power parts"],
+        "optional_fields": ["pins", "x", "y", "angle", "properties"],
+    },
+    "rails": {
+        "example": {
+            "+3V3": {"pins": [["U1", "VDD"], ["U2", "VDD"]]},
+            "GND": {"pins": [["U1", "VSS"], ["U2", "GND"]]},
+        },
+        "alternate_example": [{"name": "+3V3", "pins": [["U1", "VDD"]]}],
+        "required_fields": ["rail name", "pins"],
+        "optional_fields": [],
+    },
+    "pin_rules": {
+        "example": [
+            {"ref": "U1", "match": {"name_regex": "VDD|VDDA"}, "net": "+3V3"},
+            {"ref": "U1", "match": {"name_regex": "VSS|VSSA|GND"}, "net": "GND"},
+        ],
+        "required_fields": ["ref", "match", "net"],
+        "optional_fields": ["match.exclude"],
+    },
+    "interfaces.i2c": {
+        "example": [
+            {
+                "type": "i2c",
+                "name": "IMU_I2C",
+                "controller": {"ref": "U1", "scl": "PB6", "sda": "PB7"},
+                "devices": [{"ref": "U2", "scl": "SCL", "sda": "SDA"}],
+                "pullups": {"rail": "+3V3", "value": "4.7k"},
+            }
+        ],
+        "required_fields": ["type", "controller", "devices"],
+        "optional_fields": ["name", "scl_net", "sda_net", "pullups"],
+    },
+    "interfaces.spi": {
+        "example": [
+            {
+                "type": "spi",
+                "name": "FLASH_SPI",
+                "controller": {"ref": "U1", "sck": "PA5", "miso": "PA6", "mosi": "PA7"},
+                "devices": [{"ref": "U3", "sck": "SCK", "miso": "SO", "mosi": "SI", "cs": "FLASH_CS", "cs_pin": "~{CS}"}],
+            }
+        ],
+        "required_fields": ["type", "controller", "devices"],
+        "optional_fields": ["name", "sck_net", "miso_net", "mosi_net", "cs_net"],
+    },
+    "interfaces.swd": {
+        "example": [
+            {
+                "type": "swd",
+                "target": "U1",
+                "swdio": "PA13",
+                "swclk": "PA14",
+                "reset": "NRST",
+                "rail": "+3V3",
+                "ground": "GND",
+            }
+        ],
+        "required_fields": ["type", "target"],
+        "optional_fields": ["swdio", "swclk", "reset", "rail", "ground", "header"],
+    },
+    "support_circuits.decoupling": {
+        "example": [{"type": "decoupling", "target": "U1", "rail": "+3V3", "ground": "GND", "capacitors": ["100n", "4.7u"]}],
+        "required_fields": ["type", "rail", "capacitors"],
+        "optional_fields": ["target", "ground", "footprint", "footprints"],
+        "generated_parts_summary": "One capacitor per capacitors entry.",
+        "generated_nets_summary": "Each capacitor connects rail to ground.",
+    },
+    "support_circuits.pullup": {
+        "example": [{"type": "pullup", "net": "RESET_N", "rail": "+3V3", "value": "10k"}],
+        "required_fields": ["type", "net", "rail"],
+        "optional_fields": ["target", "value", "footprint"],
+        "generated_parts_summary": "One resistor.",
+        "generated_nets_summary": "Resistor connects net to rail.",
+    },
+    "support_circuits.pulldown": {
+        "example": [{"type": "pulldown", "net": "BOOT0", "ground": "GND", "value": "10k"}],
+        "required_fields": ["type", "net"],
+        "optional_fields": ["target", "ground", "value", "footprint"],
+        "generated_parts_summary": "One resistor.",
+        "generated_nets_summary": "Resistor connects net to ground.",
+    },
+    "support_circuits.crystal": {
+        "example": [{"type": "crystal", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "value": "8MHz"}],
+        "required_fields": ["type", "pins"],
+        "optional_fields": ["target", "ref", "value", "footprint"],
+        "generated_parts_summary": "One crystal.",
+        "generated_nets_summary": "Crystal pins 1 and 2 connect to the two listed nets.",
+    },
+    "support_circuits.reset_button": {
+        "example": [{"type": "reset_button", "target": "U1", "pin": "NRST", "net": "RESET_N", "rail": "+3V3", "pullup": "10k", "ground": "GND"}],
+        "required_fields": ["type"],
+        "optional_fields": ["target", "pin", "net", "rail", "pullup", "ground", "ref", "footprint"],
+        "generated_parts_summary": "One push button and optional pullup resistor.",
+        "generated_nets_summary": "Button connects reset net to ground; pullup connects reset net to rail.",
+    },
+    "support_circuits.led_indicator": {
+        "example": [{"type": "led_indicator", "name": "STATUS", "rail": "+3V3", "ground": "GND", "resistor": "1k"}],
+        "required_fields": ["type", "rail"],
+        "optional_fields": ["name", "target", "ground", "net", "resistor", "resistor_footprint", "led_footprint", "led_color"],
+        "generated_parts_summary": "One resistor and one LED.",
+        "generated_nets_summary": "Resistor connects rail to LED cathode net; LED connects that net to ground.",
+    },
+    "support_circuits.ferrite_filter": {
+        "example": [{"type": "ferrite_filter", "in_net": "+3V3", "out_net": "+3V3_A", "value": "Ferrite"}],
+        "required_fields": ["type", "in_net", "out_net"],
+        "optional_fields": ["target", "value", "footprint"],
+        "generated_parts_summary": "One ferrite bead.",
+        "generated_nets_summary": "Ferrite connects input net to output net.",
+    },
+    "support_circuits.power_flag": {
+        "example": [{"type": "power_flag", "net": "+3V3"}],
+        "required_fields": ["type", "net or rail"],
+        "optional_fields": ["ref"],
+        "generated_parts_summary": "One PWR_FLAG power symbol.",
+        "generated_nets_summary": "PWR_FLAG pin connects to the selected power net.",
+    },
+    "support_circuits.connector_header": {
+        "example": [{"type": "connector_header", "ref": "J2", "name": "DEBUG", "pins": ["+3V3", "SWDIO", "GND", "SWCLK", "RESET_N"]}],
+        "required_fields": ["type"],
+        "optional_fields": ["ref", "name", "value", "pin_count", "pins", "footprint", "target"],
+        "generated_parts_summary": "One generic 1xN connector.",
+        "generated_nets_summary": "Each listed net connects to the matching connector pin number.",
+    },
+    "bulk_connections": {
+        "example": [{"net": "IMU_INT", "pins": [["U1", "PA0"], ["U2", "INT"]]}],
+        "required_fields": ["net and pins, or net_prefix and map"],
+        "optional_fields": [],
+    },
+    "no_connect_rules": {
+        "example": [{"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PB6", "PB7", "PA13", "PA14"], "action": "mark_no_connect"}],
+        "required_fields": ["ref", "match"],
+        "optional_fields": ["except", "include_hidden", "allow_hidden_no_connect", "action"],
+    },
+}
+
+
+def design_intent_schema(section: str = "all") -> dict[str, Any]:
+    """Return compact design-intent examples and field metadata for agents."""
+    normalized = str(section or "all").strip().lower()
+    if normalized == "all":
+        return {"success": True, "section": "all", "schemas": deepcopy(DESIGN_INTENT_SCHEMA)}
+    if normalized in DESIGN_INTENT_SCHEMA:
+        return {"success": True, "section": normalized, "schema": deepcopy(DESIGN_INTENT_SCHEMA[normalized])}
+    prefix = f"{normalized}."
+    matches = {
+        key: value for key, value in DESIGN_INTENT_SCHEMA.items() if key.startswith(prefix)
+    }
+    if matches:
+        return {"success": True, "section": normalized, "schemas": deepcopy(matches)}
+    return {
+        "success": False,
+        "section": normalized,
+        "error": "unknown design-intent schema section",
+        "available_sections": sorted(DESIGN_INTENT_SCHEMA),
+    }
 
 
 def compile_design_intent(
@@ -163,13 +331,29 @@ class _DesignIntentCompiler:
             if not isinstance(normalized[key], list):
                 self.errors.append({"path": key, "error": f"{key} must be a list"})
                 normalized[key] = []
-        if not isinstance(normalized["rails"], dict):
-            self.errors.append({"path": "rails", "error": "rails must be an object"})
-            normalized["rails"] = {}
+        normalized["rails"] = self._normalize_rails(normalized["rails"])
         if not isinstance(normalized["layout_hints"], dict):
             self.errors.append({"path": "layout_hints", "error": "layout_hints must be an object"})
             normalized["layout_hints"] = {}
         return normalized
+
+    def _normalize_rails(self, rails: Any) -> dict[str, Any]:
+        if isinstance(rails, dict):
+            return rails
+        if isinstance(rails, list):
+            normalized: dict[str, Any] = {}
+            for index, rail in enumerate(rails):
+                if not isinstance(rail, dict):
+                    self.errors.append({"path": f"rails[{index}]", "error": "rail entry must be an object"})
+                    continue
+                name = rail.get("name") or rail.get("net") or rail.get("rail")
+                if not name:
+                    self.errors.append({"path": f"rails[{index}].name", "error": "rail entry requires name"})
+                    continue
+                normalized[str(name)] = {key: deepcopy(value) for key, value in rail.items() if key != "name"}
+            return normalized
+        self.errors.append({"path": "rails", "error": "rails must be an object or list"})
+        return {}
 
     def _load_pin_maps(self) -> None:
         refs_seen: set[str] = set(self.existing_refs)
@@ -577,7 +761,7 @@ class _DesignIntentCompiler:
         if len(pins) < 2:
             self.errors.append({"path": path, "error": "crystal requires two nets in pins"})
             return
-        self._add_part({"ref": ref, "lib_id": "Device:Crystal", "value": str(circuit.get("value") or "Crystal"), "footprint": circuit.get("footprint"), "generated_by": "crystals", "target": circuit.get("target")})
+        self._add_part({"ref": ref, "lib_id": "Device:Crystal", "value": str(circuit.get("value") or "Crystal"), "footprint": circuit.get("footprint") or DEFAULT_FOOTPRINTS["crystal"], "generated_by": "crystals", "target": circuit.get("target")})
         self._add_connection(str(pins[0]), ref, "1", path)
         self._add_connection(str(pins[1]), ref, "2", path)
 

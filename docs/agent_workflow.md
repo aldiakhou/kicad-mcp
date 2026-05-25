@@ -111,7 +111,7 @@ The MCP layer resolves symbols, resolves pins, snaps generated geometry to the s
 
 ## Tool Profiles
 
-By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes only `schematic_apply_design_intent`, `schematic_preview_design_intent`, `schematic_build_from_spec_v2`, `schematic_apply_connection_plan`, `schematic_quality_report`, `find_symbols`, `find_footprints`, and `project_design_state`. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
+By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes the design-intent workflow tools, footprint assignment/report tools, ERC explanation/fix planning tools, symbol/footprint search and resolve tools, and `project_design_state`. Low-level coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, export helpers, and analysis tools are hidden from the normal LLM tool list.
 
 Use this for manual schematic edits or library exploration:
 
