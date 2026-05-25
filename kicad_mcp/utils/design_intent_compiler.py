@@ -556,7 +556,8 @@ class _DesignIntentCompiler:
                         parsed[0],
                         parsed[1],
                         "rails",
-                        allow_hidden_power=_endpoint_allow_hidden_power(endpoint),
+                        allow_hidden_power=_endpoint_allow_hidden_power(endpoint)
+                        or self.default_allow_hidden_power,
                     )
 
     def _expand_pin_rules(self, rules: list[Any]) -> None:

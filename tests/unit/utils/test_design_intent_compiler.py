@@ -168,6 +168,29 @@ def test_pin_rules_propagate_allow_hidden_power_metadata(tmp_path: Path):
     ]
 
 
+def test_rails_use_top_level_allow_hidden_power_fallback(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "allow_hidden_power": True,
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "HIDDEN_POWER",
+                    "footprint": "Package_DIP:DIP-2_W7.62mm",
+                    "pins": [{"number": "1", "name": "VDD", "type": "power_in", "hidden": True}],
+                }
+            ],
+            "rails": {"ANALOG_REF": {"pins": [["U1", "VDD"]]}},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["expanded_spec"]["nets"]["ANALOG_REF"] == [
+        {"ref": "U1", "pin": "VDD", "allow_hidden_power": True}
+    ]
+
+
 def test_hidden_power_non_power_net_requires_explicit_allow_hidden_power(tmp_path: Path):
     result = compile_design_intent(
         str(tmp_path),
