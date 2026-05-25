@@ -3,6 +3,8 @@ Project, schematic creation, library resolution, and conservative PCB authoring 
 """
 
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -10,7 +12,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from typing import Any, cast
+import uuid
 
 from fastmcp import Context, FastMCP
 
@@ -85,6 +89,14 @@ from kicad_mcp.utils.transactional_edit import (
     validate_local_path,
     validate_schematic_with_cli_export,
 )
+
+_DESIGN_INTENT_JOB_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="kicad-mcp-design-intent",
+)
+_DESIGN_INTENT_JOBS: dict[str, dict[str, Any]] = {}
+_DESIGN_INTENT_JOBS_LOCK = threading.Lock()
+_DESIGN_INTENT_JOB_RETAIN_LIMIT = 50
 
 
 def _resolve_project_alias(
@@ -194,6 +206,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         intent: dict[str, Any] | None = None,
         schematic_path: str | None = None,
         spec: dict[str, Any] | None = None,
+        visual_layout: bool = True,
+        visual_style: str = "readable",
     ) -> dict[str, Any]:
         """Compile generic bulk design intent into a v2 schematic spec without writing."""
         return _schematic_design_intent_response(
@@ -205,8 +219,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
             detail="compact",
             include_expanded_spec=False,
             tool_name="schematic_preview_design_intent",
-            visual_layout=True,
-            visual_style="readable",
+            visual_layout=visual_layout,
+            visual_style=visual_style,
         )
 
     @mcp.tool()
@@ -223,6 +237,10 @@ def register_creation_tools(mcp: FastMCP) -> None:
         dry_run_validation: str = "none",
         schematic_path: str | None = None,
         spec: dict[str, Any] | None = None,
+        quick_apply: bool = False,
+        include_preview: bool = True,
+        run_quality_report: bool = True,
+        run_native_validation: bool = True,
     ) -> dict[str, Any]:
         """Compile and apply generic bulk schematic design intent.
 
@@ -242,7 +260,90 @@ def register_creation_tools(mcp: FastMCP) -> None:
             visual_layout=visual_layout,
             visual_style=visual_style,
             dry_run_validation=dry_run_validation,
+            quick_apply=quick_apply,
+            include_preview=include_preview,
+            run_quality_report=run_quality_report,
+            run_native_validation=run_native_validation,
         )
+
+    @mcp.tool()
+    def schematic_apply_expanded_spec(
+        project_path: str | None = None,
+        expanded_spec_path: str | None = None,
+        spec: dict[str, Any] | None = None,
+        mode: str = "update",
+        strict: bool = False,
+        detail: str = "compact",
+        quick_apply: bool = False,
+        include_preview: bool = False,
+        run_quality_report: bool = False,
+        run_native_validation: bool = False,
+        schematic_path: str | None = None,
+        visual_layout: bool = True,
+    ) -> dict[str, Any]:
+        """Apply a previously compiled design-intent expanded v2 spec without recompiling."""
+        return _schematic_apply_expanded_spec_response(
+            _resolve_project_alias(project_path, schematic_path),
+            expanded_spec_path=expanded_spec_path,
+            spec=spec,
+            mode=mode,
+            strict=strict,
+            detail=detail,
+            quick_apply=quick_apply,
+            include_preview=include_preview,
+            run_quality_report=run_quality_report,
+            run_native_validation=run_native_validation,
+            visual_layout=visual_layout,
+        )
+
+    @mcp.tool()
+    def schematic_start_design_intent_job(
+        project_path: str | None = None,
+        intent: dict[str, Any] | None = None,
+        mode: str = "update",
+        strict: bool = False,
+        detail: str = "compact",
+        include_expanded_spec: bool = False,
+        visual_layout: bool = True,
+        visual_style: str = "readable",
+        schematic_path: str | None = None,
+        spec: dict[str, Any] | None = None,
+        quick_apply: bool = True,
+        include_preview: bool = False,
+        run_quality_report: bool = False,
+        run_native_validation: bool = False,
+    ) -> dict[str, Any]:
+        """Start a background design-intent apply job and return immediately for polling."""
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        return _start_design_intent_job(
+            resolved_project,
+            intent or spec or {},
+            mode=mode,
+            strict=strict,
+            detail=detail,
+            include_expanded_spec=include_expanded_spec,
+            visual_layout=visual_layout,
+            visual_style=visual_style,
+            quick_apply=quick_apply,
+            include_preview=include_preview,
+            run_quality_report=run_quality_report,
+            run_native_validation=run_native_validation,
+        )
+
+    @mcp.tool()
+    def schematic_get_job_status(job_id: str) -> dict[str, Any]:
+        """Return status for a background schematic job."""
+        return _get_design_intent_job_status(job_id)
+
+    @mcp.tool()
+    def schematic_get_job_result(job_id: str) -> dict[str, Any]:
+        """Return the result for a completed background schematic job."""
+        return _get_design_intent_job_result(job_id)
+
+    @mcp.tool()
+    def schematic_cancel_job(job_id: str) -> dict[str, Any]:
+        """Cancel a pending background schematic job or mark a running one as cancel-requested."""
+        return _cancel_design_intent_job(job_id)
 
     @mcp.tool()
     def schematic_build_from_spec(
@@ -274,6 +375,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         include_preview: bool = False,
         include_full_native_netlist: bool = False,
         run_quality_report: bool = False,
+        run_native_validation: bool = True,
+        apply_default_visual_layout: bool = True,
         schematic_path: str | None = None,
         intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -301,6 +404,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
             include_preview=include_preview,
             include_full_native_netlist=include_full_native_netlist,
             run_quality_report=run_quality_report,
+            run_native_validation=run_native_validation,
+            apply_default_visual_layout=apply_default_visual_layout,
         )
         if result.get("success"):
             result.setdefault("tool", "schematic_build_from_spec_v2")
@@ -1611,6 +1716,9 @@ def _native_dry_run_design_intent(
     expanded_spec: dict[str, Any],
     mode: str,
     strict: bool,
+    *,
+    apply_default_visual_layout: bool = True,
+    run_native_validation: bool = True,
 ) -> dict[str, Any]:
     try:
         with tempfile.TemporaryDirectory(prefix="kicad_mcp_dry_run_") as temp_dir:
@@ -1621,11 +1729,13 @@ def _native_dry_run_design_intent(
                 mode=mode,
                 run_erc=strict,
                 allow_destructive_replace=False,
-                detail="compact",
+                detail="full" if run_native_validation else "compact",
                 include_diff=False,
                 include_preview=False,
                 include_full_native_netlist=False,
                 run_quality_report=False,
+                run_native_validation=run_native_validation,
+                apply_default_visual_layout=apply_default_visual_layout,
             )
             validation = built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
             post_write = validation.get("post_write", {}) if isinstance(validation.get("post_write"), dict) else {}
@@ -1673,6 +1783,381 @@ def _copy_project_for_dry_run(project_path: str, temp_dir: str) -> str:
     return str(temp_project)
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _design_intent_job_public(job: dict[str, Any], *, include_result: bool = False) -> dict[str, Any]:
+    public = {
+        "success": True,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "project_path": job["project_path"],
+        "created_at": job["created_at"],
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "cancel_requested": bool(job.get("cancel_requested", False)),
+        "error": job.get("error"),
+        "recommended_next_tool": (
+            "schematic_get_job_result"
+            if job["status"] in {"completed", "failed", "cancelled"}
+            else "schematic_get_job_status"
+        ),
+        "recommended_next_arguments": {"job_id": job["job_id"]},
+    }
+    if include_result and job.get("result") is not None:
+        public["result"] = job["result"]
+    return public
+
+
+def _trim_design_intent_jobs_locked() -> None:
+    if len(_DESIGN_INTENT_JOBS) <= _DESIGN_INTENT_JOB_RETAIN_LIMIT:
+        return
+    completed = [
+        job
+        for job in _DESIGN_INTENT_JOBS.values()
+        if job.get("status") in {"completed", "failed", "cancelled"}
+    ]
+    completed.sort(key=lambda item: str(item.get("finished_at") or item.get("created_at") or ""))
+    for job in completed[: max(len(_DESIGN_INTENT_JOBS) - _DESIGN_INTENT_JOB_RETAIN_LIMIT, 0)]:
+        _DESIGN_INTENT_JOBS.pop(str(job["job_id"]), None)
+
+
+def _run_design_intent_job(job_id: str, project_path: str, intent: dict[str, Any], options: dict[str, Any]) -> None:
+    with _DESIGN_INTENT_JOBS_LOCK:
+        job = _DESIGN_INTENT_JOBS.get(job_id)
+        if job is None or job.get("status") == "cancelled":
+            return
+        job["status"] = "running"
+        job["started_at"] = _utc_now()
+    try:
+        result = _schematic_design_intent_response(
+            project_path,
+            intent,
+            mode=options["mode"],
+            dry_run=False,
+            strict=options["strict"],
+            detail=options["detail"],
+            include_expanded_spec=options["include_expanded_spec"],
+            tool_name="schematic_apply_design_intent",
+            visual_layout=options["visual_layout"],
+            visual_style=options["visual_style"],
+            quick_apply=options["quick_apply"],
+            include_preview=options["include_preview"],
+            run_quality_report=options["run_quality_report"],
+            run_native_validation=options["run_native_validation"],
+        )
+        status = "completed" if result.get("success") else "failed"
+        with _DESIGN_INTENT_JOBS_LOCK:
+            job = _DESIGN_INTENT_JOBS.get(job_id)
+            if job is not None:
+                job["status"] = status
+                job["result"] = result
+                job["error"] = result.get("error")
+                job["finished_at"] = _utc_now()
+                _trim_design_intent_jobs_locked()
+    except Exception as exc:
+        with _DESIGN_INTENT_JOBS_LOCK:
+            job = _DESIGN_INTENT_JOBS.get(job_id)
+            if job is not None:
+                job["status"] = "failed"
+                job["error"] = str(exc)
+                job["result"] = {"success": False, "job_id": job_id, "error": str(exc)}
+                job["finished_at"] = _utc_now()
+                _trim_design_intent_jobs_locked()
+
+
+def _start_design_intent_job(
+    project_path: str,
+    intent: dict[str, Any],
+    *,
+    mode: str,
+    strict: bool,
+    detail: str,
+    include_expanded_spec: bool,
+    visual_layout: bool,
+    visual_style: str,
+    quick_apply: bool,
+    include_preview: bool,
+    run_quality_report: bool,
+    run_native_validation: bool,
+) -> dict[str, Any]:
+    job_id = f"design_intent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    options = {
+        "mode": mode,
+        "strict": strict,
+        "detail": detail,
+        "include_expanded_spec": include_expanded_spec,
+        "visual_layout": visual_layout,
+        "visual_style": visual_style,
+        "quick_apply": quick_apply,
+        "include_preview": include_preview,
+        "run_quality_report": run_quality_report,
+        "run_native_validation": run_native_validation,
+    }
+    job: dict[str, Any] = {
+        "job_id": job_id,
+        "status": "pending",
+        "project_path": project_path,
+        "created_at": _utc_now(),
+        "options": options,
+        "cancel_requested": False,
+    }
+    with _DESIGN_INTENT_JOBS_LOCK:
+        _DESIGN_INTENT_JOBS[job_id] = job
+    future = _DESIGN_INTENT_JOB_EXECUTOR.submit(
+        _run_design_intent_job,
+        job_id,
+        project_path,
+        intent,
+        options,
+    )
+    with _DESIGN_INTENT_JOBS_LOCK:
+        if job_id in _DESIGN_INTENT_JOBS:
+            _DESIGN_INTENT_JOBS[job_id]["future"] = future
+    response = _design_intent_job_public(job)
+    response["recommended_next_tool"] = "schematic_get_job_status"
+    return response
+
+
+def _get_design_intent_job_status(job_id: str) -> dict[str, Any]:
+    with _DESIGN_INTENT_JOBS_LOCK:
+        job = _DESIGN_INTENT_JOBS.get(job_id)
+        if job is None:
+            return {"success": False, "job_id": job_id, "error": "unknown job_id"}
+        future = cast(Future[Any] | None, job.get("future"))
+        if future is not None and future.cancelled():
+            job["status"] = "cancelled"
+            job.setdefault("finished_at", _utc_now())
+        return _design_intent_job_public(job)
+
+
+def _get_design_intent_job_result(job_id: str) -> dict[str, Any]:
+    with _DESIGN_INTENT_JOBS_LOCK:
+        job = _DESIGN_INTENT_JOBS.get(job_id)
+        if job is None:
+            return {"success": False, "job_id": job_id, "error": "unknown job_id"}
+        if job.get("status") not in {"completed", "failed", "cancelled"}:
+            response = _design_intent_job_public(job)
+            response["success"] = False
+            response["error"] = "job is not finished"
+            return response
+        return _design_intent_job_public(job, include_result=True)
+
+
+def _cancel_design_intent_job(job_id: str) -> dict[str, Any]:
+    with _DESIGN_INTENT_JOBS_LOCK:
+        job = _DESIGN_INTENT_JOBS.get(job_id)
+        if job is None:
+            return {"success": False, "job_id": job_id, "error": "unknown job_id"}
+        future = cast(Future[Any] | None, job.get("future"))
+        cancelled = future.cancel() if future is not None else False
+        job["cancel_requested"] = True
+        if cancelled or job.get("status") == "pending":
+            job["status"] = "cancelled"
+            job["finished_at"] = _utc_now()
+        response = _design_intent_job_public(job)
+        response["cancelled"] = cancelled
+        if not cancelled and job.get("status") == "running":
+            response["warning"] = "job is already running and cannot be interrupted safely"
+        return response
+
+
+def _without_default_visual_layout(spec: dict[str, Any]) -> dict[str, Any]:
+    updated = json.loads(json.dumps(spec))
+    layout_hints = updated.setdefault("layout_hints", {})
+    if isinstance(layout_hints, dict):
+        layout_hints.setdefault("label_strategy", "pin_anchor")
+        layout_hints.setdefault("connection_style", "label")
+        layout_hints["visual_layout"] = {"enabled": False}
+    return updated
+
+
+def _design_intent_counts(expanded_spec: dict[str, Any], summary: dict[str, Any]) -> dict[str, int]:
+    total_parts = int(summary.get("total_part_count") or len(expanded_spec.get("parts", [])) or 0)
+    connections = int(
+        summary.get("connection_count")
+        or sum(len(endpoints) for endpoints in expanded_spec.get("nets", {}).values())
+        or 0
+    )
+    return {"total_part_count": total_parts, "connection_count": connections}
+
+
+def _with_large_design_recommendation(base: dict[str, Any], expanded_spec: dict[str, Any]) -> None:
+    counts = _design_intent_counts(expanded_spec, base.get("summary", {}))
+    if counts["total_part_count"] <= 25 and counts["connection_count"] <= 75:
+        return
+    base["recommended_next_tool"] = "schematic_build_from_spec_v2"
+    base["recommended_workflow"] = "large_design_staged_apply"
+    base["recommended_next_arguments"] = {
+        "project_path": base.get("project_path"),
+        "mode": "update",
+        "spec": "Use expanded_spec.parts first with nets/no_connects empty, then apply connections in batches of 20-40.",
+    }
+    base["recommendation_reason"] = (
+        f"{counts['total_part_count']} parts / {counts['connection_count']} connections may exceed MCP request timeout"
+    )
+
+
+def _resolve_expanded_spec_path(project_path: str, expanded_spec_path: str) -> Path:
+    candidate = Path(expanded_spec_path)
+    if candidate.is_absolute():
+        return candidate
+    project = Path(project_path)
+    project_dir = project.parent if project.suffix in {".kicad_pro", ".kicad_sch"} else project
+    return project_dir / candidate
+
+
+def _load_expanded_spec(project_path: str, expanded_spec_path: str | None, spec: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    if spec is not None:
+        return spec, None, None
+    if not expanded_spec_path:
+        default_path = _design_intent_artifact_dir(project_path) / "design_intent.visual_expanded_spec.json"
+        if not default_path.exists():
+            default_path = _design_intent_artifact_dir(project_path) / "design_intent.expanded_spec.json"
+        expanded_spec_path = str(default_path)
+    try:
+        path = _resolve_expanded_spec_path(project_path, expanded_spec_path)
+        return json.loads(path.read_text(encoding="utf-8")), str(path), None
+    except Exception as exc:
+        return None, expanded_spec_path, str(exc)
+
+
+def _schematic_apply_expanded_spec_response(
+    project_path: str,
+    *,
+    expanded_spec_path: str | None,
+    spec: dict[str, Any] | None,
+    mode: str,
+    strict: bool,
+    detail: str,
+    quick_apply: bool,
+    include_preview: bool,
+    run_quality_report: bool,
+    run_native_validation: bool,
+    visual_layout: bool,
+) -> dict[str, Any]:
+    expanded_spec, resolved_path, load_error = _load_expanded_spec(project_path, expanded_spec_path, spec)
+    if load_error or not isinstance(expanded_spec, dict):
+        return {
+            "success": False,
+            "tool": "schematic_apply_expanded_spec",
+            "project_path": project_path,
+            "expanded_spec_path": resolved_path,
+            "error": load_error or "expanded spec must be a JSON object",
+        }
+    if quick_apply:
+        include_preview = False
+        run_quality_report = False
+        run_native_validation = False
+    if strict:
+        run_quality_report = True
+        run_native_validation = True
+    if not visual_layout:
+        expanded_spec = _without_default_visual_layout(expanded_spec)
+    built = build_schematic_from_spec_v2(
+        project_path,
+        expanded_spec,
+        mode=mode,
+        run_erc=strict,
+        allow_destructive_replace=False,
+        detail="full" if run_native_validation else detail,
+        include_diff=False,
+        include_preview=include_preview,
+        include_full_native_netlist=False,
+        run_quality_report=False,
+        run_native_validation=run_native_validation,
+        apply_default_visual_layout=visual_layout,
+    )
+    response: dict[str, Any] = {
+        "success": bool(built.get("success")),
+        "tool": "schematic_apply_expanded_spec",
+        "stage": "schematic_built" if built.get("success") else "build_failed",
+        "project_path": project_path,
+        "expanded_spec_path": resolved_path,
+        "mode": mode,
+        "changed": bool(built.get("success")),
+        "quick_apply": quick_apply,
+        "post_steps": {
+            "include_preview": include_preview,
+            "run_quality_report": run_quality_report,
+            "run_native_validation": run_native_validation,
+        },
+        "recommended_next_tool": "schematic_quality_report",
+        "recommended_next_arguments": {"project_path": project_path},
+    }
+    if not built.get("success"):
+        response["error"] = built.get("error", "schematic build failed")
+        if detail == "full":
+            response["build_result"] = built
+        return response
+    if run_quality_report:
+        try:
+            quality = build_quality_report(project_path, run_erc=strict)
+        except Exception as exc:
+            quality = {"success": False, "error": str(exc)}
+        response["verification"] = _verification_from_build_and_quality(built, quality)
+        if detail == "full":
+            response["quality_report"] = quality
+    else:
+        response["verification"] = _verification_from_build_and_quality(built, None)
+    if strict and (
+        response["verification"]["native_netlist_success"] is not True
+        or response["verification"]["missing_connection_count"] > 0
+        or response["verification"]["quality_gate_passed"] is not True
+        or int(response["verification"]["erc_total_violations"] or 0) > 0
+    ):
+        response["success"] = False
+        response["stage"] = "verification_failed"
+        response["recoverable"] = True
+        response.setdefault("errors", []).append(
+            {
+                "path": "verification",
+                "error": "strict mode verification failed",
+                "verification": response["verification"],
+            }
+        )
+    if detail == "full":
+        response["build_result"] = built
+    if include_preview and built.get("schematic_preview"):
+        response["schematic_preview"] = built["schematic_preview"]
+    elif quick_apply:
+        response["recommended_next_tool"] = "schematic_quality_report"
+    return response
+
+
+def _verification_from_build_and_quality(
+    built: dict[str, Any],
+    quality: dict[str, Any] | None,
+) -> dict[str, Any]:
+    validation = built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
+    post_write = (
+        validation.get("post_write", {})
+        if isinstance(validation.get("post_write"), dict)
+        else {}
+    )
+    native_source = quality if isinstance(quality, dict) else built
+    native = (
+        native_source.get("native_netlist", {})
+        if isinstance(native_source.get("native_netlist"), dict)
+        else {}
+    )
+    erc = quality.get("erc", {}) if isinstance(quality, dict) and isinstance(quality.get("erc"), dict) else {}
+    gate = (
+        quality.get("quality_gate", {})
+        if isinstance(quality, dict) and isinstance(quality.get("quality_gate"), dict)
+        else {}
+    )
+    return {
+        "native_netlist_success": native.get("success"),
+        "native_netlist_skipped": bool(native.get("skipped", False)),
+        "missing_connection_count": len(post_write.get("missing", [])),
+        "erc_total_violations": erc.get("total_violations"),
+        "quality_gate_passed": gate.get("passed"),
+        "quality_report_skipped": quality is None,
+    }
+
+
 def _schematic_design_intent_response(
     project_path: str,
     intent: dict[str, Any],
@@ -1686,6 +2171,10 @@ def _schematic_design_intent_response(
     visual_layout: bool = True,
     visual_style: str = "readable",
     dry_run_validation: str = "none",
+    quick_apply: bool = False,
+    include_preview: bool = True,
+    run_quality_report: bool = True,
+    run_native_validation: bool = True,
 ) -> dict[str, Any]:
     compiled = compile_design_intent(project_path, intent, strict=strict)
     expanded_spec = compiled.get("expanded_spec")
@@ -1710,10 +2199,22 @@ def _schematic_design_intent_response(
                     "warning": f"failed to save visual expanded spec: {exc}",
                 }
             )
+    elif compiled.get("success") and isinstance(expanded_spec, dict) and not visual_layout:
+        expanded_spec = _without_default_visual_layout(expanded_spec)
+        try:
+            visual_expanded_spec_path = _save_visual_expanded_spec(project_path, expanded_spec)
+        except Exception as exc:
+            compiled.setdefault("warnings", []).append(
+                {
+                    "path": ".kicad_mcp/design_intent.visual_expanded_spec.json",
+                    "warning": f"failed to save no-layout expanded spec: {exc}",
+                }
+            )
     base: dict[str, Any] = {
         "success": compiled.get("success", False),
         "tool": tool_name,
         "stage": "compiled" if dry_run else "compile_failed",
+        "project_path": project_path,
         "mode": mode,
         "dry_run": dry_run,
         "changed": False,
@@ -1727,8 +2228,16 @@ def _schematic_design_intent_response(
         "report_path": compiled.get("report_path"),
         "visual_layout": visual_summary,
         "recommended_next_tool": (
-            "schematic_apply_design_intent" if dry_run else "schematic_quality_report"
+            "schematic_apply_expanded_spec" if dry_run else "schematic_quality_report"
         ),
+        "recommended_next_arguments": {
+            "project_path": project_path,
+            **(
+                {"expanded_spec_path": visual_expanded_spec_path or compiled.get("expanded_spec_path")}
+                if dry_run
+                else {}
+            ),
+        },
     }
     if include_expanded_spec:
         base["expanded_spec"] = expanded_spec
@@ -1762,21 +2271,40 @@ def _schematic_design_intent_response(
                 expanded_spec if isinstance(expanded_spec, dict) else {},
                 mode,
                 strict,
+                apply_default_visual_layout=visual_layout,
+                run_native_validation=run_native_validation,
             )
             base["success"] = bool(base["dry_run_validation"].get("success"))
+        if isinstance(expanded_spec, dict):
+            _with_large_design_recommendation(base, expanded_spec)
         return base
 
+    if quick_apply:
+        include_preview = False
+        run_quality_report = False
+        run_native_validation = False
+    if strict:
+        run_quality_report = True
+        run_native_validation = True
+    base["quick_apply"] = quick_apply
+    base["post_steps"] = {
+        "include_preview": include_preview,
+        "run_quality_report": run_quality_report,
+        "run_native_validation": run_native_validation,
+    }
     built = build_schematic_from_spec_v2(
         project_path,
         expanded_spec,
         mode=mode,
         run_erc=strict,
         allow_destructive_replace=False,
-        detail=detail,
+        detail="full" if run_native_validation else detail,
         include_diff=False,
-        include_preview=True,
+        include_preview=include_preview,
         include_full_native_netlist=False,
         run_quality_report=False,
+        run_native_validation=run_native_validation,
+        apply_default_visual_layout=visual_layout,
     )
     base["stage"] = "schematic_built" if built.get("success") else "build_failed"
     base["success"] = bool(built.get("success"))
@@ -1787,25 +2315,13 @@ def _schematic_design_intent_response(
             base["build_result"] = built
         return base
 
-    try:
-        quality = build_quality_report(project_path, run_erc=strict)
-    except Exception as exc:
-        quality = {"success": False, "error": str(exc)}
-    validation = built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
-    post_write = (
-        validation.get("post_write", {})
-        if isinstance(validation.get("post_write"), dict)
-        else {}
-    )
-    native = quality.get("native_netlist", {}) if isinstance(quality.get("native_netlist"), dict) else {}
-    erc = quality.get("erc", {}) if isinstance(quality.get("erc"), dict) else {}
-    gate = quality.get("quality_gate", {}) if isinstance(quality.get("quality_gate"), dict) else {}
-    base["verification"] = {
-        "native_netlist_success": native.get("success"),
-        "missing_connection_count": len(post_write.get("missing", [])),
-        "erc_total_violations": erc.get("total_violations", 0),
-        "quality_gate_passed": gate.get("passed"),
-    }
+    quality: dict[str, Any] | None = None
+    if run_quality_report:
+        try:
+            quality = build_quality_report(project_path, run_erc=strict)
+        except Exception as exc:
+            quality = {"success": False, "error": str(exc)}
+    base["verification"] = _verification_from_build_and_quality(built, quality)
     if strict and (
         base["verification"]["native_netlist_success"] is not True
         or base["verification"]["missing_connection_count"] > 0
@@ -1824,12 +2340,13 @@ def _schematic_design_intent_response(
         )
     if detail == "full":
         base["build_result"] = built
-        base["quality_report"] = quality
-    if built.get("schematic_preview"):
+        if quality is not None:
+            base["quality_report"] = quality
+    if include_preview and built.get("schematic_preview"):
         base["schematic_preview"] = built["schematic_preview"]
-    elif built.get("schematic_preview_error"):
+    elif include_preview and built.get("schematic_preview_error"):
         base["schematic_preview_error"] = built["schematic_preview_error"]
-    else:
+    elif include_preview:
         try:
             schematic_path = get_project_files(project_path).get("schematic")
             if schematic_path:

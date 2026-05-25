@@ -7,15 +7,18 @@ Recommended order:
 1. `project_design_state`
 2. `find_symbols` / `find_footprints` for unknown library IDs
 3. `schematic_preview_design_intent`, when you want to inspect expansion first
-4. `schematic_apply_design_intent`
-5. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
-6. `schematic_quality_report`
-7. `project_design_state`
-8. `schematic_build_from_spec_v2`, only when you already have explicit parts/nets
-9. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
-10. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
+4. `schematic_apply_expanded_spec`, when a preview already produced an expanded spec artifact
+5. `schematic_apply_design_intent`
+6. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
+7. `schematic_quality_report`
+8. `project_design_state`
+9. `schematic_build_from_spec_v2`, only when you already have explicit parts/nets
+10. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
+11. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
 
-For large schematics, prefer staged calls over one long request: run `schematic_preview_design_intent`, then `schematic_apply_design_intent`, then `export_schematic_preview`, then `schematic_quality_report`. This keeps compile, write, visual feedback, and verification work split across tool calls.
+For large schematics, prefer staged calls over one long request: run `schematic_preview_design_intent`, then place the expanded spec's `parts` with `schematic_build_from_spec_v2`, then apply connection batches of 20-40 with `schematic_apply_connection_plan`, then run `export_schematic_preview` and `schematic_quality_report`. Preview responses over 25 parts or 75 connections recommend this workflow explicitly.
+
+For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. Run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation is still required and the client may time out.
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 
@@ -74,6 +77,8 @@ Use this bulk design-intent shape for normal complete circuits:
 `schematic_apply_design_intent` compiles this into v2 `parts`, generated passives/connectors, expanded net memberships, and no-connect markers. It always saves the normalized intent, expanded spec, and report under `.kicad_mcp/`.
 
 By default it also applies a generic visual layout pass before writing the schematic. The visual pass assigns explicit symbol positions using estimated symbol bounds, groups generated support parts near their targets, uses short external stubs for signal labels, and keeps known power rails on power-symbol/pin-anchor behavior for native-netlist reliability. The compact tool response includes a `visual_layout` summary.
+
+Set `visual_layout=false` to skip both the high-level visual pass and the lower-level default v2 visual layout. The expanded spec is marked with `layout_hints.visual_layout.enabled=false` so later build calls do not silently re-enable layout.
 
 Use this lower-level v2 build shape when every connection is already explicit:
 

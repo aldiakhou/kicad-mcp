@@ -213,6 +213,7 @@ def build_schematic_from_spec(
     include_preview: bool = True,
     include_full_native_netlist: bool = True,
     run_quality_report: bool = True,
+    run_native_validation: bool = True,
 ) -> dict[str, Any]:
     """Build a schematic from a structured spec."""
     spec = normalize_build_spec_v2(spec) if _is_v2_spec(spec) else spec
@@ -292,11 +293,27 @@ def build_schematic_from_spec(
         schematic_path,
         mutate,
         run_cli_validation=True,
-        post_write_validator=lambda path: validate_connection_plan_membership(path, spec.get("connections", [])),
+        post_write_validator=(
+            (lambda path: validate_connection_plan_membership(path, spec.get("connections", [])))
+            if run_native_validation
+            else None
+        ),
     )
     if not result.get("success"):
         return result
-    native = _native_netlist_for_validation(schematic_path)
+    native = (
+        _native_netlist_for_validation(schematic_path)
+        if run_native_validation
+        else {
+            "success": None,
+            "skipped": True,
+            "reason": "Native netlist validation disabled",
+            "component_count": None,
+            "net_count": None,
+            "connectivity_complete": None,
+            "error": None,
+        }
+    )
     result["tool"] = (
         "schematic_build_from_spec_v2"
         if spec.get("source_format") == "v2"
@@ -382,9 +399,11 @@ def build_schematic_from_spec_v2(
     include_preview: bool = False,
     include_full_native_netlist: bool = False,
     run_quality_report: bool = False,
+    run_native_validation: bool = True,
+    apply_default_visual_layout: bool = True,
 ) -> dict[str, Any]:
     """Build a schematic from the v2 parts/nets/no_connects spec format."""
-    spec = _apply_default_v2_visual_layout(spec)
+    spec = _apply_default_v2_visual_layout(spec, enabled=apply_default_visual_layout)
     return build_schematic_from_spec(
         project_path,
         normalize_build_spec_v2(spec),
@@ -396,13 +415,22 @@ def build_schematic_from_spec_v2(
         include_preview=include_preview,
         include_full_native_netlist=include_full_native_netlist,
         run_quality_report=run_quality_report,
+        run_native_validation=run_native_validation,
     )
 
 
-def _apply_default_v2_visual_layout(spec: dict[str, Any]) -> dict[str, Any]:
+def _apply_default_v2_visual_layout(spec: dict[str, Any], *, enabled: bool = True) -> dict[str, Any]:
     if not _is_v2_spec(spec):
         return spec
+    if not enabled:
+        return spec
     layout_hints = spec.get("layout_hints")
+    if (
+        isinstance(layout_hints, dict)
+        and isinstance(layout_hints.get("visual_layout"), dict)
+        and layout_hints["visual_layout"].get("enabled") is False
+    ):
+        return spec
     if isinstance(layout_hints, dict) and layout_hints:
         return spec
     return apply_visual_layout_to_v2_spec(spec, page=str(spec.get("paper") or "A3"), style="readable")
@@ -1366,13 +1394,18 @@ def _erc_sensitive_pins(spec: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _compact_native_netlist(native: dict[str, Any]) -> dict[str, Any]:
-    return {
+    compact = {
         "success": native.get("success"),
         "component_count": native.get("component_count"),
         "net_count": native.get("net_count"),
         "connectivity_complete": native.get("connectivity_complete"),
         "error": native.get("error"),
     }
+    if "skipped" in native:
+        compact["skipped"] = native.get("skipped")
+    if "reason" in native:
+        compact["reason"] = native.get("reason")
+    return compact
 
 
 def _compact_quality_report(quality: dict[str, Any]) -> dict[str, Any]:

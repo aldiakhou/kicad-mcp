@@ -85,6 +85,11 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "get_project_structure" in tools
     assert "schematic_apply_design_intent" in tools
     assert "schematic_preview_design_intent" in tools
+    assert "schematic_apply_expanded_spec" in tools
+    assert "schematic_start_design_intent_job" in tools
+    assert "schematic_get_job_status" in tools
+    assert "schematic_get_job_result" in tools
+    assert "schematic_cancel_job" in tools
     assert "schematic_build_from_spec_v2" in tools
     assert "export_schematic_preview" in tools
     assert "export_schematic_svg" in tools
