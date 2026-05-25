@@ -744,7 +744,11 @@ def register_creation_tools(mcp: FastMCP) -> None:
         allow_hidden_no_connect: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Add a no-connect marker at an actual symbol pin coordinate."""
+        """Add a no-connect marker at an actual symbol pin coordinate.
+
+        For hidden no-connect markers, use allow_hidden_no_connect; allow_hidden_power
+        is retained for compatibility and is intended for net attachment tools.
+        """
         if ctx:
             await ctx.info(f"Adding no-connect marker to {reference}.{pin}")
         return add_no_connect_marker(
