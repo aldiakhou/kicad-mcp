@@ -214,6 +214,7 @@ def build_schematic_from_spec(
     include_full_native_netlist: bool = True,
     run_quality_report: bool = True,
     run_native_validation: bool = True,
+    run_cli_validation: bool = True,
 ) -> dict[str, Any]:
     """Build a schematic from a structured spec."""
     spec = normalize_build_spec_v2(spec) if _is_v2_spec(spec) else spec
@@ -292,7 +293,7 @@ def build_schematic_from_spec(
     result = apply_transactional_schematic_edit(
         schematic_path,
         mutate,
-        run_cli_validation=True,
+        run_cli_validation=run_cli_validation,
         post_write_validator=(
             (lambda path: validate_connection_plan_membership(path, spec.get("connections", [])))
             if run_native_validation
@@ -401,6 +402,7 @@ def build_schematic_from_spec_v2(
     run_quality_report: bool = False,
     run_native_validation: bool = True,
     apply_default_visual_layout: bool = True,
+    run_cli_validation: bool = True,
 ) -> dict[str, Any]:
     """Build a schematic from the v2 parts/nets/no_connects spec format."""
     spec = _apply_default_v2_visual_layout(spec, enabled=apply_default_visual_layout)
@@ -416,6 +418,7 @@ def build_schematic_from_spec_v2(
         include_full_native_netlist=include_full_native_netlist,
         run_quality_report=run_quality_report,
         run_native_validation=run_native_validation,
+        run_cli_validation=run_cli_validation,
     )
 
 

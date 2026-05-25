@@ -241,6 +241,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         include_preview: bool = True,
         run_quality_report: bool = True,
         run_native_validation: bool = True,
+        run_cli_validation: bool = True,
+        unsafe_fast_apply: bool = False,
     ) -> dict[str, Any]:
         """Compile and apply generic bulk schematic design intent.
 
@@ -264,6 +266,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
             include_preview=include_preview,
             run_quality_report=run_quality_report,
             run_native_validation=run_native_validation,
+            run_cli_validation=run_cli_validation,
+            unsafe_fast_apply=unsafe_fast_apply,
         )
 
     @mcp.tool()
@@ -278,6 +282,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         include_preview: bool = False,
         run_quality_report: bool = False,
         run_native_validation: bool = False,
+        run_cli_validation: bool = True,
+        unsafe_fast_apply: bool = False,
         schematic_path: str | None = None,
         visual_layout: bool = True,
     ) -> dict[str, Any]:
@@ -293,6 +299,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
             include_preview=include_preview,
             run_quality_report=run_quality_report,
             run_native_validation=run_native_validation,
+            run_cli_validation=run_cli_validation,
+            unsafe_fast_apply=unsafe_fast_apply,
             visual_layout=visual_layout,
         )
 
@@ -312,6 +320,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         include_preview: bool = False,
         run_quality_report: bool = False,
         run_native_validation: bool = False,
+        run_cli_validation: bool = True,
+        unsafe_fast_apply: bool = False,
     ) -> dict[str, Any]:
         """Start a background design-intent apply job and return immediately for polling."""
         resolved_project = _resolve_project_alias(project_path, schematic_path)
@@ -328,6 +338,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
             include_preview=include_preview,
             run_quality_report=run_quality_report,
             run_native_validation=run_native_validation,
+            run_cli_validation=run_cli_validation,
+            unsafe_fast_apply=unsafe_fast_apply,
         )
 
     @mcp.tool()
@@ -377,6 +389,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         run_quality_report: bool = False,
         run_native_validation: bool = True,
         apply_default_visual_layout: bool = True,
+        run_cli_validation: bool = True,
+        unsafe_fast_apply: bool = False,
         schematic_path: str | None = None,
         intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -393,6 +407,15 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 "error": "backup=False is not supported; schematic builds are always backed up",
             }
         resolved_project = _resolve_project_alias(project_path, schematic_path)
+        if unsafe_fast_apply:
+            run_cli_validation = False
+        elif not run_cli_validation:
+            return {
+                "success": False,
+                "project_path": resolved_project,
+                "error": "run_cli_validation=false requires unsafe_fast_apply=true",
+                "recoverable": True,
+            }
         result = build_schematic_from_spec_v2(
             resolved_project,
             spec or intent or {},
@@ -406,6 +429,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             run_quality_report=run_quality_report,
             run_native_validation=run_native_validation,
             apply_default_visual_layout=apply_default_visual_layout,
+            run_cli_validation=run_cli_validation,
         )
         if result.get("success"):
             result.setdefault("tool", "schematic_build_from_spec_v2")
@@ -1719,6 +1743,7 @@ def _native_dry_run_design_intent(
     *,
     apply_default_visual_layout: bool = True,
     run_native_validation: bool = True,
+    run_cli_validation: bool = True,
 ) -> dict[str, Any]:
     try:
         with tempfile.TemporaryDirectory(prefix="kicad_mcp_dry_run_") as temp_dir:
@@ -1736,6 +1761,7 @@ def _native_dry_run_design_intent(
                 run_quality_report=False,
                 run_native_validation=run_native_validation,
                 apply_default_visual_layout=apply_default_visual_layout,
+                run_cli_validation=run_cli_validation,
             )
             validation = built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
             post_write = validation.get("post_write", {}) if isinstance(validation.get("post_write"), dict) else {}
@@ -1846,6 +1872,8 @@ def _run_design_intent_job(job_id: str, project_path: str, intent: dict[str, Any
             include_preview=options["include_preview"],
             run_quality_report=options["run_quality_report"],
             run_native_validation=options["run_native_validation"],
+            run_cli_validation=options["run_cli_validation"],
+            unsafe_fast_apply=options["unsafe_fast_apply"],
         )
         status = "completed" if result.get("success") else "failed"
         with _DESIGN_INTENT_JOBS_LOCK:
@@ -1881,6 +1909,8 @@ def _start_design_intent_job(
     include_preview: bool,
     run_quality_report: bool,
     run_native_validation: bool,
+    run_cli_validation: bool,
+    unsafe_fast_apply: bool,
 ) -> dict[str, Any]:
     job_id = f"design_intent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     options = {
@@ -1894,6 +1924,8 @@ def _start_design_intent_job(
         "include_preview": include_preview,
         "run_quality_report": run_quality_report,
         "run_native_validation": run_native_validation,
+        "run_cli_validation": run_cli_validation,
+        "unsafe_fast_apply": unsafe_fast_apply,
     }
     job: dict[str, Any] = {
         "job_id": job_id,
@@ -2035,6 +2067,8 @@ def _schematic_apply_expanded_spec_response(
     include_preview: bool,
     run_quality_report: bool,
     run_native_validation: bool,
+    run_cli_validation: bool,
+    unsafe_fast_apply: bool,
     visual_layout: bool,
 ) -> dict[str, Any]:
     expanded_spec, resolved_path, load_error = _load_expanded_spec(project_path, expanded_spec_path, spec)
@@ -2053,6 +2087,18 @@ def _schematic_apply_expanded_spec_response(
     if strict:
         run_quality_report = True
         run_native_validation = True
+        run_cli_validation = True
+    elif unsafe_fast_apply:
+        run_cli_validation = False
+    elif not run_cli_validation:
+        return {
+            "success": False,
+            "tool": "schematic_apply_expanded_spec",
+            "project_path": project_path,
+            "expanded_spec_path": resolved_path,
+            "error": "run_cli_validation=false requires unsafe_fast_apply=true",
+            "recoverable": True,
+        }
     if not visual_layout:
         expanded_spec = _without_default_visual_layout(expanded_spec)
     built = build_schematic_from_spec_v2(
@@ -2068,6 +2114,7 @@ def _schematic_apply_expanded_spec_response(
         run_quality_report=False,
         run_native_validation=run_native_validation,
         apply_default_visual_layout=visual_layout,
+        run_cli_validation=run_cli_validation,
     )
     response: dict[str, Any] = {
         "success": bool(built.get("success")),
@@ -2082,6 +2129,8 @@ def _schematic_apply_expanded_spec_response(
             "include_preview": include_preview,
             "run_quality_report": run_quality_report,
             "run_native_validation": run_native_validation,
+            "run_cli_validation": run_cli_validation,
+            "unsafe_fast_apply": unsafe_fast_apply,
         },
         "recommended_next_tool": "schematic_quality_report",
         "recommended_next_arguments": {"project_path": project_path},
@@ -2175,6 +2224,8 @@ def _schematic_design_intent_response(
     include_preview: bool = True,
     run_quality_report: bool = True,
     run_native_validation: bool = True,
+    run_cli_validation: bool = True,
+    unsafe_fast_apply: bool = False,
 ) -> dict[str, Any]:
     compiled = compile_design_intent(project_path, intent, strict=strict)
     expanded_spec = compiled.get("expanded_spec")
@@ -2273,6 +2324,7 @@ def _schematic_design_intent_response(
                 strict,
                 apply_default_visual_layout=visual_layout,
                 run_native_validation=run_native_validation,
+                run_cli_validation=run_cli_validation,
             )
             base["success"] = bool(base["dry_run_validation"].get("success"))
         if isinstance(expanded_spec, dict):
@@ -2286,11 +2338,27 @@ def _schematic_design_intent_response(
     if strict:
         run_quality_report = True
         run_native_validation = True
+        run_cli_validation = True
+    elif unsafe_fast_apply:
+        run_cli_validation = False
+    elif not run_cli_validation:
+        base["success"] = False
+        base["stage"] = "unsafe_fast_apply_required"
+        base["recoverable"] = True
+        base["errors"].append(
+            {
+                "path": "run_cli_validation",
+                "error": "run_cli_validation=false requires unsafe_fast_apply=true",
+            }
+        )
+        return base
     base["quick_apply"] = quick_apply
     base["post_steps"] = {
         "include_preview": include_preview,
         "run_quality_report": run_quality_report,
         "run_native_validation": run_native_validation,
+        "run_cli_validation": run_cli_validation,
+        "unsafe_fast_apply": unsafe_fast_apply,
     }
     built = build_schematic_from_spec_v2(
         project_path,
@@ -2305,6 +2373,7 @@ def _schematic_design_intent_response(
         run_quality_report=False,
         run_native_validation=run_native_validation,
         apply_default_visual_layout=visual_layout,
+        run_cli_validation=run_cli_validation,
     )
     base["stage"] = "schematic_built" if built.get("success") else "build_failed"
     base["success"] = bool(built.get("success"))

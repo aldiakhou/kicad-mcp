@@ -18,7 +18,7 @@ Recommended order:
 
 For large schematics, prefer staged calls over one long request: run `schematic_preview_design_intent`, then place the expanded spec's `parts` with `schematic_build_from_spec_v2`, then apply connection batches of 20-40 with `schematic_apply_connection_plan`, then run `export_schematic_preview` and `schematic_quality_report`. Preview responses over 25 parts or 75 connections recommend this workflow explicitly.
 
-For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. Run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation is still required and the client may time out.
+For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. Run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Transactional KiCad CLI validation stays enabled by default; disable it only for agent-controlled staging with `unsafe_fast_apply=true`, which sets `run_cli_validation=false`. Use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation is still required and the client may time out.
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 

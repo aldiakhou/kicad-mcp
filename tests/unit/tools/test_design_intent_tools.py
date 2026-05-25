@@ -410,9 +410,145 @@ def test_schematic_apply_design_intent_quick_apply_skips_expensive_post_steps(
         "include_preview": False,
         "run_quality_report": False,
         "run_native_validation": False,
+        "run_cli_validation": True,
+        "unsafe_fast_apply": False,
     }
     assert result["verification"]["quality_report_skipped"] is True
     assert "schematic_preview" not in result
+
+
+def test_schematic_apply_design_intent_unsafe_fast_apply_skips_cli_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        creation_tools,
+        "compile_design_intent",
+        lambda project_path, intent, strict=False: {
+            "success": True,
+            "expanded_spec": {"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}},
+            "summary": {},
+            "generated_refs": {},
+            "warnings": [],
+            "errors": [],
+            "expanded_spec_path": str(tmp_path / "expanded.json"),
+        },
+    )
+
+    def fake_build(project_path, spec, **kwargs):
+        captured["kwargs"] = kwargs
+        return {"success": True, "native_netlist": {"success": None, "skipped": True}}
+
+    monkeypatch.setattr(creation_tools, "build_schematic_from_spec_v2", fake_build)
+
+    result = creation_tools._schematic_design_intent_response(
+        str(tmp_path),
+        {},
+        mode="update",
+        dry_run=False,
+        strict=False,
+        detail="compact",
+        include_expanded_spec=False,
+        tool_name="schematic_apply_design_intent",
+        quick_apply=True,
+        unsafe_fast_apply=True,
+    )
+
+    assert result["success"] is True
+    assert result["post_steps"]["run_cli_validation"] is False
+    assert result["post_steps"]["unsafe_fast_apply"] is True
+    assert captured["kwargs"]["run_cli_validation"] is False
+
+
+def test_schematic_apply_design_intent_requires_unsafe_flag_to_skip_cli_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        creation_tools,
+        "compile_design_intent",
+        lambda project_path, intent, strict=False: {
+            "success": True,
+            "expanded_spec": {"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}},
+            "summary": {},
+            "generated_refs": {},
+            "warnings": [],
+            "errors": [],
+            "expanded_spec_path": str(tmp_path / "expanded.json"),
+        },
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_schematic_from_spec_v2",
+        lambda *args, **kwargs: pytest.fail("build should not run"),
+    )
+
+    result = creation_tools._schematic_design_intent_response(
+        str(tmp_path),
+        {},
+        mode="update",
+        dry_run=False,
+        strict=False,
+        detail="compact",
+        include_expanded_spec=False,
+        tool_name="schematic_apply_design_intent",
+        run_cli_validation=False,
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "unsafe_fast_apply_required"
+    assert result["errors"][0]["path"] == "run_cli_validation"
+
+
+def test_schematic_apply_design_intent_strict_overrides_unsafe_fast_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        creation_tools,
+        "compile_design_intent",
+        lambda project_path, intent, strict=False: {
+            "success": True,
+            "expanded_spec": {"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}},
+            "summary": {},
+            "generated_refs": {},
+            "warnings": [],
+            "errors": [],
+            "expanded_spec_path": str(tmp_path / "expanded.json"),
+        },
+    )
+
+    def fake_build(project_path, spec, **kwargs):
+        captured["kwargs"] = kwargs
+        return {"success": True, "validation": {"post_write": {"missing": []}}}
+
+    monkeypatch.setattr(creation_tools, "build_schematic_from_spec_v2", fake_build)
+    monkeypatch.setattr(
+        creation_tools,
+        "build_quality_report",
+        lambda *args, **kwargs: {
+            "success": True,
+            "native_netlist": {"success": True},
+            "erc": {"total_violations": 0},
+            "quality_gate": {"passed": True},
+        },
+    )
+
+    result = creation_tools._schematic_design_intent_response(
+        str(tmp_path),
+        {},
+        mode="update",
+        dry_run=False,
+        strict=True,
+        detail="compact",
+        include_expanded_spec=False,
+        tool_name="schematic_apply_design_intent",
+        quick_apply=True,
+        unsafe_fast_apply=True,
+    )
+
+    assert result["success"] is True
+    assert result["post_steps"]["run_cli_validation"] is True
+    assert captured["kwargs"]["run_cli_validation"] is True
 
 
 def test_schematic_apply_expanded_spec_reuses_saved_artifact(
@@ -445,6 +581,8 @@ def test_schematic_apply_expanded_spec_reuses_saved_artifact(
         include_preview=True,
         run_quality_report=True,
         run_native_validation=True,
+        run_cli_validation=True,
+        unsafe_fast_apply=False,
         visual_layout=False,
     )
 
@@ -454,6 +592,44 @@ def test_schematic_apply_expanded_spec_reuses_saved_artifact(
     assert captured["kwargs"]["run_native_validation"] is False
     assert captured["kwargs"]["apply_default_visual_layout"] is False
     assert captured["spec"]["layout_hints"]["visual_layout"]["enabled"] is False
+
+
+def test_schematic_apply_expanded_spec_unsafe_fast_apply_skips_cli_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    expanded_path = tmp_path / ".kicad_mcp" / "design_intent.expanded_spec.json"
+    expanded_path.parent.mkdir()
+    expanded_path.write_text(
+        json.dumps({"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}}),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_build(project_path, spec, **kwargs):
+        captured["kwargs"] = kwargs
+        return {"success": True, "native_netlist": {"success": None, "skipped": True}}
+
+    monkeypatch.setattr(creation_tools, "build_schematic_from_spec_v2", fake_build)
+
+    result = creation_tools._schematic_apply_expanded_spec_response(
+        str(tmp_path),
+        expanded_spec_path=".kicad_mcp/design_intent.expanded_spec.json",
+        spec=None,
+        mode="update",
+        strict=False,
+        detail="compact",
+        quick_apply=True,
+        include_preview=False,
+        run_quality_report=False,
+        run_native_validation=False,
+        run_cli_validation=True,
+        unsafe_fast_apply=True,
+        visual_layout=True,
+    )
+
+    assert result["success"] is True
+    assert result["post_steps"]["run_cli_validation"] is False
+    assert captured["kwargs"]["run_cli_validation"] is False
 
 
 def test_large_design_preview_recommends_staged_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -512,6 +688,8 @@ def test_design_intent_job_status_and_result(tmp_path: Path, monkeypatch: pytest
         include_preview=False,
         run_quality_report=False,
         run_native_validation=False,
+        run_cli_validation=True,
+        unsafe_fast_apply=False,
     )
     creation_tools._DESIGN_INTENT_JOBS[start["job_id"]]["future"].result(timeout=2)
     status = creation_tools._get_design_intent_job_status(start["job_id"])

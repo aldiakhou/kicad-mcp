@@ -186,6 +186,24 @@ def test_v2_builder_preserves_explicit_pin_anchor_layout(monkeypatch):
     assert captured["spec"]["connections"][0]["connection_style"] == "label"
 
 
+def test_v2_builder_forwards_cli_validation_toggle(monkeypatch):
+    captured: dict = {}
+
+    def fake_build(project_path, spec, **kwargs):
+        captured["kwargs"] = kwargs
+        return {"success": True, "project_path": project_path}
+
+    monkeypatch.setattr(schematic_builder, "build_schematic_from_spec", fake_build)
+
+    schematic_builder.build_schematic_from_spec_v2(
+        "demo.kicad_pro",
+        {"parts": [], "nets": {}},
+        run_cli_validation=False,
+    )
+
+    assert captured["kwargs"]["run_cli_validation"] is False
+
+
 def test_v2_normalizer_rejects_unit_name_without_lib_id():
     normalized = normalize_build_spec_v2(
         {"parts": [{"ref": "R1", "symbol": "R_1_1"}], "nets": {}}
