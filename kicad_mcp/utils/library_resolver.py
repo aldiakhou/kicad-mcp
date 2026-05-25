@@ -210,8 +210,25 @@ def resolve_footprint(footprint_id: str) -> dict[str, Any]:
     """Resolve a KiCad footprint by full footprint_id, for example Resistor_SMD:R_0603_1608Metric."""
     library_name, footprint_name = _split_library_id(footprint_id)
     footprint_file = _find_footprint_file(library_name, footprint_name)
+    resolution = "exact"
+    resolved_from = None
     if footprint_file is None:
-        raise KiCadLibraryError(f"Footprint not found: {footprint_id}")
+        fuzzy = _resolve_footprint_fuzzy(footprint_id, library_name, footprint_name)
+        if fuzzy is None:
+            suggestions = find_footprints(footprint_name, max_results=5, library=library_name)
+            suggestion_ids = [item["footprint_id"] for item in suggestions]
+            detail = (
+                f" Suggestions: {', '.join(suggestion_ids)}"
+                if suggestion_ids
+                else ""
+            )
+            raise KiCadLibraryError(f"Footprint not found: {footprint_id}.{detail}")
+        footprint_id = fuzzy["footprint_id"]
+        library_name = fuzzy["library"]
+        footprint_name = fuzzy["footprint"]
+        footprint_file = Path(fuzzy["path"])
+        resolution = "fuzzy"
+        resolved_from = fuzzy["resolved_from"]
     footprint = parse_s_expression(footprint_file.read_text(encoding="utf-8"))
     if footprint.head() != "footprint":
         raise KiCadLibraryError(f"Invalid footprint file for {footprint_id}: {footprint_file}")
@@ -225,7 +242,43 @@ def resolve_footprint(footprint_id: str) -> dict[str, Any]:
         "path": str(footprint_file),
         "node": footprint,
         "source": serialize_s_expression(footprint),
+        "resolution": resolution,
+        "resolved_from": resolved_from,
     }
+
+
+def _resolve_footprint_fuzzy(
+    requested_id: str,
+    requested_library: str,
+    requested_name: str,
+) -> dict[str, Any] | None:
+    """Resolve common manufacturer punctuation variants within one footprint library."""
+    requested_library_normalized = _normalize_search_text(requested_library)
+    requested_name_normalized = _normalize_search_text(requested_name)
+    candidates: list[dict[str, Any]] = []
+    for library in list_footprint_libraries(requested_library):
+        library_name = library["name"]
+        if _normalize_search_text(library_name) != requested_library_normalized:
+            continue
+        for footprint_file in sorted(Path(library["path"]).glob("*.kicad_mod")):
+            footprint_name = footprint_file.stem
+            if _normalize_search_text(footprint_name) != requested_name_normalized:
+                continue
+            candidates.append(
+                {
+                    "footprint_id": f"{library_name}:{footprint_name}",
+                    "library": library_name,
+                    "footprint": footprint_name,
+                    "path": str(footprint_file),
+                    "resolved_from": requested_id,
+                }
+            )
+    unique: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        unique.setdefault(candidate["footprint_id"], candidate)
+    if len(unique) == 1:
+        return next(iter(unique.values()))
+    return None
 
 
 def _split_library_id(item_id: str) -> tuple[str, str]:

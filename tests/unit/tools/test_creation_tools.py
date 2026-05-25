@@ -16,9 +16,11 @@ def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     footprint_library = footprint_dir / "Resistor_SMD.pretty"
     capacitor_footprint_library = footprint_dir / "Capacitor_SMD.pretty"
     package_footprint_library = footprint_dir / "Package_QFP.pretty"
+    connector_footprint_library = footprint_dir / "Connector_USB.pretty"
     footprint_library.mkdir(parents=True)
     capacitor_footprint_library.mkdir(parents=True)
     package_footprint_library.mkdir(parents=True)
+    connector_footprint_library.mkdir(parents=True)
 
     (symbol_dir / "Device.kicad_sym").write_text(
         """
@@ -87,6 +89,25 @@ def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
       (number "2" (effects (font (size 1.27 1.27))))
     )
   )
+  (symbol "BaseLDO"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "U" (at 0 0 0))
+    (property "Value" "BaseLDO" (at 0 2.54 0))
+    (pin power_in line (at -2.54 0 180) (length 2.54)
+      (name "IN" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27))))
+    )
+    (pin power_out line (at 2.54 0 0) (length 2.54)
+      (name "OUT" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27))))
+    )
+  )
+  (symbol "AliasLDO"
+    (extends "BaseLDO")
+    (property "Reference" "U" (at 0 0 0))
+    (property "Value" "AliasLDO" (at 0 2.54 0))
+  )
 )
 """,
         encoding="utf-8",
@@ -128,6 +149,18 @@ def _write_fixture_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
   (property "Reference" "REF**" (at 0 -1 0) (layer "F.SilkS"))
   (property "Value" "LQFP-48_7x7mm_P0.5mm" (at 0 1 0) (layer "F.Fab"))
   (pad "1" smd rect (at -0.8 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask"))
+)
+""",
+        encoding="utf-8",
+    )
+    (connector_footprint_library / "USB_Micro-B_Molex-105017-0001.kicad_mod").write_text(
+        """
+(footprint "USB_Micro-B_Molex-105017-0001"
+  (version 20240108)
+  (generator "pytest")
+  (layer "F.Cu")
+  (property "Reference" "REF**" (at 0 -1 0) (layer "F.SilkS"))
+  (property "Value" "USB" (at 0 1 0) (layer "F.Fab"))
 )
 """,
         encoding="utf-8",
@@ -225,6 +258,51 @@ async def test_apply_connection_plan_verify_native_netlist_alias_only_controls_n
 
     assert captured["run_native_netlist"] is False
     assert captured["run_erc"] is True
+
+
+@pytest.mark.asyncio
+async def test_apply_connection_plan_wire_style_routes_two_endpoint_net(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_symbol_roots", lambda: [])
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_footprint_roots", lambda: [])
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "wire_style", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+
+    await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        30.48,
+        30.48,
+    )
+    await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R2",
+        "10k",
+        60.96,
+        30.48,
+    )
+    result = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [
+            {"type": "pin_to_net", "ref": "R1", "pin": "2", "net": "SIG", "connection_style": "wire"},
+            {"type": "pin_to_net", "ref": "R2", "pin": "1", "net": "SIG", "connection_style": "wire"},
+        ],
+        verify=False,
+    )
+    schematic = KiCadSchematic.from_file(schematic_path)
+
+    assert result["success"] is True
+    assert result["applied_connection_count"] == 2
+    assert len(schematic.list_wires()) >= 1
+    assert any(label["text"] == "SIG" for label in schematic.list_labels())
 
 
 def test_connection_plan_missing_type_returns_supported_examples():
@@ -1481,6 +1559,25 @@ async def test_library_resolution_reports_missing_items(
 
 
 @pytest.mark.asyncio
+async def test_resolve_symbol_flattens_inherited_pins_and_fuzzy_footprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+
+    symbol = tools["resolve_symbol"].fn("MCU_Test:AliasLDO")
+    footprint = tools["resolve_footprint"].fn("Connector_USB:USB_Micro-B_Molex_105017-0001")
+
+    assert symbol["success"] is True
+    assert symbol["extends_chain"] == ["MCU_Test:AliasLDO", "MCU_Test:BaseLDO"]
+    assert {pin["name"] for pin in symbol["pins"]} == {"IN", "OUT"}
+    assert footprint["success"] is True
+    assert footprint["resolution"] == "fuzzy"
+    assert footprint["footprint_id"] == "Connector_USB:USB_Micro-B_Molex-105017-0001"
+
+
+@pytest.mark.asyncio
 async def test_agent_search_tools_and_compact_v2_build_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1548,6 +1645,47 @@ async def test_agent_search_tools_and_compact_v2_build_defaults(
     assert "diff" not in built
     assert "schematic_preview" not in built
     assert "quality_report" not in built
+
+
+@pytest.mark.asyncio
+async def test_v2_build_accepts_full_design_intent_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_symbol_roots", lambda: [])
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_footprint_roots", lambda: [])
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.validate_connection_plan_membership",
+        lambda path, connections: {"success": True, "checked_count": len(connections)},
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda path: {"success": True, "component_count": 2, "net_count": 2, "nets": {}},
+    )
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "intent_v2", True, True, "A4")
+
+    built = tools["schematic_build_from_spec_v2"].fn(
+        project["project_path"],
+        {
+            "parts": [{"ref": "U1", "lib_id": "MCU_Test:MCU48", "value": "MCU"}],
+            "pin_rules": [
+                {"ref": "U1", "match": {"pin": "VDD"}, "net": "+3V3"},
+                {"ref": "U1", "match": {"pin": "GND"}, "net": "GND"},
+            ],
+            "support_circuits": [
+                {"type": "decoupling", "rail": "+3V3", "ground": "GND", "capacitors": ["100n"]}
+            ],
+        },
+        run_native_validation=False,
+    )
+
+    assert built["success"] is True
+    assert built["compiled_from_intent"] is True
+    assert built["design_intent_summary"]["generated_part_count"] == 1
+    assert built["symbol_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -1643,6 +1781,56 @@ async def test_schematic_footprint_tools_assign_explicit_and_defaults(
     assert all_missing["partial_success"] is False
     assert all_missing["missing_refs"] == ["Z8", "Z9"]
     assert all_missing["error"] == "all requested refs were missing"
+
+
+@pytest.mark.asyncio
+async def test_incremental_support_and_no_connect_rule_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_symbol_roots", lambda: [])
+    monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_footprint_roots", lambda: [])
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.validate_connection_plan_membership",
+        lambda path, connections: {"success": True, "checked_count": len(connections)},
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda path: {"success": True, "component_count": 2, "net_count": 2, "nets": {}},
+    )
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "incremental", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+
+    added = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "MCU_Test:MCU48",
+        "U1",
+        "MCU",
+        40.0,
+        40.0,
+    )
+    support = tools["schematic_add_decoupling_capacitor"].fn(
+        project["project_path"],
+        "U1",
+        "+3V3",
+        "GND",
+        "100n",
+        None,
+    )
+    nc = tools["schematic_apply_no_connect_rules"].fn(
+        project["project_path"],
+        [{"ref": "U1", "match": {"pin": "GND"}, "action": "mark_no_connect"}],
+        run_native_validation=False,
+    )
+
+    assert added["success"] is True
+    assert support["success"] is True
+    assert support["tool"] == "schematic_add_decoupling_capacitor"
+    assert nc["success"] is True
+    assert nc["tool"] == "schematic_apply_no_connect_rules"
 
 
 @pytest.mark.asyncio

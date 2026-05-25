@@ -10,7 +10,12 @@ from typing import Any, cast
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli_batch import validate_schematic_batch
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExprAtom, SExprList
-from kicad_mcp.utils.library_resolver import resolve_footprint, resolve_symbol
+from kicad_mcp.utils.library_resolver import (
+    find_footprints,
+    find_symbols,
+    resolve_footprint,
+    resolve_symbol,
+)
 from kicad_mcp.utils.native_netlist import (
     export_native_netlist,
     native_node_matches_endpoint,
@@ -168,24 +173,11 @@ def card_reader_v1_spec() -> dict[str, Any]:
 def preview_build_from_spec(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe build preview without writing files."""
     spec = normalize_build_spec_v2(spec) if _is_v2_spec(spec) else spec
+    preflight = preflight_build_spec(project_path, spec)
     paper = spec.get("paper", "A4")
     page_width, page_height = KiCadSchematic.PAPER_SIZES_MM.get(paper, KiCadSchematic.PAPER_SIZES_MM["A4"])
-    symbol_errors = []
-    footprint_errors = []
-    normalization_errors = spec.get("normalization_errors", [])
-    for symbol in spec.get("symbols", []):
-        if not symbol.get("custom_symbol_node"):
-            try:
-                resolve_symbol(symbol["lib_id"])
-            except Exception as exc:
-                symbol_errors.append({"reference": symbol.get("reference"), "lib_id": symbol.get("lib_id"), "error": str(exc)})
-        if symbol.get("footprint"):
-            try:
-                resolve_footprint(symbol["footprint"])
-            except Exception as exc:
-                footprint_errors.append({"reference": symbol.get("reference"), "footprint": symbol.get("footprint"), "error": str(exc)})
     return {
-        "success": not normalization_errors and not symbol_errors and not footprint_errors,
+        "success": preflight["success"],
         "project_path": project_path,
         "spec_name": spec.get("name"),
         "page": {"paper": paper, "width_mm": page_width, "height_mm": page_height},
@@ -194,11 +186,74 @@ def preview_build_from_spec(project_path: str, spec: dict[str, Any]) -> dict[str
         "planned_no_connect_count": len(spec.get("no_connects", [])),
         "planned_nets": sorted({connection["net"] for connection in spec.get("connections", [])}),
         "erc_sensitive_pins": _erc_sensitive_pins(spec),
+        **preflight,
+    }
+
+
+def preflight_build_spec(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """Validate normalized schematic-build inputs before any file mutation."""
+    symbol_errors = []
+    footprint_errors = []
+    normalization_errors = list(spec.get("normalization_errors", []))
+    normalization_warnings = list(spec.get("normalization_warnings", []))
+    for index, symbol in enumerate(spec.get("symbols", [])):
+        path = f"symbols[{index}]"
+        if not isinstance(symbol, dict):
+            normalization_errors.append({"path": path, "error": "symbol entry must be an object"})
+            continue
+        if not symbol.get("reference"):
+            normalization_errors.append({"path": f"{path}.reference", "error": "symbol requires reference"})
+        if not symbol.get("lib_id"):
+            normalization_errors.append({"path": f"{path}.lib_id", "error": "symbol requires lib_id"})
+        if not symbol.get("custom_symbol_node") and symbol.get("lib_id"):
+            try:
+                resolve_symbol(str(symbol["lib_id"]))
+            except Exception as exc:
+                query = str(symbol.get("lib_id") or "").split(":", 1)[-1]
+                symbol_errors.append(
+                    {
+                        "path": f"{path}.lib_id",
+                        "reference": symbol.get("reference"),
+                        "lib_id": symbol.get("lib_id"),
+                        "error": str(exc),
+                        "suggested_queries": [query] if query else [],
+                        "suggestions": find_symbols(query, max_results=5) if query else [],
+                    }
+                )
+        if symbol.get("footprint"):
+            try:
+                resolve_footprint(str(symbol["footprint"]))
+            except Exception as exc:
+                query = str(symbol.get("footprint") or "").split(":", 1)[-1]
+                footprint_errors.append(
+                    {
+                        "path": f"{path}.footprint",
+                        "reference": symbol.get("reference"),
+                        "footprint": symbol.get("footprint"),
+                        "error": str(exc),
+                        "suggested_queries": [query] if query else [],
+                        "suggestions": find_footprints(query, max_results=5) if query else [],
+                    }
+                )
+    return {
+        "success": not normalization_errors and not symbol_errors and not footprint_errors,
         "normalization_errors": normalization_errors,
-        "normalization_warnings": spec.get("normalization_warnings", []),
+        "normalization_warnings": normalization_warnings,
         "symbol_errors": symbol_errors,
         "footprint_errors": footprint_errors,
     }
+
+
+def _preflight_error_message(preflight: dict[str, Any]) -> str:
+    if preflight.get("normalization_errors"):
+        return "Spec contains schema errors"
+    if preflight.get("symbol_errors") and preflight.get("footprint_errors"):
+        return "Spec contains unresolved symbols and footprints"
+    if preflight.get("symbol_errors"):
+        return "Spec contains unresolved symbols"
+    if preflight.get("footprint_errors"):
+        return "Spec contains unresolved footprints"
+    return "Spec preflight failed"
 
 
 def build_schematic_from_spec(
@@ -252,7 +307,12 @@ def build_schematic_from_spec(
         }
     preview = preview_build_from_spec(project_path, spec)
     if not preview["success"]:
-        return {**preview, "success": False, "error": "Spec contains unresolved symbols or footprints"}
+        return {
+            **preview,
+            "success": False,
+            "error": _preflight_error_message(preview),
+            "recoverable": True,
+        }
     built_summary: dict[str, Any] = {}
 
     def mutate(schematic: KiCadSchematic) -> dict[str, Any]:
@@ -480,6 +540,12 @@ def _prewrite_visual_gate(
             "stage": "layout_failed",
             "error": f"Design does not fit on {paper} without overlaps",
             "visual_layout": visual_layout,
+            "visual_gate": {
+                "mode": gate,
+                "passed": False,
+                "failed_metrics": {"layout_failed": True},
+                "thresholds": {"layout_failed": False},
+            },
             "recoverable": True,
             "recommended_next_arguments": recommended,
         }
@@ -508,6 +574,7 @@ def _prewrite_visual_gate(
         "visual_quality": int(visual.get("blocking_count", 0)),
     }
     if any(count > 0 for count in blocking_counts.values()):
+        failed_metrics = {key: value for key, value in blocking_counts.items() if value > 0}
         recommended: dict[str, Any] = {"layout_hints": {"visual_gate": "report_only"}}
         paper = normalized_spec.get("paper", "A4")
         next_paper = _next_larger_paper(str(paper))
@@ -522,8 +589,11 @@ def _prewrite_visual_gate(
             "visual_gate": {
                 "mode": gate,
                 "passed": False,
+                "failed_metrics": failed_metrics,
+                "thresholds": dict.fromkeys(blocking_counts, 0),
                 "blocking_counts": blocking_counts,
                 "symbols_outside_page": outside,
+                "blocking_details": visual.get("blocking", []),
                 "visual_quality": visual,
             },
             "recoverable": True,
@@ -1781,7 +1851,7 @@ def _labels_inside_symbols(
         for ref, box in symbol_boxes:
             if ref[:1] in {"R", "C", "L", "D"}:
                 continue
-            if _point_in_rect(point, box):
+            if _point_in_rect(point, _shrink_rect(box, 1.27)):
                 inside.append(
                     {
                         "label": label,
@@ -1880,6 +1950,15 @@ def _point_in_rect(
     point: tuple[float, float], rect: tuple[float, float, float, float]
 ) -> bool:
     return rect[0] <= point[0] <= rect[2] and rect[1] <= point[1] <= rect[3]
+
+
+def _shrink_rect(
+    rect: tuple[float, float, float, float],
+    margin: float,
+) -> tuple[float, float, float, float]:
+    if rect[2] - rect[0] <= margin * 2 or rect[3] - rect[1] <= margin * 2:
+        return rect
+    return (rect[0] + margin, rect[1] + margin, rect[2] - margin, rect[3] - margin)
 
 
 def _rect_to_dict(rect: tuple[float, float, float, float]) -> dict[str, float]:

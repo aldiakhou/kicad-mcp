@@ -152,7 +152,52 @@ def apply_connection_plan_v2(
         nonlocal snap_summary
         if auto_snap:
             snap_summary = snap_schematic_to_grid_model(schematic)
-        for connection in normalized["connections"]:
+        routed_wire_keys = _wire_connection_group_keys(normalized["connections"])
+        consumed_wire_keys: set[tuple[str, int]] = set()
+        for connection_index, connection in enumerate(normalized["connections"]):
+            route_key = routed_wire_keys.get(connection_index)
+            if route_key is not None and route_key not in consumed_wire_keys:
+                group = [
+                    item
+                    for item_index, item in enumerate(normalized["connections"])
+                    if routed_wire_keys.get(item_index) == route_key
+                ]
+                for item in group:
+                    _prepare_incremental_connection(
+                        schematic,
+                        schematic_path,
+                        item,
+                        replace_existing=replace_existing or bool(item.get("replace_existing")),
+                        removed_conflicting_connections=removed_conflicting_connections,
+                        removed_conflicting_no_connects=removed_conflicting_no_connects,
+                    )
+                if all(item.get("_already_connected") for item in group):
+                    skipped_existing_connections.extend(
+                        {
+                            "ref": item["ref"],
+                            "pin": item["pin"],
+                            "net": item["net"],
+                            "reason": "already connected to requested net",
+                        }
+                        for item in group
+                    )
+                    consumed_wire_keys.add(route_key)
+                    continue
+                try:
+                    applied = _apply_wire_connection_group(schematic, schematic_path, group)
+                    applied_connections.append(applied)
+                    applied_connection_intents.extend(group)
+                    consumed_wire_keys.add(route_key)
+                    continue
+                except Exception as exc:
+                    for item in group:
+                        item["connection_style"] = "label"
+                        item.setdefault("warnings", []).append(
+                            f"wire routing failed; fell back to label: {exc}"
+                        )
+
+            if route_key is not None and route_key in consumed_wire_keys:
+                continue
             _prepare_incremental_connection(
                 schematic,
                 schematic_path,
@@ -645,6 +690,87 @@ def _apply_normalized_connection(
         label_clearance_mm=connection.get("label_clearance_mm", 5.08),
         connection_style=connection.get("connection_style", "label"),
     )
+
+
+def _wire_connection_group_keys(
+    connections: list[dict[str, Any]],
+) -> dict[int, tuple[str, int]]:
+    by_net: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, connection in enumerate(connections):
+        style = str(connection.get("connection_style", "label"))
+        if style not in {"wire", "auto"}:
+            continue
+        if style == "auto" and _is_power_net(str(connection.get("net", ""))):
+            continue
+        by_net.setdefault(str(connection["net"]), []).append((index, connection))
+    routed: dict[int, tuple[str, int]] = {}
+    for group_index, (net, group) in enumerate(by_net.items()):
+        if len(group) != 2:
+            continue
+        key = (net, group_index)
+        for index, _connection in group:
+            routed[index] = key
+    return routed
+
+
+def _apply_wire_connection_group(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    group: list[dict[str, Any]],
+) -> dict[str, Any]:
+    first, second = group
+    first_pin = _connection_point_for_pin(schematic, schematic_path, first)
+    second_pin = _connection_point_for_pin(schematic, schematic_path, second)
+    route_style = "direct" if _shares_axis(first_pin, second_pin) else "orthogonal"
+    wire = schematic.connect_points(
+        first_pin,
+        second_pin,
+        style=route_style,
+        net_name=str(first["net"]),
+    )
+    return {
+        "net_name": first["net"],
+        "style": "wire",
+        "route_style": route_style,
+        "connections": group,
+        "wire": wire,
+    }
+
+
+def _connection_point_for_pin(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    connection: dict[str, Any],
+) -> dict[str, float]:
+    from kicad_mcp.utils.schematic_pins import get_symbol_pin_map_from_schematic
+
+    pin_map = get_symbol_pin_map_from_schematic(
+        schematic,
+        schematic_path,
+        connection["ref"],
+    )
+    if not pin_map.get("success"):
+        raise ValueError(str(pin_map.get("error", "Unable to resolve pin map")))
+    requested = str(connection["pin"])
+    matches = [
+        pin
+        for pin in pin_map.get("pins", [])
+        if pin.get("number") == requested
+        or pin.get("name") == requested
+        or pin.get("pinfunction") == requested
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"Pin selector is ambiguous or missing: {connection['ref']}.{requested}")
+    return dict(matches[0]["connection_point"])
+
+
+def _shares_axis(first: dict[str, float], second: dict[str, float]) -> bool:
+    return abs(first["x"] - second["x"]) <= 1e-6 or abs(first["y"] - second["y"]) <= 1e-6
+
+
+def _is_power_net(net_name: str) -> bool:
+    normalized = net_name.upper()
+    return normalized in {"GND", "AGND", "DGND", "+3V3", "+3.3V", "+5V", "VBUS", "VCC", "VDD"}
 
 
 def _prepare_incremental_connection(

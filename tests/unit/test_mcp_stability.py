@@ -90,6 +90,8 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "schematic_get_job_status" in tools
     assert "schematic_get_job_result" in tools
     assert "schematic_cancel_job" in tools
+    assert "schematic_add_support_circuits" in tools
+    assert "schematic_apply_no_connect_rules" in tools
     assert "schematic_build_from_spec_v2" in tools
     assert "export_schematic_preview" in tools
     assert "export_schematic_svg" in tools
@@ -113,6 +115,19 @@ async def test_create_server_registers_smoke_resources_and_tools():
 
     server_module.shutdown_server()
     assert server_module._server_instance is None
+
+
+@pytest.mark.asyncio
+async def test_agent_profile_tools_have_callable_handlers():
+    """Server registration should expose executable tool handlers, not routing metadata."""
+    server = create_server()
+    tools = await server.get_tools()
+
+    missing_callables = [name for name, tool in tools.items() if not callable(getattr(tool, "fn", None))]
+
+    assert missing_callables == []
+
+    server_module.shutdown_server()
 
 
 @pytest.mark.asyncio

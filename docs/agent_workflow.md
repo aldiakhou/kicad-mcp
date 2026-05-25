@@ -12,11 +12,11 @@ Recommended order:
 6. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
 7. `schematic_quality_report`
 8. `project_design_state`
-9. `schematic_build_from_spec_v2`, only when you already have explicit parts/nets
+9. `schematic_build_from_spec_v2`, when you have explicit parts/nets or a full design-intent payload
 10. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
 11. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
 
-For large schematics, prefer staged calls over one long request: run `schematic_preview_design_intent`, then follow `preview_size_estimate.recommended_mode`. For `staged`, place the expanded spec's `parts` with `schematic_build_from_spec_v2`, apply connection batches of 20-40 with `schematic_apply_connection_plan`, then run `export_schematic_preview` and `schematic_quality_report`. Preview responses over 25 parts or 75 connections recommend this workflow explicitly.
+For large schematics, `schematic_apply_design_intent` now chooses a staged internal apply when the expanded design is above the direct-apply threshold. It places parts first, applies connection batches, then runs requested validation. Very large direct requests can return a background `job_id`; poll with `schematic_get_job_status` and finish with `schematic_get_job_result`.
 
 For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. Run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Transactional KiCad CLI validation stays enabled by default; disable it only for agent-controlled staging with `unsafe_fast_apply=true`, which sets `run_cli_validation=false`. Use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation is still required and the client may time out.
 
@@ -78,7 +78,9 @@ Pin selectors support exact `name` and `number` aliases. Regex selectors use sub
 
 Support-circuit aliases are accepted for common agent output: `crystal` can use `xin`/`xout`, `ferrite_filter` can use `rail`/`supply_rail`, and `pullup` can use `target` or `ref` plus `pin` to connect the target pin before adding the resistor.
 
-For fragile incremental wiring, `schematic_apply_connection_plan` accepts `verify=false`, `verify_native_netlist=false`, `run_erc=false`, and `rollback_on_failure=false`. Use those only to get past native netlist/export timing issues, then run `schematic_quality_report` after layout is stable.
+For readable incremental wiring, `schematic_apply_connection_plan` accepts `connection_style` per connection: `label`, `wire`, or `auto`. `auto` uses power symbols for known rails, routes simple two-endpoint signal nets as wires, and falls back to labels for multi-drop or unsafe routes. For fragile edits, it also accepts `verify=false`, `verify_native_netlist=false`, `run_erc=false`, and `rollback_on_failure=false`; run `schematic_quality_report` after layout is stable.
+
+For incremental support circuitry on an existing schematic, use `schematic_add_support_circuits` with the same `support_circuits` entries as design intent, or the convenience tools `schematic_add_decoupling_capacitor`, `schematic_add_pullup_resistor`, and `schematic_add_passive`. Use `schematic_apply_no_connect_rules` to apply the same regex-based `no_connect_rules` format without rebuilding a full intent.
 
 `no_connect_rules` can exclude pins either inside the selector or at the rule level:
 
@@ -87,7 +89,7 @@ For fragile incremental wiring, `schematic_apply_connection_plan` accepts `verif
 {"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PA13", "PA14"]}
 ```
 
-`schematic_apply_design_intent` compiles this into v2 `parts`, generated passives/connectors, expanded net memberships, and no-connect markers. It always saves the normalized intent, expanded spec, and report under `.kicad_mcp/`.
+`schematic_apply_design_intent` compiles this into v2 `parts`, generated passives/connectors, expanded net memberships, and no-connect markers. `schematic_build_from_spec_v2` also accepts this full intent shape and compiles it before building, so support circuits and no-connect rules are not silently dropped. Both paths report exact `symbol_errors`, `footprint_errors`, and `normalization_errors` when preflight fails, and save artifacts under `.kicad_mcp/`.
 
 By default it also applies a generic visual layout pass before writing the schematic. The visual pass assigns explicit symbol positions using estimated symbol bounds, groups generated support parts near their targets, uses short external stubs for signal labels, and keeps known power rails on power-symbol/pin-anchor behavior for native-netlist reliability. The compact tool response includes a `visual_layout` summary.
 

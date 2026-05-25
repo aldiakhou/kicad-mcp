@@ -62,8 +62,11 @@ from kicad_mcp.utils.schematic_builder import (
     apply_connection_plan,
     build_schematic_from_spec,
     build_schematic_from_spec_v2,
+    normalize_build_spec_v2,
+    preflight_build_spec,
     preview_build_from_spec,
     preview_build_from_spec_v2,
+    validate_connection_plan_membership,
 )
 from kicad_mcp.utils.schematic_builder import (
     schematic_quality_report as build_quality_report,
@@ -75,6 +78,7 @@ from kicad_mcp.utils.schematic_intent import (
 )
 from kicad_mcp.utils.schematic_pins import (
     SCHEMATIC_GRID_MM,
+    _resolve_symbol_pins,
     get_symbol_pin_map,
     get_symbol_pin_map_from_schematic,
     verify_native_net_membership,
@@ -97,6 +101,14 @@ _DESIGN_INTENT_JOB_EXECUTOR = ThreadPoolExecutor(
 _DESIGN_INTENT_JOBS: dict[str, dict[str, Any]] = {}
 _DESIGN_INTENT_JOBS_LOCK = threading.Lock()
 _DESIGN_INTENT_JOB_RETAIN_LIMIT = 50
+_DESIGN_INTENT_PAYLOAD_KEYS = {
+    "support_circuits",
+    "pin_rules",
+    "rails",
+    "interfaces",
+    "bulk_connections",
+    "no_connect_rules",
+}
 
 
 def _resolve_project_alias(
@@ -131,6 +143,110 @@ def _suggested_library_queries(query: str, kind: str) -> list[str]:
         if item and item not in deduped:
             deduped.append(item)
     return deduped[:5]
+
+
+def _looks_like_design_intent_payload(payload: dict[str, Any]) -> bool:
+    return any(key in payload for key in _DESIGN_INTENT_PAYLOAD_KEYS)
+
+
+def _compile_v2_or_intent_payload(
+    project_path: str,
+    payload: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not _looks_like_design_intent_payload(payload):
+        return payload, None
+    compiled = compile_design_intent(project_path, payload, strict=strict)
+    if not compiled.get("success") or not isinstance(compiled.get("expanded_spec"), dict):
+        return None, {
+            "success": False,
+            "project_path": project_path,
+            "stage": "compile_failed",
+            "error": "Design intent compilation failed",
+            "summary": compiled.get("summary", {}),
+            "warnings": compiled.get("warnings", []),
+            "errors": compiled.get("errors", []),
+            "recoverable": compiled.get("recoverable", True),
+            "expanded_spec_path": compiled.get("expanded_spec_path"),
+            "normalized_intent_path": compiled.get("normalized_intent_path"),
+            "report_path": compiled.get("report_path"),
+        }
+    return cast(dict[str, Any], compiled["expanded_spec"]), compiled
+
+
+def _apply_incremental_intent_fragment(
+    project_path: str,
+    fragment: dict[str, Any],
+    *,
+    tool_name: str,
+    run_native_validation: bool = True,
+    run_quality_report: bool = False,
+    unsafe_fast_apply: bool = False,
+) -> dict[str, Any]:
+    compiled = compile_design_intent(project_path, fragment, strict=False)
+    if not compiled.get("success") or not isinstance(compiled.get("expanded_spec"), dict):
+        return {
+            "success": False,
+            "tool": tool_name,
+            "stage": "compile_failed",
+            "project_path": project_path,
+            "changed": False,
+            "error": "Design-intent fragment compilation failed",
+            "summary": compiled.get("summary", {}),
+            "warnings": compiled.get("warnings", []),
+            "errors": compiled.get("errors", []),
+            "recoverable": compiled.get("recoverable", True),
+        }
+    result = build_schematic_from_spec_v2(
+        project_path,
+        cast(dict[str, Any], compiled["expanded_spec"]),
+        mode="update",
+        run_erc=False,
+        allow_destructive_replace=False,
+        detail="compact",
+        include_diff=False,
+        include_preview=False,
+        include_full_native_netlist=False,
+        run_quality_report=run_quality_report,
+        run_native_validation=run_native_validation,
+        apply_default_visual_layout=True,
+        run_cli_validation=not unsafe_fast_apply,
+    )
+    result["tool"] = tool_name
+    result["compiled_from_intent"] = True
+    result["design_intent_summary"] = compiled.get("summary", {})
+    result["generated_refs"] = compiled.get("generated_refs", {})
+    result["expanded_spec_path"] = compiled.get("expanded_spec_path")
+    return result
+
+
+def _symbol_extends_chain(lib_id: str) -> list[str]:
+    chain = [lib_id]
+    seen = {lib_id}
+    try:
+        resolved = resolve_symbol_node(lib_id)
+        parent = _sexpr_child_text(cast(SExprList, resolved["node"]), "extends")
+        library = str(resolved.get("library") or lib_id.split(":", 1)[0])
+        while parent:
+            parent_lib_id = f"{library}:{parent}"
+            if parent_lib_id in seen:
+                break
+            chain.append(parent_lib_id)
+            seen.add(parent_lib_id)
+            resolved = resolve_symbol_node(parent_lib_id)
+            parent = _sexpr_child_text(cast(SExprList, resolved["node"]), "extends")
+    except Exception:
+        return chain
+    return chain
+
+
+def _sexpr_child_text(node: SExprList, head: str) -> str | None:
+    child = node.first_child(head)
+    if child is None or len(child.items) < 2:
+        return None
+    value = getattr(child.items[1], "value", None)
+    return str(value) if value else None
 
 
 def _native_netlist_for_tool(schematic_path: str) -> dict[str, Any]:
@@ -198,7 +314,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
         first when unsure. Nets may use ["U1", "1"] or {"ref": "U1", "pin": "1"} endpoints.
         """
         resolved_project = _resolve_project_alias(project_path, schematic_path)
-        return preview_build_from_spec_v2(resolved_project, spec or intent or {})
+        payload = spec or intent or {}
+        expanded, compile_error = _compile_v2_or_intent_payload(resolved_project, payload)
+        if compile_error is not None:
+            return {
+                **compile_error,
+                "tool": "schematic_preview_build_from_spec_v2",
+                "stage": "compile_failed",
+            }
+        result = preview_build_from_spec_v2(resolved_project, expanded or {})
+        if _looks_like_design_intent_payload(payload):
+            result["source_format"] = "design_intent"
+            result["compiled_from_intent"] = True
+        return result
 
     @mcp.tool()
     def schematic_preview_design_intent(
@@ -416,9 +544,21 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 "error": "run_cli_validation=false requires unsafe_fast_apply=true",
                 "recoverable": True,
             }
+        payload = spec or intent or {}
+        expanded, compile_result = _compile_v2_or_intent_payload(
+            resolved_project,
+            payload,
+            strict=False,
+        )
+        if expanded is None:
+            return {
+                **cast(dict[str, Any], compile_result),
+                "tool": "schematic_build_from_spec_v2",
+                "changed": False,
+            }
         result = build_schematic_from_spec_v2(
             resolved_project,
-            spec or intent or {},
+            expanded,
             mode=mode,
             run_erc=run_erc,
             allow_destructive_replace=allow_destructive_replace,
@@ -431,6 +571,11 @@ def register_creation_tools(mcp: FastMCP) -> None:
             apply_default_visual_layout=apply_default_visual_layout,
             run_cli_validation=run_cli_validation,
         )
+        if isinstance(compile_result, dict):
+            result["compiled_from_intent"] = True
+            result["design_intent_summary"] = compile_result.get("summary", {})
+            result["generated_refs"] = compile_result.get("generated_refs", {})
+            result["expanded_spec_path"] = compile_result.get("expanded_spec_path")
         if result.get("success"):
             result.setdefault("tool", "schematic_build_from_spec_v2")
             result.setdefault("stage", "schematic_built")
@@ -482,6 +627,130 @@ def register_creation_tools(mcp: FastMCP) -> None:
     def schematic_design_intent_schema(section: str = "all") -> dict[str, Any]:
         """Return compact schema examples for schematic_apply_design_intent."""
         return design_intent_schema(section)
+
+    @mcp.tool()
+    def schematic_add_support_circuits(
+        project_path: str | None = None,
+        support_circuits: list[dict[str, Any]] | dict[str, Any] | None = None,
+        schematic_path: str | None = None,
+        run_native_validation: bool = True,
+        run_quality_report: bool = False,
+        unsafe_fast_apply: bool = False,
+    ) -> dict[str, Any]:
+        """Add design-intent support circuits to an existing schematic."""
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        return _apply_incremental_intent_fragment(
+            resolved_project,
+            {"support_circuits": support_circuits or []},
+            tool_name="schematic_add_support_circuits",
+            run_native_validation=run_native_validation,
+            run_quality_report=run_quality_report,
+            unsafe_fast_apply=unsafe_fast_apply,
+        )
+
+    @mcp.tool()
+    def schematic_add_decoupling_capacitor(
+        project_path: str | None = None,
+        target: str | None = None,
+        rail: str = "+3V3",
+        ground: str = "GND",
+        value: str = "100n",
+        footprint: str | None = None,
+        schematic_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Add one decoupling capacitor support circuit to an existing schematic."""
+        circuit: dict[str, Any] = {
+            "type": "decoupling",
+            "target": target,
+            "rail": rail,
+            "ground": ground,
+            "capacitors": [value],
+        }
+        if footprint:
+            circuit["footprint"] = footprint
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        return _apply_incremental_intent_fragment(
+            resolved_project,
+            {"support_circuits": [circuit]},
+            tool_name="schematic_add_decoupling_capacitor",
+        )
+
+    @mcp.tool()
+    def schematic_add_pullup_resistor(
+        project_path: str | None = None,
+        net: str = "RESET_N",
+        rail: str = "+3V3",
+        value: str = "10k",
+        footprint: str | None = None,
+        target: str | None = None,
+        pin: str | None = None,
+        schematic_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Add one pullup resistor support circuit to an existing schematic."""
+        circuit: dict[str, Any] = {
+            "type": "pullup",
+            "net": net,
+            "rail": rail,
+            "value": value,
+            "target": target,
+            "pin": pin,
+        }
+        if footprint:
+            circuit["footprint"] = footprint
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        return _apply_incremental_intent_fragment(
+            resolved_project,
+            {"support_circuits": [circuit]},
+            tool_name="schematic_add_pullup_resistor",
+        )
+
+    @mcp.tool()
+    def schematic_add_passive(
+        project_path: str | None = None,
+        passive_type: str = "resistor",
+        net_1: str = "NET1",
+        net_2: str = "NET2",
+        value: str = "10k",
+        footprint: str | None = None,
+        schematic_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a generic two-pin passive between two nets."""
+        kind = str(passive_type or "resistor").lower()
+        if kind in {"r", "resistor"}:
+            circuit: dict[str, Any] = {
+                "type": "series_resistor",
+                "in_net": net_1,
+                "out_net": net_2,
+                "value": value,
+            }
+        else:
+            circuit = {"type": "decoupling", "rail": net_1, "ground": net_2, "capacitors": [value]}
+        if footprint:
+            circuit["footprint"] = footprint
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        return _apply_incremental_intent_fragment(
+            resolved_project,
+            {"support_circuits": [circuit]},
+            tool_name="schematic_add_passive",
+        )
+
+    @mcp.tool()
+    def schematic_apply_no_connect_rules(
+        project_path: str | None = None,
+        rules: list[dict[str, Any]] | None = None,
+        schematic_path: str | None = None,
+        run_native_validation: bool = True,
+        run_quality_report: bool = False,
+    ) -> dict[str, Any]:
+        """Apply regex-based design-intent no-connect rules to an existing schematic."""
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        return _apply_incremental_intent_fragment(
+            resolved_project,
+            {"no_connect_rules": rules or []},
+            tool_name="schematic_apply_no_connect_rules",
+            run_native_validation=run_native_validation,
+            run_quality_report=run_quality_report,
+        )
 
     @mcp.tool()
     def schematic_explain_erc(
@@ -603,7 +872,12 @@ def register_creation_tools(mcp: FastMCP) -> None:
         """Resolve a KiCad symbol from installed libraries."""
         try:
             result = resolve_symbol_node(lib_id)
-            return {key: value for key, value in result.items() if key != "node"}
+            public = {key: value for key, value in result.items() if key != "node"}
+            pins = _resolve_symbol_pins(lib_id)
+            public["pins"] = pins
+            public["pin_count"] = len(pins)
+            public["extends_chain"] = _symbol_extends_chain(lib_id)
+            return public
         except KiCadLibraryError as exc:
             return {"success": False, "lib_id": lib_id, "error": str(exc)}
 
@@ -1892,6 +2166,7 @@ def _run_design_intent_job(job_id: str, project_path: str, intent: dict[str, Any
             run_native_validation=options["run_native_validation"],
             run_cli_validation=options["run_cli_validation"],
             unsafe_fast_apply=options["unsafe_fast_apply"],
+            allow_background_redirect=False,
         )
         status = "completed" if result.get("success") else "failed"
         with _DESIGN_INTENT_JOBS_LOCK:
@@ -2077,6 +2352,170 @@ def _with_large_design_recommendation(base: dict[str, Any], expanded_spec: dict[
     )
 
 
+def _apply_expanded_spec_staged(
+    project_path: str,
+    expanded_spec: dict[str, Any],
+    *,
+    mode: str,
+    detail: str,
+    include_preview: bool,
+    run_quality_report: bool,
+    run_native_validation: bool,
+    run_cli_validation: bool,
+) -> dict[str, Any]:
+    normalized = normalize_build_spec_v2(expanded_spec)
+    preflight = preflight_build_spec(project_path, normalized)
+    if not preflight.get("success"):
+        return {
+            "success": False,
+            "stage": "preflight_failed",
+            "changed": False,
+            "error": "Expanded spec preflight failed",
+            **preflight,
+            "recoverable": True,
+        }
+    parts_only = {
+        key: json.loads(json.dumps(value))
+        for key, value in expanded_spec.items()
+        if key not in {"nets", "no_connects"}
+    }
+    parts_only["nets"] = {}
+    parts_only["no_connects"] = []
+    placed = build_schematic_from_spec_v2(
+        project_path,
+        parts_only,
+        mode=mode,
+        run_erc=False,
+        allow_destructive_replace=False,
+        detail=detail,
+        include_diff=False,
+        include_preview=False,
+        include_full_native_netlist=False,
+        run_quality_report=False,
+        run_native_validation=False,
+        apply_default_visual_layout=True,
+        run_cli_validation=run_cli_validation,
+    )
+    if not placed.get("success"):
+        return {
+            "success": False,
+            "stage": "staged_part_placement_failed",
+            "changed": False,
+            "error": placed.get("error", "staged part placement failed"),
+            "build_result": placed,
+            "recoverable": True,
+        }
+
+    schematic_path = get_project_files(project_path).get("schematic")
+    if not schematic_path:
+        return {
+            "success": False,
+            "stage": "staged_wiring_failed",
+            "changed": True,
+            "error": "Schematic file not found after staged part placement",
+            "recoverable": True,
+        }
+
+    connections = list(normalized.get("connections", []))
+    no_connects = list(normalized.get("no_connects", []))
+    batches = [connections[index : index + 40] for index in range(0, len(connections), 40)]
+    wiring_results = []
+    for index, batch in enumerate(batches):
+        result = apply_connection_plan(
+            schematic_path,
+            batch,
+            None,
+            run_native_netlist=False,
+            rollback_on_failed_membership=True,
+            fail_on_erc_violations=False,
+            replace_existing=False,
+            run_erc=False,
+        )
+        wiring_results.append(_compact_staged_result(result, index, len(batch)))
+        if not result.get("success"):
+            return {
+                "success": False,
+                "stage": "staged_wiring_failed",
+                "changed": True,
+                "error": result.get("error", "staged wiring batch failed"),
+                "failed_batch_index": index,
+                "wiring_results": wiring_results,
+                "failed_connections": result.get("failed_connections", []),
+                "recoverable": True,
+            }
+    if no_connects:
+        result = apply_connection_plan(
+            schematic_path,
+            [],
+            no_connects,
+            run_native_netlist=False,
+            rollback_on_failed_membership=True,
+            fail_on_erc_violations=False,
+            replace_existing=False,
+            run_erc=False,
+        )
+        wiring_results.append(_compact_staged_result(result, len(batches), 0))
+        if not result.get("success"):
+            return {
+                "success": False,
+                "stage": "staged_no_connect_failed",
+                "changed": True,
+                "error": result.get("error", "staged no-connect batch failed"),
+                "wiring_results": wiring_results,
+                "recoverable": True,
+            }
+
+    validation = (
+        validate_connection_plan_membership(schematic_path, connections)
+        if run_native_validation
+        else {"success": None, "skipped": True, "missing": []}
+    )
+    quality = build_quality_report(project_path, run_erc=False) if run_quality_report else None
+    response: dict[str, Any] = {
+        "success": bool(validation.get("success") is not False),
+        "stage": "schematic_built",
+        "changed": True,
+        "mode": mode,
+        "staged_apply": True,
+        "symbol_count": placed.get("symbol_count"),
+        "connection_count": len(connections),
+        "no_connect_count": len(no_connects),
+        "wiring_results": wiring_results,
+        "validation": {"post_write": validation},
+        "recommended_next_tool": "schematic_quality_report",
+        "recommended_next_arguments": {"project_path": project_path},
+    }
+    if quality is not None and detail == "full":
+        response["quality_report"] = quality
+    if include_preview:
+        try:
+            svg_result = export_schematic_svg_file(schematic_path, None)
+            if svg_result.get("success"):
+                response["schematic_preview"] = svg_preview_metadata(svg_result["svg_path"])
+            else:
+                response["schematic_preview_error"] = svg_result.get("error")
+        except Exception as exc:
+            response["schematic_preview_error"] = str(exc)
+    if validation.get("success") is False:
+        response["stage"] = "staged_verification_failed"
+        response["error"] = validation.get("reason", "staged native netlist verification failed")
+        response["recoverable"] = True
+    if quality is not None:
+        response["verification"] = _verification_from_build_and_quality(response, quality)
+    return response
+
+
+def _compact_staged_result(result: dict[str, Any], index: int, batch_size: int) -> dict[str, Any]:
+    return {
+        "batch_index": index,
+        "batch_size": batch_size,
+        "success": result.get("success"),
+        "applied_connection_count": result.get("applied_connection_count", 0),
+        "no_connect_count": result.get("plan_summary", {}).get("no_connect_count"),
+        "error": result.get("error"),
+    }
+
+
 def _resolve_expanded_spec_path(project_path: str, expanded_spec_path: str) -> Path:
     candidate = Path(expanded_spec_path)
     if candidate.is_absolute():
@@ -2147,6 +2586,32 @@ def _schematic_apply_expanded_spec_response(
         }
     if not visual_layout:
         expanded_spec = _without_default_visual_layout(expanded_spec)
+    estimate = _preview_size_estimate(expanded_spec, {})
+    if (
+        not strict
+        and (
+            estimate["total_part_count"] > estimate["thresholds"]["quick_apply"]["max_parts"]
+            or estimate["connection_count"] > estimate["thresholds"]["quick_apply"]["max_connections"]
+        )
+    ):
+        staged = _apply_expanded_spec_staged(
+            project_path,
+            expanded_spec,
+            mode=mode,
+            detail=detail,
+            include_preview=include_preview,
+            run_quality_report=run_quality_report,
+            run_native_validation=run_native_validation,
+            run_cli_validation=run_cli_validation,
+        )
+        return {
+            **staged,
+            "tool": "schematic_apply_expanded_spec",
+            "project_path": project_path,
+            "expanded_spec_path": resolved_path,
+            "quick_apply": quick_apply,
+            "preview_size_estimate": estimate,
+        }
     built = build_schematic_from_spec_v2(
         project_path,
         expanded_spec,
@@ -2183,8 +2648,7 @@ def _schematic_apply_expanded_spec_response(
     }
     if not built.get("success"):
         response["error"] = built.get("error", "schematic build failed")
-        if detail == "full":
-            response["build_result"] = built
+        response.update(_build_failure_diagnostics(built, detail))
         return response
     if run_quality_report:
         try:
@@ -2253,6 +2717,28 @@ def _verification_from_build_and_quality(
     }
 
 
+def _build_failure_diagnostics(built: dict[str, Any], detail: str) -> dict[str, Any]:
+    keys = (
+        "normalization_errors",
+        "normalization_warnings",
+        "symbol_errors",
+        "footprint_errors",
+        "visual_gate",
+        "recommended_next_arguments",
+    )
+    diagnostics = {key: built[key] for key in keys if key in built}
+    if detail == "full":
+        diagnostics["build_result"] = built
+    else:
+        diagnostics["build_result_summary"] = {
+            "tool": built.get("tool"),
+            "stage": built.get("stage"),
+            "error": built.get("error"),
+            "recoverable": built.get("recoverable"),
+        }
+    return diagnostics
+
+
 def _schematic_design_intent_response(
     project_path: str,
     intent: dict[str, Any],
@@ -2272,6 +2758,7 @@ def _schematic_design_intent_response(
     run_native_validation: bool = True,
     run_cli_validation: bool = True,
     unsafe_fast_apply: bool = False,
+    allow_background_redirect: bool = True,
 ) -> dict[str, Any]:
     compiled = compile_design_intent(project_path, intent, strict=strict)
     expanded_spec = compiled.get("expanded_spec")
@@ -2406,6 +2893,59 @@ def _schematic_design_intent_response(
         "run_cli_validation": run_cli_validation,
         "unsafe_fast_apply": unsafe_fast_apply,
     }
+    if isinstance(expanded_spec, dict):
+        estimate = _preview_size_estimate(expanded_spec, compiled.get("summary", {}))
+        base["preview_size_estimate"] = estimate
+        too_large_for_direct = (
+            estimate["total_part_count"] > estimate["thresholds"]["background_job"]["max_parts"]
+            or estimate["connection_count"] > estimate["thresholds"]["background_job"]["max_connections"]
+        )
+        staged_candidate = (
+            estimate["total_part_count"] > estimate["thresholds"]["quick_apply"]["max_parts"]
+            or estimate["connection_count"] > estimate["thresholds"]["quick_apply"]["max_connections"]
+        )
+        if too_large_for_direct and allow_background_redirect and not strict:
+            job = _start_design_intent_job(
+                project_path,
+                intent,
+                mode=mode,
+                strict=strict,
+                detail=detail,
+                include_expanded_spec=include_expanded_spec,
+                visual_layout=visual_layout,
+                visual_style=visual_style,
+                quick_apply=quick_apply,
+                include_preview=include_preview,
+                run_quality_report=run_quality_report,
+                run_native_validation=run_native_validation,
+                run_cli_validation=run_cli_validation,
+                unsafe_fast_apply=unsafe_fast_apply,
+            )
+            return {
+                **base,
+                "success": True,
+                "stage": "background_job_started",
+                "changed": False,
+                "job_id": job["job_id"],
+                "status": job.get("status"),
+                "recommended_next_tool": "schematic_get_job_status",
+                "recommended_next_arguments": {"job_id": job["job_id"]},
+                "recommendation_reason": "design size may exceed MCP request timeout",
+            }
+        if staged_candidate and not strict:
+            staged = _apply_expanded_spec_staged(
+                project_path,
+                expanded_spec,
+                mode=mode,
+                detail=detail,
+                include_preview=include_preview,
+                run_quality_report=run_quality_report,
+                run_native_validation=run_native_validation,
+                run_cli_validation=run_cli_validation,
+            )
+            base.update(staged)
+            base.setdefault("verification", _verification_from_build_and_quality(staged, staged.get("quality_report")))
+            return base
     built = build_schematic_from_spec_v2(
         project_path,
         expanded_spec,
@@ -2426,8 +2966,7 @@ def _schematic_design_intent_response(
     base["changed"] = bool(built.get("success"))
     if not built.get("success"):
         base["error"] = built.get("error", "schematic build failed")
-        if detail == "full":
-            base["build_result"] = built
+        base.update(_build_failure_diagnostics(built, detail))
         return base
 
     quality: dict[str, Any] | None = None
