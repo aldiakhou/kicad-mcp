@@ -141,6 +141,7 @@ def apply_connection_plan_v2(
         )
 
     applied_connections: list[dict[str, Any]] = []
+    applied_connection_intents: list[dict[str, Any]] = []
     applied_no_connects: list[dict[str, Any]] = []
     removed_conflicting_connections: list[dict[str, Any]] = []
     removed_conflicting_no_connects: list[dict[str, Any]] = []
@@ -172,6 +173,7 @@ def apply_connection_plan_v2(
                 continue
             applied = _apply_normalized_connection(schematic, schematic_path, connection)
             applied_connections.append(applied)
+            applied_connection_intents.append(connection)
         for marker in normalized_no_connects["no_connects"]:
             applied_no_connects.append(
                 add_no_connect_to_pin(
@@ -184,7 +186,8 @@ def apply_connection_plan_v2(
             )
         return {
             "connections": applied_connections,
-            "applied_connections": normalized["connections"],
+            "planned_connections": _public_connections(normalized["connections"]),
+            "applied_connections": _public_connections(applied_connection_intents),
             "no_connects": applied_no_connects,
             "removed_conflicting_connections": removed_conflicting_connections,
             "removed_conflicting_no_connects": removed_conflicting_no_connects,
@@ -245,7 +248,10 @@ def apply_connection_plan_v2(
             "tool": "schematic_apply_connection_plan",
             "stage": "schematic_wiring",
             "changed": True,
-            "applied_connections": normalized["connections"],
+            "planned_connections": _public_connections(normalized["connections"]),
+            "applied_connections": _public_connections(applied_connection_intents),
+            "applied_connection_count": len(applied_connection_intents),
+            "skipped_existing_connection_count": len(skipped_existing_connections),
             "failed_connections": [],
             "removed_conflicting_connections": removed_conflicting_connections,
             "removed_conflicting_no_connects": removed_conflicting_no_connects,
@@ -263,7 +269,7 @@ def apply_connection_plan_v2(
         "tool": "schematic_apply_connection_plan",
         "stage": "schematic_wiring",
         "changed": False,
-        "failed_connections": failed or normalized["connections"],
+        "failed_connections": failed or _public_connections(normalized["connections"]),
         "recommended_next_tool": "schematic_quality_report",
         "recommended_next_arguments": {"project_path": schematic_path},
         "recoverable": True,
@@ -522,6 +528,13 @@ def _pin_to_net(source: dict[str, Any], ref: Any, pin: Any, net: Any) -> dict[st
         "replace_existing": bool(source.get("replace_existing", False)),
         "source": source,
     }
+
+
+def _public_connections(connections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {key: value for key, value in connection.items() if not str(key).startswith("_")}
+        for connection in connections
+    ]
 
 
 def _apply_normalized_connection(

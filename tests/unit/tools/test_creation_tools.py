@@ -665,8 +665,18 @@ async def test_apply_connection_plan_skips_same_net_reapplication(
         if label["text"] == "NET1"
     ]
     assert first["success"] is True
+    assert first["planned_connections"] == first["applied_connections"]
+    assert first["applied_connection_count"] == 1
+    assert first["skipped_existing_connection_count"] == 0
     assert first["skipped_existing_connections"] == []
     assert second["success"] is True
+    assert len(second["planned_connections"]) == 1
+    assert second["planned_connections"][0]["ref"] == "R1"
+    assert second["planned_connections"][0]["pin"] == "1"
+    assert second["planned_connections"][0]["net"] == "NET1"
+    assert second["applied_connections"] == []
+    assert second["applied_connection_count"] == 0
+    assert second["skipped_existing_connection_count"] == 1
     assert second["skipped_existing_connections"] == [
         {
             "ref": "R1",
@@ -675,6 +685,7 @@ async def test_apply_connection_plan_skips_same_net_reapplication(
             "reason": "already connected to requested net",
         }
     ]
+    assert "_already_connected" not in second["planned_connections"][0]
     assert second["changed_objects"]["plan_summary"]["applied_connection_count"] == 0
     assert second["changed_objects"]["plan_summary"]["skipped_existing_connection_count"] == 1
     assert len(labels) == 1
