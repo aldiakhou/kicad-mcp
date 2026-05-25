@@ -1,7 +1,11 @@
 from pathlib import Path
 import subprocess
 
-from kicad_mcp.utils.native_netlist import parse_native_netlist, run_erc_via_cli
+from kicad_mcp.utils.native_netlist import (
+    native_node_matches_endpoint,
+    parse_native_netlist,
+    run_erc_via_cli,
+)
 
 
 def test_parse_native_netlist_with_node_membership():
@@ -31,6 +35,14 @@ def test_parse_native_netlist_with_node_membership():
         {"ref": "R1", "pin": "1", "pinfunction": "~_1", "pintype": "passive"},
         {"ref": "C1", "pin": "2", "pinfunction": "~_2", "pintype": "passive"},
     ]
+
+
+def test_native_node_matches_endpoint_prefers_pin_number_for_passives():
+    node = {"ref": "R1", "pin": "1", "pinfunction": "~_1"}
+
+    assert native_node_matches_endpoint(node, "R1", "1")
+    assert native_node_matches_endpoint(node, "R1", "~", {"number": "1", "name": "~"})
+    assert not native_node_matches_endpoint(node, "R2", "1")
 
 
 def test_run_erc_via_cli_parses_report_and_timeout(monkeypatch, tmp_path: Path):

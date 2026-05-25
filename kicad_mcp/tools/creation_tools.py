@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 from typing import Any, cast
@@ -18,6 +19,7 @@ from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
 from kicad_mcp.utils.design_intent_compiler import compile_design_intent, design_intent_schema
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
+from kicad_mcp.utils.kicad_cli_batch import validate_schematic_batch
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb, validate_pcb_text
 from kicad_mcp.utils.kicad_s_expr import (
     KiCadSchematic,
@@ -83,6 +85,51 @@ from kicad_mcp.utils.transactional_edit import (
 )
 
 
+def _resolve_project_alias(
+    project_path: str | None,
+    schematic_path: str | None = None,
+) -> str:
+    candidate = project_path or schematic_path
+    if not candidate:
+        raise ValueError("project_path is required")
+    path = Path(candidate)
+    if project_path is None and schematic_path and path.suffix == ".kicad_sch":
+        project_candidate = path.with_suffix(".kicad_pro")
+        if project_candidate.exists():
+            return str(project_candidate)
+    return str(candidate)
+
+
+def _suggested_library_queries(query: str, kind: str) -> list[str]:
+    normalized = query.strip()
+    if not normalized:
+        return ["resistor", "capacitor", "connector"] if kind == "symbol" else ["0603", "SOT-23", "PinHeader"]
+    compact = re.sub(r"[^A-Za-z0-9]+", " ", normalized).strip()
+    suggestions = [compact] if compact and compact != normalized else []
+    tokens = compact.split()
+    suggestions.extend(tokens[:2])
+    if kind == "symbol":
+        suggestions.extend(["Device", "Connector", "MCU"])
+    else:
+        suggestions.extend(["Resistor_SMD", "Capacitor_SMD", "Package"])
+    deduped = []
+    for item in suggestions:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped[:5]
+
+
+def _native_netlist_for_tool(schematic_path: str) -> dict[str, Any]:
+    if getattr(export_native_netlist, "__module__", "") == "kicad_mcp.utils.native_netlist":
+        return validate_schematic_batch(
+            schematic_path,
+            need_netlist=True,
+            need_erc=False,
+            timeout_seconds=60.0,
+        ).native_netlist or {"success": False, "error": "Native netlist export did not run"}
+    return export_native_netlist(schematic_path)
+
+
 def register_creation_tools(mcp: FastMCP) -> None:
     """Register project creation, schematic authoring, and PCB authoring tools."""
 
@@ -125,20 +172,31 @@ def register_creation_tools(mcp: FastMCP) -> None:
         return preview_build_from_spec(project_path, spec)
 
     @mcp.tool()
-    def schematic_preview_build_from_spec_v2(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
+    def schematic_preview_build_from_spec_v2(
+        project_path: str | None = None,
+        spec: dict[str, Any] | None = None,
+        schematic_path: str | None = None,
+        intent: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Preview an agent-friendly parts/nets schematic build without writing files.
 
         Part symbols must be full KiCad library IDs such as "Device:R"; use find_symbols
         first when unsure. Nets may use ["U1", "1"] or {"ref": "U1", "pin": "1"} endpoints.
         """
-        return preview_build_from_spec_v2(project_path, spec)
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        return preview_build_from_spec_v2(resolved_project, spec or intent or {})
 
     @mcp.tool()
-    def schematic_preview_design_intent(project_path: str, intent: dict[str, Any]) -> dict[str, Any]:
+    def schematic_preview_design_intent(
+        project_path: str | None = None,
+        intent: dict[str, Any] | None = None,
+        schematic_path: str | None = None,
+        spec: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Compile generic bulk design intent into a v2 schematic spec without writing."""
         return _schematic_design_intent_response(
-            project_path,
-            intent,
+            _resolve_project_alias(project_path, schematic_path),
+            intent or spec or {},
             mode="update",
             dry_run=True,
             strict=False,
@@ -151,8 +209,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def schematic_apply_design_intent(
-        project_path: str,
-        intent: dict[str, Any],
+        project_path: str | None = None,
+        intent: dict[str, Any] | None = None,
         mode: str = "update",
         dry_run: bool = False,
         strict: bool = False,
@@ -160,6 +218,9 @@ def register_creation_tools(mcp: FastMCP) -> None:
         include_expanded_spec: bool = False,
         visual_layout: bool = True,
         visual_style: str = "readable",
+        dry_run_validation: str = "none",
+        schematic_path: str | None = None,
+        spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compile and apply generic bulk schematic design intent.
 
@@ -168,8 +229,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         no_connect_rules; the compiler expands those into the v2 build spec.
         """
         return _schematic_design_intent_response(
-            project_path,
-            intent,
+            _resolve_project_alias(project_path, schematic_path),
+            intent or spec or {},
             mode=mode,
             dry_run=dry_run,
             strict=strict,
@@ -178,6 +239,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             tool_name="schematic_apply_design_intent",
             visual_layout=visual_layout,
             visual_style=visual_style,
+            dry_run_validation=dry_run_validation,
         )
 
     @mcp.tool()
@@ -199,8 +261,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def schematic_build_from_spec_v2(
-        project_path: str,
-        spec: dict[str, Any],
+        project_path: str | None = None,
+        spec: dict[str, Any] | None = None,
         mode: str = "update",
         backup: bool = True,
         run_erc: bool = True,
@@ -210,6 +272,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
         include_preview: bool = False,
         include_full_native_netlist: bool = False,
         run_quality_report: bool = False,
+        schematic_path: str | None = None,
+        intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build a schematic from an agent-friendly parts/nets/no_connects specification.
 
@@ -220,12 +284,13 @@ def register_creation_tools(mcp: FastMCP) -> None:
         if not backup:
             return {
                 "success": False,
-                "project_path": project_path,
+                "project_path": project_path or schematic_path,
                 "error": "backup=False is not supported; schematic builds are always backed up",
             }
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
         result = build_schematic_from_spec_v2(
-            project_path,
-            spec,
+            resolved_project,
+            spec or intent or {},
             mode=mode,
             run_erc=run_erc,
             allow_destructive_replace=allow_destructive_replace,
@@ -241,16 +306,21 @@ def register_creation_tools(mcp: FastMCP) -> None:
             result.setdefault("changed", True)
             result.setdefault("warnings", [])
             result.setdefault("recommended_next_tool", "schematic_quality_report")
-            result.setdefault("recommended_next_arguments", {"project_path": project_path})
+            result.setdefault("recommended_next_arguments", {"project_path": resolved_project})
         return result
 
     @mcp.tool()
-    def schematic_quality_report(project_path: str, run_erc: bool = True) -> dict[str, Any]:
+    def schematic_quality_report(
+        project_path: str | None = None,
+        run_erc: bool = True,
+        schematic_path: str | None = None,
+    ) -> dict[str, Any]:
         """Summarize schematic ERC, netlist, footprint, page-bound, and grid quality."""
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
         try:
-            return build_quality_report(project_path, run_erc=run_erc)
+            return build_quality_report(resolved_project, run_erc=run_erc)
         except Exception as exc:
-            return {"success": False, "project_path": project_path, "error": str(exc)}
+            return {"success": False, "project_path": resolved_project, "error": str(exc)}
 
     @mcp.tool()
     def schematic_assign_footprints(
@@ -357,12 +427,17 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def project_design_state(
-        project_path: str,
+        project_path: str | None = None,
         run_erc: bool = True,
         run_drc: bool = False,
+        schematic_path: str | None = None,
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Return one compact state object with the safest next KiCad MCP action."""
-        return await _project_design_state(project_path, run_erc, run_drc)
+        resolved_project = _resolve_project_alias(project_path, schematic_path)
+        if ctx:
+            await ctx.info("Building project design state from cached schematic validation")
+        return await _project_design_state(resolved_project, run_erc, run_drc)
 
     @mcp.tool()
     async def schematic_apply_safe_erc_fixes(
@@ -400,17 +475,24 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def find_symbols(
-        query: str, max_results: int = 10, library: str | None = None
+        query: str,
+        max_results: int = 10,
+        library: str | None = None,
+        limit: int | None = None,
+        filter: str | None = None,
     ) -> dict[str, Any]:
         """Fuzzy-search KiCad symbols before resolving an exact lib_id."""
         try:
-            matches = search_symbols(query, max_results=max_results, library=library)
+            resolved_library = library or filter
+            resolved_limit = limit if limit is not None else max_results
+            matches = search_symbols(query, max_results=resolved_limit, library=resolved_library)
             return {
                 "success": True,
                 "query": query,
-                "library": library,
+                "library": resolved_library,
                 "count": len(matches),
                 "matches": matches,
+                "suggested_queries": _suggested_library_queries(query, "symbol") if not matches else [],
                 "recommended_next_tool": "resolve_symbol",
             }
         except Exception as exc:
@@ -418,17 +500,24 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def find_footprints(
-        query: str, max_results: int = 10, library: str | None = None
+        query: str,
+        max_results: int = 10,
+        library: str | None = None,
+        limit: int | None = None,
+        filter: str | None = None,
     ) -> dict[str, Any]:
         """Fuzzy-search KiCad footprints before resolving an exact footprint_id."""
         try:
-            matches = search_footprints(query, max_results=max_results, library=library)
+            resolved_library = library or filter
+            resolved_limit = limit if limit is not None else max_results
+            matches = search_footprints(query, max_results=resolved_limit, library=resolved_library)
             return {
                 "success": True,
                 "query": query,
-                "library": library,
+                "library": resolved_library,
                 "count": len(matches),
                 "matches": matches,
+                "suggested_queries": _suggested_library_queries(query, "footprint") if not matches else [],
                 "recommended_next_tool": "resolve_footprint",
             }
         except Exception as exc:
@@ -642,6 +731,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         auto_snap: bool = True,
         verify: bool = True,
         fail_on_erc_violations: bool = False,
+        replace_existing: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Connect one schematic symbol pin to a named net by electrical intent."""
@@ -663,6 +753,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             run_erc=verify,
             auto_snap=auto_snap,
             fail_on_erc_violations=fail_on_erc_violations,
+            replace_existing=replace_existing,
         )
         result["tool"] = "schematic_connect_pin_to_net"
         return result
@@ -679,6 +770,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         auto_snap: bool = True,
         verify: bool = True,
         fail_on_erc_violations: bool = False,
+        replace_existing: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Connect two pins by assigning both to the same named net."""
@@ -699,6 +791,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             run_erc=verify,
             auto_snap=auto_snap,
             fail_on_erc_violations=fail_on_erc_violations,
+            replace_existing=replace_existing,
         )
         result["tool"] = "schematic_connect_pins"
         return result
@@ -711,6 +804,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         ground_net: str = "GND",
         verify: bool = True,
         fail_on_erc_violations: bool = False,
+        replace_existing: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Connect one schematic symbol pin to a ground net by electrical intent."""
@@ -723,6 +817,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             run_erc=verify,
             auto_snap=True,
             fail_on_erc_violations=fail_on_erc_violations,
+            replace_existing=replace_existing,
         )
         result["tool"] = "schematic_connect_pin_to_ground"
         return result
@@ -735,6 +830,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         power_net: str,
         verify: bool = True,
         fail_on_erc_violations: bool = False,
+        replace_existing: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Connect one schematic symbol pin to a power net by electrical intent."""
@@ -747,6 +843,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
             run_erc=verify,
             auto_snap=True,
             fail_on_erc_violations=fail_on_erc_violations,
+            replace_existing=replace_existing,
         )
         result["tool"] = "schematic_connect_pin_to_power"
         return result
@@ -759,19 +856,24 @@ def register_creation_tools(mcp: FastMCP) -> None:
         run_native_netlist: bool = True,
         rollback_on_failed_membership: bool = True,
         fail_on_erc_violations: bool = False,
+        replace_existing: bool = False,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Primary agent tool for schematic wiring. Prefer this over raw wire/point tools."""
         if ctx:
             await ctx.info(f"Applying {len(connections)} schematic connections")
-        return apply_connection_plan(
+        result = apply_connection_plan(
             schematic_path,
             connections,
             no_connects,
             run_native_netlist,
             rollback_on_failed_membership,
             fail_on_erc_violations,
+            replace_existing=replace_existing,
         )
+        if ctx and run_native_netlist:
+            await ctx.info("Applied schematic edits; checked native netlist membership")
+        return result
 
     @mcp.tool()
     async def schematic_add_no_connect(
@@ -1042,8 +1144,11 @@ def register_creation_tools(mcp: FastMCP) -> None:
         placement_style: str = "functional",
         placement_rules: dict[str, Any] | None = None,
         run_drc: bool = False,
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Sync PCB from schematic, apply initial placement, and return placement/ratsnest/quality reports."""
+        if ctx:
+            await ctx.info("Synchronizing PCB from schematic and building placement report")
         return await _pcb_sync_place_and_report(
             project_path,
             board_width_mm,
@@ -1496,6 +1601,73 @@ def _save_visual_expanded_spec(project_path: str, spec: dict[str, Any]) -> str:
     return str(output_path)
 
 
+def _native_dry_run_design_intent(
+    project_path: str,
+    expanded_spec: dict[str, Any],
+    mode: str,
+    strict: bool,
+) -> dict[str, Any]:
+    try:
+        with tempfile.TemporaryDirectory(prefix="kicad_mcp_dry_run_") as temp_dir:
+            temp_project = _copy_project_for_dry_run(project_path, temp_dir)
+            built = build_schematic_from_spec_v2(
+                temp_project,
+                expanded_spec,
+                mode=mode,
+                run_erc=strict,
+                allow_destructive_replace=False,
+                detail="compact",
+                include_diff=False,
+                include_preview=False,
+                include_full_native_netlist=False,
+                run_quality_report=False,
+            )
+            validation = built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
+            post_write = validation.get("post_write", {}) if isinstance(validation.get("post_write"), dict) else {}
+            native = post_write.get("native_verification", post_write)
+            return {
+                "mode": "native",
+                "success": bool(built.get("success")),
+                "changed_original": False,
+                "temp_project_path": temp_project,
+                "native_verification": native,
+                "missing_connection_count": len(native.get("missing", []))
+                if isinstance(native, dict)
+                else 0,
+                "error": built.get("error"),
+            }
+    except Exception as exc:
+        return {
+            "mode": "native",
+            "success": False,
+            "changed_original": False,
+            "error": str(exc),
+        }
+
+
+def _copy_project_for_dry_run(project_path: str, temp_dir: str) -> str:
+    source = Path(project_path)
+    if source.suffix == ".kicad_sch":
+        temp_schematic = Path(temp_dir) / source.name
+        shutil.copy2(source, temp_schematic)
+        temp_project = temp_schematic.with_suffix(".kicad_pro")
+        if source.with_suffix(".kicad_pro").exists():
+            shutil.copy2(source.with_suffix(".kicad_pro"), temp_project)
+        else:
+            temp_project.write_text("{}", encoding="utf-8")
+        return str(temp_project)
+
+    files = get_project_files(str(source))
+    temp_project = Path(temp_dir) / source.name
+    if source.exists():
+        shutil.copy2(source, temp_project)
+    else:
+        temp_project.write_text("{}", encoding="utf-8")
+    if "schematic" in files and Path(files["schematic"]).exists():
+        shutil.copy2(files["schematic"], Path(temp_dir) / Path(files["schematic"]).name)
+    return str(temp_project)
+
+
 def _schematic_design_intent_response(
     project_path: str,
     intent: dict[str, Any],
@@ -1508,6 +1680,7 @@ def _schematic_design_intent_response(
     tool_name: str,
     visual_layout: bool = True,
     visual_style: str = "readable",
+    dry_run_validation: str = "none",
 ) -> dict[str, Any]:
     compiled = compile_design_intent(project_path, intent, strict=strict)
     expanded_spec = compiled.get("expanded_spec")
@@ -1559,6 +1732,33 @@ def _schematic_design_intent_response(
         return base
     if dry_run:
         base["stage"] = "preview"
+        if dry_run_validation not in {"none", "syntactic", "native"}:
+            base["success"] = False
+            base["errors"].append(
+                {
+                    "path": "dry_run_validation",
+                    "error": 'dry_run_validation must be one of: "none", "syntactic", "native"',
+                }
+            )
+            return base
+        if dry_run_validation == "syntactic":
+            base["dry_run_validation"] = {
+                "mode": "syntactic",
+                "success": True,
+                "planned_connection_count": sum(
+                    len(endpoints) for endpoints in (expanded_spec or {}).get("nets", {}).values()
+                )
+                if isinstance(expanded_spec, dict)
+                else 0,
+            }
+        elif dry_run_validation == "native":
+            base["dry_run_validation"] = _native_dry_run_design_intent(
+                project_path,
+                expanded_spec if isinstance(expanded_spec, dict) else {},
+                mode,
+                strict,
+            )
+            base["success"] = bool(base["dry_run_validation"].get("success"))
         return base
 
     built = build_schematic_from_spec_v2(
@@ -2242,7 +2442,7 @@ async def _project_completion_report(
             else {"success": False, "error": "Schematic file not found"}
         )
         native = (
-            export_native_netlist(files["schematic"])
+            _native_netlist_for_tool(files["schematic"])
             if "schematic" in files
             else {"success": False, "error": "Schematic file not found"}
         )
@@ -2794,7 +2994,7 @@ def _pcb_sync_from_schematic(
             if not created["success"]:
                 return created
             files["pcb"] = created["pcb_path"]
-        native = export_native_netlist(files["schematic"])
+        native = _native_netlist_for_tool(files["schematic"])
         if not native.get("success"):
             return {
                 "success": False,

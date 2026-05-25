@@ -10,7 +10,7 @@ from typing import Any
 
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExprAtom, SExprList
 from kicad_mcp.utils.library_resolver import KiCadLibraryError, resolve_symbol
-from kicad_mcp.utils.native_netlist import export_native_netlist
+from kicad_mcp.utils.native_netlist import export_native_netlist, native_node_matches_endpoint
 
 SCHEMATIC_GRID_MM = 1.27
 
@@ -449,6 +449,80 @@ def remove_no_connect_at_pin(
     }
 
 
+def remove_pin_attached_net_artifacts(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    reference: str,
+    pin: str,
+    *,
+    keep_net: str | None = None,
+) -> dict[str, Any]:
+    """Remove MCP-style labels/stubs/no-connects attached to a resolved pin."""
+    selected = _resolve_single_pin(schematic, schematic_path, reference, pin)
+    point = selected["connection_point"]
+    removed_labels = []
+    removed_wires = []
+    removed_no_connects = remove_no_connect_at_pin(schematic, schematic_path, reference, pin)
+
+    for label in list(_labels_at_point_or_stub_end(schematic, point)):
+        if keep_net is not None and label.get("text") == keep_net:
+            continue
+        label_uuid = label.get("uuid")
+        if label_uuid is None:
+            continue
+        removed_labels.append(
+            {
+                "text": label.get("text"),
+                "removed": schematic.delete_item("label", label_uuid),
+            }
+        )
+
+    for wire in list(_pin_stub_wires(schematic, point)):
+        wire_uuid = wire.get("uuid")
+        if wire_uuid is None:
+            continue
+        try:
+            removed_wires.append(schematic.delete_item("wire", wire_uuid))
+        except KeyError:
+            continue
+
+    old_nets = sorted(
+        {
+            str(item.get("text"))
+            for item in removed_labels
+            if item.get("text") and item.get("text") != keep_net
+        }
+    )
+    return {
+        "reference": reference,
+        "pin": selected,
+        "removed_no_connects": removed_no_connects,
+        "removed_labels": removed_labels,
+        "removed_wires": removed_wires,
+        "old_nets": old_nets,
+        "removed_count": removed_no_connects.get("removed_count", 0)
+        + len(removed_labels)
+        + len(removed_wires),
+    }
+
+
+def pin_attached_nets(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    reference: str,
+    pin: str,
+) -> dict[str, Any]:
+    """Return MCP-style net labels attached directly or by a short stub to a pin."""
+    selected = _resolve_single_pin(schematic, schematic_path, reference, pin)
+    labels = list(_labels_at_point_or_stub_end(schematic, selected["connection_point"]))
+    return {
+        "reference": reference,
+        "pin": selected,
+        "nets": sorted({str(label.get("text")) for label in labels if label.get("text")}),
+        "labels": labels,
+    }
+
+
 def verify_native_net_membership(
     schematic_path: str, reference: str, pin: str, net_name: str
 ) -> dict[str, Any]:
@@ -463,17 +537,85 @@ def verify_native_net_membership(
     net = native.get("nets", {}).get(net_name)
     if not net:
         return {"success": False, "reason": f"Net not found: {net_name}", "native_netlist": native}
+    resolved_pin = _resolved_pin_from_file(schematic_path, reference, pin)
     for node in net.get("nodes", []):
-        pinfunction = node.get("pinfunction", "")
-        if node.get("ref") == reference and (
-            node.get("pin") == pin or pinfunction == pin or pinfunction.startswith(f"{pin}_")
-        ):
+        if native_node_matches_endpoint(node, reference, pin, resolved_pin):
             return {"success": True, "reason": "native netlist membership verified"}
     return {
         "success": False,
         "reason": f"{reference}.{pin} was not found on net {net_name}",
         "native_netlist": native,
     }
+
+
+def _resolve_single_pin(
+    schematic: KiCadSchematic,
+    schematic_path: str,
+    reference: str,
+    pin: str,
+) -> dict[str, Any]:
+    pin_map = get_symbol_pin_map_from_schematic(schematic, schematic_path, reference)
+    if not pin_map.get("success"):
+        raise ValueError(str(pin_map.get("error", "Unable to resolve pin map")))
+    matches = [
+        item
+        for item in pin_map["pins"]
+        if item["number"] == pin or item["name"] == pin or item["pinfunction"] == pin
+    ]
+    if not matches:
+        raise ValueError(f"Pin not found on {reference}: {pin}")
+    if len(matches) > 1:
+        raise ValueError(f"Pin selector is ambiguous on {reference}: {pin}")
+    return matches[0]
+
+
+def _resolved_pin_from_file(
+    schematic_path: str, reference: str, pin: str
+) -> dict[str, Any] | None:
+    try:
+        schematic = KiCadSchematic.from_file(schematic_path)
+        return _resolve_single_pin(schematic, schematic_path, reference, pin)
+    except Exception:
+        return None
+
+
+def _labels_at_point_or_stub_end(
+    schematic: KiCadSchematic, point: dict[str, float]
+) -> list[dict[str, Any]]:
+    labels = []
+    for label in schematic.list_labels():
+        position = label.get("position", {})
+        if _same_point(position, point):
+            labels.append(label)
+    for wire in _pin_stub_wires(schematic, point):
+        for endpoint in wire.get("points", []):
+            if _same_point(endpoint, point):
+                continue
+            for label in schematic.list_labels():
+                if _same_point(label.get("position", {}), endpoint) and label not in labels:
+                    labels.append(label)
+    return labels
+
+
+def _pin_stub_wires(schematic: KiCadSchematic, point: dict[str, float]) -> list[dict[str, Any]]:
+    stubs = []
+    for wire in schematic.list_wires():
+        points = wire.get("points", [])
+        if len(points) < 2:
+            continue
+        if any(_same_point(wire_point, point) for wire_point in points):
+            stubs.append(wire)
+    return stubs
+
+
+def _same_point(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    try:
+        return (
+            abs(float(left.get("x")) - float(right.get("x"))) <= 1e-6
+            and abs(float(left.get("y")) - float(right.get("y"))) <= 1e-6
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _symbol_by_reference(schematic: KiCadSchematic, reference: str) -> dict[str, Any] | None:

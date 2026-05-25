@@ -8,9 +8,14 @@ from pathlib import Path
 from typing import Any, cast
 
 from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.kicad_cli_batch import validate_schematic_batch
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExprAtom, SExprList
 from kicad_mcp.utils.library_resolver import resolve_footprint, resolve_symbol
-from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
+from kicad_mcp.utils.native_netlist import (
+    export_native_netlist,
+    native_node_matches_endpoint,
+    run_erc_via_cli,
+)
 from kicad_mcp.utils.preview_metadata import svg_preview_metadata
 from kicad_mcp.utils.schematic_intent import (
     apply_connection_plan_v2,
@@ -290,7 +295,7 @@ def build_schematic_from_spec(
     )
     if not result.get("success"):
         return result
-    native = export_native_netlist(schematic_path)
+    native = _native_netlist_for_validation(schematic_path)
     result["tool"] = (
         "schematic_build_from_spec_v2"
         if spec.get("source_format") == "v2"
@@ -337,6 +342,7 @@ def apply_connection_plan(
     run_native_netlist: bool = True,
     rollback_on_failed_membership: bool = True,
     fail_on_erc_violations: bool = False,
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     """Apply a batch connection plan transactionally through the v2 intent engine."""
     # Preserve existing tests and callers that monkeypatch this module's native
@@ -353,6 +359,7 @@ def apply_connection_plan(
         auto_snap=True,
         rollback_on_failure=rollback_on_failed_membership,
         fail_on_erc_violations=fail_on_erc_violations,
+        replace_existing=replace_existing,
     )
 
 
@@ -751,9 +758,10 @@ def validate_connection_plan_membership(
     schematic_path: str,
     connections: list[dict[str, Any]],
     rollback_on_failed_membership: bool = True,
+    native_netlist: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate that every planned connection appears in KiCad's native netlist."""
-    native = export_native_netlist(schematic_path)
+    native = native_netlist if native_netlist is not None else _native_netlist_for_validation(schematic_path)
     if not native.get("success"):
         return {"success": False, "reason": native.get("error"), "native_netlist": native}
     missing = []
@@ -763,14 +771,20 @@ def validate_connection_plan_membership(
         if str(connection["ref"]).startswith("#"):
             continue
         checked_count += 1
+        resolved_pin = _resolved_pin_for_membership(schematic_path, connection)
         check = _membership_from_native(
-            native, connection["ref"], connection["pin"], connection["net"]
+            native,
+            connection["ref"],
+            connection["pin"],
+            connection["net"],
+            resolved_pin=resolved_pin,
         )
         if not check:
+            missing_item = _missing_connection_error(native, connection, resolved_pin)
             if connection.get("required", True):
-                missing.append(connection)
+                missing.append(missing_item)
             else:
-                optional_missing.append(connection)
+                optional_missing.append(missing_item)
     success = not missing or not rollback_on_failed_membership
     return {
         "success": success,
@@ -780,6 +794,8 @@ def validate_connection_plan_membership(
             else "missing required native netlist memberships"
         ),
         "missing": missing,
+        "missing_connection_count": len(missing),
+        "missing_connections": missing,
         "optional_missing": optional_missing,
         "checked_count": checked_count,
         "required_checked_count": sum(
@@ -851,9 +867,29 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
         or symbol["position"]["x"] > width
         or symbol["position"]["y"] > height
     ]
-    erc = run_erc_via_cli(schematic_path) if run_erc else {"success": True, "skipped": True}
+    bundle = (
+        validate_schematic_batch(
+            schematic_path,
+            need_netlist=True,
+            need_erc=run_erc,
+            timeout_seconds=60.0,
+        )
+        if _using_default_cli_helper(export_native_netlist) and _using_default_cli_helper(run_erc_via_cli)
+        else None
+    )
+    erc = (
+        bundle.erc
+        if bundle is not None and bundle.erc is not None
+        else run_erc_via_cli(schematic_path)
+        if run_erc
+        else {"success": True, "skipped": True}
+    )
     categories = erc.get("violation_categories", {}) if erc.get("success") else {}
-    native = export_native_netlist(schematic_path)
+    native = (
+        bundle.native_netlist
+        if bundle is not None and bundle.native_netlist is not None
+        else export_native_netlist(schematic_path)
+    )
     dangling_labels = _dangling_labels(schematic, schematic_path)
     isolated_labels = _isolated_labels(schematic, native)
     power_ground_mismatches = _native_power_ground_mismatches(native)
@@ -1291,16 +1327,20 @@ def _symbol_extends(node: Any) -> str | None:
     return value.value if hasattr(value, "value") else None
 
 
-def _membership_from_native(native: dict[str, Any], reference: str, pin: str, net_name: str) -> bool:
+def _membership_from_native(
+    native: dict[str, Any],
+    reference: str,
+    pin: str,
+    net_name: str,
+    *,
+    resolved_pin: dict[str, Any] | None = None,
+) -> bool:
     for candidate_name in (net_name, f"/{net_name}"):
         net = native.get("nets", {}).get(candidate_name)
         if not net:
             continue
         for node in net.get("nodes", []):
-            pinfunction = node.get("pinfunction", "")
-            if node.get("ref") == reference and (
-                node.get("pin") == pin or pinfunction == pin or pinfunction.startswith(f"{pin}_")
-            ):
+            if native_node_matches_endpoint(node, reference, pin, resolved_pin):
                 return True
     return False
 
@@ -1333,6 +1373,89 @@ def _compact_quality_report(quality: dict[str, Any]) -> dict[str, Any]:
         "erc": quality.get("erc"),
         "native_netlist": quality.get("native_netlist"),
     }
+
+
+def _native_netlist_for_validation(schematic_path: str) -> dict[str, Any]:
+    if _using_default_cli_helper(export_native_netlist):
+        return validate_schematic_batch(
+            schematic_path,
+            need_netlist=True,
+            need_erc=False,
+            timeout_seconds=60.0,
+        ).native_netlist or {"success": False, "error": "Native netlist export did not run"}
+    return export_native_netlist(schematic_path)
+
+
+def _resolved_pin_for_membership(
+    schematic_path: str, connection: dict[str, Any]
+) -> dict[str, Any] | None:
+    try:
+        schematic = KiCadSchematic.from_file(schematic_path)
+        pin_map = get_symbol_pin_map_from_schematic(
+            schematic,
+            schematic_path,
+            connection["ref"],
+        )
+        if not pin_map.get("success"):
+            return None
+        requested = str(connection["pin"])
+        matches = [
+            item
+            for item in pin_map.get("pins", [])
+            if item.get("number") == requested
+            or item.get("name") == requested
+            or item.get("pinfunction") == requested
+        ]
+        return matches[0] if len(matches) == 1 else None
+    except Exception:
+        return None
+
+
+def _missing_connection_error(
+    native: dict[str, Any],
+    connection: dict[str, Any],
+    resolved_pin: dict[str, Any] | None,
+) -> dict[str, Any]:
+    net_name = str(connection["net"])
+    nodes = list((native.get("nets", {}).get(net_name) or {}).get("nodes", []))
+    ref = str(connection["ref"])
+    pin = str(connection["pin"])
+    likely_reason = "endpoint was not attached or pin identifier did not match native netlist"
+    if ref[:1] in {"R", "C"}:
+        likely_reason += '; Device:R / Device:C pins must be addressed by numeric pin "1" or "2".'
+    return {
+        "net": net_name,
+        "ref": ref,
+        "pin": pin,
+        "resolved_pin": _compact_resolved_pin(resolved_pin),
+        "native_nodes_on_net": [
+            {
+                "ref": node.get("ref"),
+                "pin": node.get("pin"),
+                "pinfunction": node.get("pinfunction"),
+            }
+            for node in nodes
+        ],
+        "likely_reason": likely_reason,
+        "connection": connection,
+        "reason": f"Pin {ref}.{pin} could not be verified on net {net_name}",
+        "suggested_next_tool": "schematic_apply_connection_plan",
+        "suggested_next_arguments": {"replace_existing": True},
+    }
+
+
+def _compact_resolved_pin(pin: dict[str, Any] | None) -> dict[str, Any] | None:
+    if pin is None:
+        return None
+    return {
+        "number": pin.get("number"),
+        "name": pin.get("name"),
+        "pinfunction": pin.get("pinfunction"),
+    }
+
+
+def _using_default_cli_helper(func: Any) -> bool:
+    return getattr(func, "__module__", "") == "kicad_mcp.utils.native_netlist"
 
 
 def _schematic_has_user_content(schematic_path: str) -> bool:

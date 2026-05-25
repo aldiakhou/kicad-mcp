@@ -60,6 +60,13 @@ Use this bulk design-intent shape for normal complete circuits:
 }
 ```
 
+`no_connect_rules` can exclude pins either inside the selector or at the rule level:
+
+```json
+{"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+", "exclude": {"names": ["PA13", "PA14"]}}}
+{"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PA13", "PA14"]}
+```
+
 `schematic_apply_design_intent` compiles this into v2 `parts`, generated passives/connectors, expanded net memberships, and no-connect markers. It always saves the normalized intent, expanded spec, and report under `.kicad_mcp/`.
 
 By default it also applies a generic visual layout pass before writing the schematic. The visual pass assigns explicit symbol positions using estimated symbol bounds, groups generated support parts near their targets, uses short external stubs for signal labels, and keeps known power rails on power-symbol/pin-anchor behavior for native-netlist reliability. The compact tool response includes a `visual_layout` summary.

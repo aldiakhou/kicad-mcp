@@ -1055,6 +1055,14 @@ def _pin_matches(pin: dict[str, Any], selector: dict[str, Any]) -> bool:
             expected_values = {str(item) for item in expected} if isinstance(expected, list) else {str(expected)}
             if not expected_values.intersection(_pin_values(pin)):
                 return False
+        elif key == "names":
+            expected_values = {str(item) for item in expected} if isinstance(expected, list) else {str(expected)}
+            if str(pin.get("name") or "") not in expected_values:
+                return False
+        elif key == "numbers":
+            expected_values = {str(item) for item in expected} if isinstance(expected, list) else {str(expected)}
+            if str(pin.get("number") or "") not in expected_values:
+                return False
         elif key == "name_regex":
             if not re.search(str(expected), str(pin.get("name") or "")):
                 return False

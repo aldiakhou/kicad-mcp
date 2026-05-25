@@ -16,6 +16,34 @@ from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
 from kicad_mcp.utils.kicad_s_expr import SExprAtom, SExprList, parse_s_expression
 
 
+def native_node_matches_endpoint(
+    node: dict[str, Any],
+    ref: str,
+    requested_pin: str,
+    resolved_pin: dict[str, Any] | None = None,
+) -> bool:
+    """Return True when a KiCad native-netlist node matches a requested endpoint."""
+    if node.get("ref") != ref:
+        return False
+
+    node_pin = str(node.get("pin") or "")
+    node_func = str(node.get("pinfunction") or "")
+    requested = str(requested_pin)
+
+    if node_pin == requested:
+        return True
+
+    if resolved_pin:
+        if node_pin == str(resolved_pin.get("number") or ""):
+            return True
+        if node_func == str(resolved_pin.get("pinfunction") or ""):
+            return True
+        if node_func == str(resolved_pin.get("name") or ""):
+            return True
+
+    return bool(node_func.endswith(f"_{requested}"))
+
+
 def export_native_netlist(
     schematic_path: str, timeout_seconds: float | None = None
 ) -> dict[str, Any]:

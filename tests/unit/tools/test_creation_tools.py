@@ -270,6 +270,11 @@ async def test_creation_tools_register_and_create_project_author_schematic_and_p
     assert pin_map["success"] is True
     assert {pin["number"] for pin in pin_map["pins"]} == {"1", "2"}
 
+    symbol_matches = tools["find_symbols"].fn("resistor", 10, None, 1, "Device")
+    assert symbol_matches["success"] is True
+    assert symbol_matches["count"] == 1
+    assert symbol_matches["matches"][0]["lib_id"] == "Device:R"
+
     deleted = await tools["schematic_delete_item"].fn(
         schematic_path,
         "label",
@@ -439,7 +444,10 @@ async def test_apply_connection_plan_batches_connections_no_connects_and_verifie
         )
         assert symbol["success"] is True
 
+    native_calls = {"count": 0}
+
     def fake_native_netlist(_path: str):
+        native_calls["count"] += 1
         return {
             "success": True,
             "components": {},
@@ -469,6 +477,7 @@ async def test_apply_connection_plan_batches_connections_no_connects_and_verifie
     assert result["changed_objects"]["plan_summary"]["required_connection_count"] == 2
     assert result["changed_objects"]["plan_summary"]["no_connect_count"] == 1
     assert result["validation"]["post_write"]["success"] is True
+    assert native_calls["count"] == 1
     assert "NET1" in Path(schematic_path).read_text(encoding="utf-8")
     assert "(no_connect" in Path(schematic_path).read_text(encoding="utf-8")
 
@@ -520,6 +529,85 @@ async def test_apply_connection_plan_rolls_back_failed_required_membership(
     assert result["success"] is False
     assert result["rolled_back"] is True
     assert "NET_BAD" not in Path(schematic_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_apply_connection_plan_replace_existing_rewires_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "replace_demo", True, True, "A4")
+    schematic_path = project["created_files"]["schematic"]
+    symbol = await tools["schematic_add_symbol"].fn(
+        schematic_path,
+        "Device:R",
+        "R1",
+        "10k",
+        25.4,
+        25.4,
+        0.0,
+        "Resistor_SMD:R_0603_1608Metric",
+        None,
+        None,
+    )
+    assert symbol["success"] is True
+    first = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "OLD_NET"}],
+        None,
+        False,
+        True,
+        False,
+        False,
+        None,
+    )
+    assert first["success"] is True
+
+    blocked = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NEW_NET"}],
+        None,
+        False,
+        True,
+        False,
+        False,
+        None,
+    )
+    assert blocked["success"] is False
+    assert "replace_existing=True" in blocked["error"]
+
+    monkeypatch.setattr(
+        "kicad_mcp.utils.schematic_builder.export_native_netlist",
+        lambda _path: {
+            "success": True,
+            "components": {},
+            "nets": {"NEW_NET": {"nodes": [{"ref": "R1", "pin": "1", "pinfunction": "~_1"}]}},
+            "component_count": 1,
+            "net_count": 1,
+            "connectivity_complete": True,
+        },
+    )
+    replaced = await tools["schematic_apply_connection_plan"].fn(
+        schematic_path,
+        [{"ref": "R1", "pin": "1", "net": "NEW_NET"}],
+        None,
+        True,
+        True,
+        False,
+        True,
+        None,
+    )
+
+    assert replaced["success"] is True
+    assert replaced["removed_conflicting_connections"] == [
+        {"ref": "R1", "pin": "1", "old_net": "OLD_NET", "new_net": "NEW_NET"}
+    ]
+    schematic_text = Path(schematic_path).read_text(encoding="utf-8")
+    assert "NEW_NET" in schematic_text
+    assert "OLD_NET" not in schematic_text
 
 
 @pytest.mark.asyncio

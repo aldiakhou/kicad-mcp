@@ -78,6 +78,16 @@ def test_select_pins_supports_exact_regex_type_contains_and_exclude():
             {"pin_type": "power_in", "exclude": {"name_regex": "VSS|VSSA"}},
         )
     }
+    assert {
+        pin["name"]
+        for pin in select_pins(
+            pins,
+            {
+                "name_regex": "PA[0-9]+|PB[0-9]+",
+                "exclude": {"names": ["PA13", "PA14"]},
+            },
+        )
+    } == {"PB6", "PB7", "PA5", "PA6", "PA7"}
     assert {pin["name"] for pin in select_pins(pins, {"name_contains": "PA"})} == {
         "PA5",
         "PA6",
@@ -229,6 +239,51 @@ def test_bulk_connection_pin_typo_fails_during_compile(tmp_path: Path):
 
     assert result["success"] is False
     assert result["errors"][0]["error"] == "unknown pin"
+
+
+def test_no_connect_rules_support_match_exclude_and_top_level_except(tmp_path: Path):
+    base = {"parts": [_base_parts()[0]]}
+
+    match_exclude = compile_design_intent(
+        str(tmp_path / "a"),
+        {
+            **base,
+            "no_connect_rules": [
+                {
+                    "ref": "U1",
+                    "match": {
+                        "name_regex": "PA[0-9]+|PB[0-9]+",
+                        "exclude": {"names": ["PA13", "PA14"]},
+                    },
+                }
+            ],
+        },
+    )
+    top_level_except = compile_design_intent(
+        str(tmp_path / "b"),
+        {
+            **base,
+            "no_connect_rules": [
+                {
+                    "ref": "U1",
+                    "match": {"name_regex": "PA[0-9]+|PB[0-9]+"},
+                    "except": ["PA13", "PA14"],
+                }
+            ],
+        },
+    )
+
+    expected = [
+        {"ref": "U1", "pin": "PB6"},
+        {"ref": "U1", "pin": "PB7"},
+        {"ref": "U1", "pin": "PA5"},
+        {"ref": "U1", "pin": "PA6"},
+        {"ref": "U1", "pin": "PA7"},
+    ]
+    assert match_exclude["success"] is True
+    assert top_level_except["success"] is True
+    assert match_exclude["expanded_spec"]["no_connects"] == expected
+    assert top_level_except["expanded_spec"]["no_connects"] == expected
 
 
 def test_decoupling_support_circuit_generates_capacitors_and_nets(tmp_path: Path):

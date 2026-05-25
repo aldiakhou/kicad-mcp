@@ -322,6 +322,7 @@ def apply_transactional_schematic_edit(
         updated_text = schematic.to_text()
         after_validation = validate_schematic_text(updated_text)
         Path(validated_path).write_text(updated_text, encoding="utf-8")
+        _invalidate_schematic_validation_cache(validated_path)
 
         cli_validation = (
             validate_schematic_with_cli_export(validated_path)
@@ -358,6 +359,7 @@ def apply_transactional_schematic_edit(
         }
     except Exception as exc:
         restore_result = restore_backup_manifest(backup["backup_path"])
+        _invalidate_schematic_validation_cache(validated_path)
         return {
             "success": False,
             "schematic_path": validated_path,
@@ -455,6 +457,7 @@ def apply_transactional_schematic_cleanup(
         updated_text = schematic.to_text()
         after_validation = validate_schematic_text(updated_text)
         Path(validated_path).write_text(updated_text, encoding="utf-8")
+        _invalidate_schematic_validation_cache(validated_path)
 
         cli_validation = validate_schematic_with_cli_export(validated_path)
         if not cli_validation["success"]:
@@ -492,6 +495,7 @@ def apply_transactional_schematic_cleanup(
         }
     except Exception as exc:
         restore_result = restore_backup_manifest(backup["backup_path"])
+        _invalidate_schematic_validation_cache(validated_path)
         return {
             "success": False,
             "schematic_path": validated_path,
@@ -500,3 +504,12 @@ def apply_transactional_schematic_cleanup(
             "rolled_back": restore_result.get("success", False),
             "restore_result": restore_result,
         }
+
+
+def _invalidate_schematic_validation_cache(schematic_path: str) -> None:
+    try:
+        from kicad_mcp.utils.kicad_cli_batch import invalidate_schematic_validation_cache
+
+        invalidate_schematic_validation_cache(schematic_path)
+    except Exception:
+        pass
