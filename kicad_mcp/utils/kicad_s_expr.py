@@ -151,6 +151,22 @@ class KiCadSchematic:
         """Serialize the schematic back to KiCad S-expression text."""
         return f"{serialize_s_expression(self.root)}\n"
 
+    def set_paper(self, paper: str) -> None:
+        """Set or create the top-level schematic paper entry."""
+        paper_expr = self.root.first_child("paper")
+        paper_atom = SExprAtom(str(paper), quoted=True)
+        if paper_expr is not None:
+            if len(paper_expr.items) >= 2:
+                paper_expr.items[1] = paper_atom
+            else:
+                paper_expr.items.append(paper_atom)
+            return
+        insert_at = 1
+        for index, item in enumerate(self.root.items):
+            if isinstance(item, SExprList) and item.head() in {"version", "generator", "uuid"}:
+                insert_at = index + 1
+        self.root.items.insert(insert_at, SExprList([SExprAtom("paper"), paper_atom]))
+
     def embed_lib_symbol(self, lib_id: str, symbol_node: SExprList) -> dict[str, Any]:
         """Embed a library symbol definition if it is not already present."""
         lib_symbols = self._ensure_lib_symbols()

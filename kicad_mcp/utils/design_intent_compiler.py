@@ -69,6 +69,8 @@ DESIGN_INTENT_TOP_LEVEL_SCHEMA = {
         "bulk_connections": [],
         "no_connect_rules": [],
         "layout_hints": {},
+        "paper": "A4",
+        "allow_hidden_power": False,
     },
     "alternate_flat_shape": {
         "interfaces": [{"type": "i2c"}],
@@ -101,11 +103,30 @@ DESIGN_INTENT_SCHEMA = {
     },
     "pin_rules": {
         "example": [
-            {"ref": "U1", "match": {"name_regex": "VDD|VDDA"}, "net": "+3V3"},
-            {"ref": "U1", "match": {"name_regex": "VSS|VSSA|GND"}, "net": "GND"},
+            {"ref": "U1", "match": {"name": "VDD"}, "net": "+3V3"},
+            {"ref": "U1", "match": {"name_regex": "^(VSS|VSSA|GND)$"}, "net": "GND"},
         ],
+        "selector_fields": [
+            "pin",
+            "pins",
+            "name",
+            "number",
+            "names",
+            "numbers",
+            "name_regex",
+            "number_regex",
+            "pin_type",
+            "name_contains",
+            "exclude",
+        ],
+        "selector_notes": {
+            "name": "Exact pin-name match. Prefer this when connecting one named pin.",
+            "number": "Exact pin-number match.",
+            "name_regex": "Regex uses substring search; use anchors such as ^VDD$ for exact regex matching.",
+            "number_regex": "Regex uses substring search; use anchors such as ^18$ for exact regex matching.",
+        },
         "required_fields": ["ref", "match", "net"],
-        "optional_fields": ["match.exclude"],
+        "optional_fields": ["match.exclude", "allow_hidden_power"],
     },
     "interfaces.i2c": {
         "example": [
@@ -156,10 +177,11 @@ DESIGN_INTENT_SCHEMA = {
     },
     "support_circuits.pullup": {
         "example": [{"type": "pullup", "net": "RESET_N", "rail": "+3V3", "value": "10k"}],
-        "required_fields": ["type", "net", "rail"],
-        "optional_fields": ["target", "value", "footprint"],
+        "target_pin_alias_example": [{"type": "pullup", "target": "U1", "pin": "NRST", "rail": "+3V3", "net": "RESET_N"}],
+        "required_fields": ["type", "net or target/ref+pin", "rail"],
+        "optional_fields": ["target", "ref", "pin", "value", "footprint"],
         "generated_parts_summary": "One resistor.",
-        "generated_nets_summary": "Resistor connects net to rail.",
+        "generated_nets_summary": "Resistor connects net to rail; with target/ref+pin, the target pin is also connected to the net.",
     },
     "support_circuits.pulldown": {
         "example": [{"type": "pulldown", "net": "BOOT0", "ground": "GND", "value": "10k"}],
@@ -170,9 +192,10 @@ DESIGN_INTENT_SCHEMA = {
     },
     "support_circuits.crystal": {
         "example": [{"type": "crystal", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "value": "8MHz"}],
+        "alias_example": [{"type": "crystal", "target": "U1", "xin": "OSC_IN", "xout": "OSC_OUT", "value": "8MHz"}],
         "grounded_example": [{"type": "crystal", "lib_id": "Device:Crystal_GND2", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "ground": "GND", "value": "8MHz"}],
-        "required_fields": ["type", "pins"],
-        "optional_fields": ["target", "ref", "value", "footprint", "lib_id", "symbol", "ground"],
+        "required_fields": ["type", "pins or xin+xout"],
+        "optional_fields": ["target", "ref", "value", "footprint", "lib_id", "symbol", "ground", "xin", "xout"],
         "generated_parts_summary": "One crystal.",
         "generated_nets_summary": "Crystal pins 1 and 2 connect to the two listed nets; grounded symbols also connect ground pins.",
     },
@@ -192,8 +215,9 @@ DESIGN_INTENT_SCHEMA = {
     },
     "support_circuits.ferrite_filter": {
         "example": [{"type": "ferrite_filter", "in_net": "+3V3", "out_net": "+3V3_A", "value": "Ferrite"}],
-        "required_fields": ["type", "in_net", "out_net"],
-        "optional_fields": ["target", "value", "footprint"],
+        "alias_example": [{"type": "ferrite_filter", "rail": "+3V3", "supply_rail": "+3V3_A", "value": "Ferrite"}],
+        "required_fields": ["type", "in_net/rail", "out_net/supply_rail"],
+        "optional_fields": ["target", "value", "footprint", "rail", "supply_rail", "input_net", "output_net", "filtered_net", "net"],
         "generated_parts_summary": "One ferrite bead.",
         "generated_nets_summary": "Ferrite connects input net to output net.",
     },
@@ -213,8 +237,9 @@ DESIGN_INTENT_SCHEMA = {
     },
     "bulk_connections": {
         "example": [{"net": "IMU_INT", "pins": [["U1", "PA0"], ["U2", "INT"]]}],
-        "required_fields": ["net and pins, or net_prefix and map"],
-        "optional_fields": [],
+        "connection_plan_alias_example": [{"type": "pin_to_net", "ref": "U1", "pin": "PA0", "net": "IMU_INT"}],
+        "required_fields": ["net and pins, net_prefix and map, or type=pin_to_net/pin_to_pin"],
+        "optional_fields": ["allow_hidden_power"],
     },
     "no_connect_rules": {
         "example": [{"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PB6", "PB7", "PA13", "PA14"], "action": "mark_no_connect"}],
@@ -303,8 +328,8 @@ class _DesignIntentCompiler:
         self.errors: list[dict[str, Any]] = []
         self.warnings: list[dict[str, Any]] = []
         self.parts: list[dict[str, Any]] = []
-        self.nets: dict[str, list[list[str]]] = {}
-        self.no_connects: list[dict[str, str]] = []
+        self.nets: dict[str, list[Any]] = {}
+        self.no_connects: list[dict[str, Any]] = []
         self.generated_refs: dict[str, list[str]] = {}
         self.pin_maps: dict[str, list[dict[str, Any]]] = {}
         self.pin_name_counts: dict[str, dict[str, int]] = {}
@@ -312,9 +337,11 @@ class _DesignIntentCompiler:
         self.skipped_hidden_pins: list[dict[str, Any]] = []
         self.existing_refs = _existing_schematic_refs(project_path)
         self.allocator = ReferenceAllocator(self.existing_refs)
+        self.default_allow_hidden_power = False
 
     def compile(self) -> dict[str, Any]:
         normalized = self._normalize_intent()
+        self.default_allow_hidden_power = bool(normalized.get("allow_hidden_power", False))
         self.parts.extend(normalized["parts"])
         for part in self.parts:
             ref = str(part.get("ref") or part.get("reference") or "")
@@ -335,6 +362,8 @@ class _DesignIntentCompiler:
             "no_connects": self.no_connects,
             "layout_hints": normalized.get("layout_hints", {}),
         }
+        if normalized.get("paper"):
+            expanded_spec["paper"] = str(normalized["paper"])
         summary = {
             "input_part_count": len(normalized["parts"]),
             "generated_part_count": max(len(self.parts) - len(normalized["parts"]), 0),
@@ -383,6 +412,7 @@ class _DesignIntentCompiler:
         if not isinstance(normalized["layout_hints"], dict):
             self.errors.append({"path": "layout_hints", "error": "layout_hints must be an object"})
             normalized["layout_hints"] = {}
+        normalized["allow_hidden_power"] = bool(normalized.get("allow_hidden_power", False))
         return normalized
 
     def _normalize_grouped_entries(self, value: Any, path: str) -> list[Any]:
@@ -521,7 +551,13 @@ class _DesignIntentCompiler:
             for endpoint in rail_spec.get("pins", []):
                 parsed = _endpoint(endpoint)
                 if parsed:
-                    self._add_connection(str(rail_name), parsed[0], parsed[1], "rails")
+                    self._add_connection(
+                        str(rail_name),
+                        parsed[0],
+                        parsed[1],
+                        "rails",
+                        allow_hidden_power=_endpoint_allow_hidden_power(endpoint),
+                    )
 
     def _expand_pin_rules(self, rules: list[Any]) -> None:
         for index, rule in enumerate(rules):
@@ -535,8 +571,16 @@ class _DesignIntentCompiler:
                 self.errors.append({"path": path, "error": "pin rule requires ref and net"})
                 continue
             pins = self._select_rule_pins(ref, rule.get("match", {}), path)
+            allow_hidden_power = bool(rule.get("allow_hidden_power", self.default_allow_hidden_power))
             for pin in pins:
-                self._add_connection(net, ref, self._pin_identifier(ref, pin), path, pin_info=pin)
+                self._add_connection(
+                    net,
+                    ref,
+                    self._pin_identifier(ref, pin),
+                    path,
+                    pin_info=pin,
+                    allow_hidden_power=allow_hidden_power,
+                )
 
     def _expand_interfaces(self, interfaces: list[Any]) -> None:
         expanders = {
@@ -744,11 +788,17 @@ class _DesignIntentCompiler:
         self._support_resistor_to_rail(circuit, path, "ground", "pulldowns", default_rail="GND")
 
     def _support_resistor_to_rail(self, circuit: dict[str, Any], path: str, rail_key: str, bucket: str, default_rail: str | None = None) -> None:
-        net = circuit.get("net")
+        target = circuit.get("target")
+        pin = circuit.get("pin")
+        if not target and pin and circuit.get("ref"):
+            target = circuit.get("ref")
+        net = circuit.get("net") or (str(pin) if target and pin else None)
         rail = circuit.get(rail_key) or default_rail
         if not net or not rail:
             self.errors.append({"path": path, "error": f"{bucket[:-1]} requires net and {rail_key}"})
             return
+        if target and pin:
+            self._add_connection(str(net), str(target), str(pin), path)
         self._add_two_pin_part(
             "R",
             str(circuit.get("value") or "10k"),
@@ -756,7 +806,7 @@ class _DesignIntentCompiler:
             str(net),
             str(rail),
             bucket,
-            {"target": circuit.get("target"), "rail": str(rail)},
+            {"target": target, "rail": str(rail)},
         )
 
     def _support_series_resistor(self, circuit: dict[str, Any], path: str) -> None:
@@ -832,18 +882,28 @@ class _DesignIntentCompiler:
         self._add_two_pin_part("C", str(circuit.get("capacitor") or "100n"), str(circuit.get("capacitor_footprint") or DEFAULT_FOOTPRINTS["capacitor"]), str(out_net), str(ground), "rc_filters", {"target": circuit.get("target")})
 
     def _support_ferrite_filter(self, circuit: dict[str, Any], path: str) -> None:
-        in_net = circuit.get("in_net")
-        out_net = circuit.get("out_net")
+        in_net = circuit.get("in_net") or circuit.get("input_net") or circuit.get("rail")
+        out_net = (
+            circuit.get("out_net")
+            or circuit.get("output_net")
+            or circuit.get("filtered_net")
+            or circuit.get("supply_rail")
+            or circuit.get("net")
+        )
         if not in_net or not out_net:
-            self.errors.append({"path": path, "error": "ferrite_filter requires in_net and out_net"})
+            self.errors.append({"path": path, "error": "ferrite_filter requires in_net/rail and out_net/supply_rail"})
             return
         self._add_two_pin_part("FB", str(circuit.get("value") or "Ferrite"), str(circuit.get("footprint") or DEFAULT_FOOTPRINTS["ferrite"]), str(in_net), str(out_net), "ferrite_filters", {"target": circuit.get("target")})
 
     def _support_crystal(self, circuit: dict[str, Any], path: str) -> None:
         ref = str(circuit.get("ref") or self._allocate("Y", "crystals"))
         pins = circuit.get("pins", [])
+        if (not isinstance(pins, list) or len(pins) < 2) and circuit.get("xin") and circuit.get("xout"):
+            pins = [circuit.get("xin"), circuit.get("xout")]
+        if not isinstance(pins, list):
+            pins = []
         if len(pins) < 2:
-            self.errors.append({"path": path, "error": "crystal requires two nets in pins"})
+            self.errors.append({"path": path, "error": "crystal requires two nets in pins or xin/xout"})
             return
         lib_id = str(circuit.get("lib_id") or circuit.get("symbol") or "Device:Crystal")
         ground_pins = self._crystal_ground_pins(lib_id, circuit, path)
@@ -947,11 +1007,48 @@ class _DesignIntentCompiler:
             if not isinstance(item, dict):
                 self.errors.append({"path": path, "error": "bulk connection must be an object"})
                 continue
-            if item.get("net") and isinstance(item.get("pins"), list):
+            if item.get("type") in {"pin_to_net", "pin_to_power", "pin_to_ground"}:
+                ref = item.get("ref")
+                pin = item.get("pin")
+                net = item.get("net") or ("GND" if item.get("type") == "pin_to_ground" else None)
+                if not ref or not pin or not net:
+                    self.errors.append({"path": path, "error": "pin_to_net bulk connection requires ref, pin, and net"})
+                    continue
+                self._add_connection(
+                    str(net),
+                    str(ref),
+                    str(pin),
+                    path,
+                    allow_hidden_power=bool(item.get("allow_hidden_power", self.default_allow_hidden_power)),
+                )
+            elif item.get("type") == "pin_to_pin":
+                start = item.get("from") or item.get("a")
+                end = item.get("to") or item.get("b")
+                start_endpoint = _endpoint(start)
+                end_endpoint = _endpoint(end)
+                if not start_endpoint or not end_endpoint:
+                    self.errors.append({"path": path, "error": "pin_to_pin bulk connection requires from/to endpoint objects"})
+                    continue
+                net = str(item.get("net") or _auto_net_name(start_endpoint[0], start_endpoint[1], end_endpoint[0], end_endpoint[1]))
+                allow_hidden_power = bool(item.get("allow_hidden_power", self.default_allow_hidden_power))
+                self._add_connection(net, start_endpoint[0], start_endpoint[1], path, allow_hidden_power=allow_hidden_power)
+                self._add_connection(net, end_endpoint[0], end_endpoint[1], path, allow_hidden_power=allow_hidden_power)
+            elif item.get("net") and isinstance(item.get("pins"), list):
                 for endpoint in item["pins"]:
                     parsed = _endpoint(endpoint)
                     if parsed:
-                        self._add_connection(str(item["net"]), parsed[0], parsed[1], path)
+                        self._add_connection(
+                            str(item["net"]),
+                            parsed[0],
+                            parsed[1],
+                            path,
+                            allow_hidden_power=bool(
+                                item.get(
+                                    "allow_hidden_power",
+                                    _endpoint_allow_hidden_power(endpoint) or self.default_allow_hidden_power,
+                                )
+                            ),
+                        )
             elif item.get("net_prefix") and isinstance(item.get("map"), dict):
                 prefix = str(item["net_prefix"])
                 for suffix, endpoints in item["map"].items():
@@ -960,9 +1057,20 @@ class _DesignIntentCompiler:
                         for endpoint in endpoints:
                             parsed = _endpoint(endpoint)
                             if parsed:
-                                self._add_connection(net, parsed[0], parsed[1], path)
+                                self._add_connection(
+                                    net,
+                                    parsed[0],
+                                    parsed[1],
+                                    path,
+                                    allow_hidden_power=bool(
+                                        item.get(
+                                            "allow_hidden_power",
+                                            _endpoint_allow_hidden_power(endpoint) or self.default_allow_hidden_power,
+                                        )
+                                    ),
+                                )
             else:
-                self.errors.append({"path": path, "error": "bulk connection requires net/pins or net_prefix/map"})
+                self.errors.append({"path": path, "error": "bulk connection requires net/pins, net_prefix/map, or type=pin_to_net/pin_to_pin"})
 
     def _expand_no_connect_rules(self, rules: list[Any]) -> None:
         connected = set(self.pin_assignments)
@@ -1149,7 +1257,15 @@ class _DesignIntentCompiler:
         pin_info = matches[0]
         return self._pin_identifier(ref, pin_info), pin_info
 
-    def _add_connection(self, net: str, ref: str, pin: str, path: str, pin_info: dict[str, Any] | None = None) -> None:
+    def _add_connection(
+        self,
+        net: str,
+        ref: str,
+        pin: str,
+        path: str,
+        pin_info: dict[str, Any] | None = None,
+        allow_hidden_power: bool | None = None,
+    ) -> None:
         if not net or not ref or not pin:
             self.errors.append({"path": path, "error": "connection requires net, ref, and pin"})
             return
@@ -1172,8 +1288,28 @@ class _DesignIntentCompiler:
         if mismatch:
             self.errors.append({"path": path, **mismatch, "ref": ref, "pin": pin, "net": net})
             return
+        allow_hidden = bool(self.default_allow_hidden_power if allow_hidden_power is None else allow_hidden_power)
+        visibility = classify_pin(resolved_pin_info) if resolved_pin_info is not None else PinVisibility.VISIBLE
+        if visibility == PinVisibility.HIDDEN_POWER:
+            if allow_hidden or _net_looks_like_power_or_ground(net):
+                allow_hidden = True
+            else:
+                self.errors.append(
+                    {
+                        "path": path,
+                        "error": "hidden power pin connection requires allow_hidden_power",
+                        "ref": ref,
+                        "pin": pin,
+                        "net": net,
+                    }
+                )
+                return
         endpoints = self.nets.setdefault(net, [])
-        endpoint = [ref, pin]
+        endpoint: Any = (
+            {"ref": ref, "pin": pin, "allow_hidden_power": True}
+            if allow_hidden and visibility == PinVisibility.HIDDEN_POWER
+            else [ref, pin]
+        )
         if endpoint not in endpoints:
             endpoints.append(endpoint)
 
@@ -1215,6 +1351,12 @@ def _pin_matches(pin: dict[str, Any], selector: dict[str, Any]) -> bool:
         if key == "pin":
             values = _pin_values(pin)
             if str(expected) not in values:
+                return False
+        elif key == "name":
+            if str(pin.get("name") or "") != str(expected):
+                return False
+        elif key == "number":
+            if str(pin.get("number") or "") != str(expected):
                 return False
         elif key == "pins":
             expected_values = {str(item) for item in expected} if isinstance(expected, list) else {str(expected)}
@@ -1280,6 +1422,15 @@ def _power_ground_mismatch(pin: dict[str, Any], net: str) -> dict[str, Any] | No
     return None
 
 
+def _net_looks_like_power_or_ground(net: str) -> bool:
+    normalized = str(net or "").upper()
+    if normalized in {"GND", "AGND", "DGND", "GNDA", "GNDD", "VSS", "VSSA", "VCC", "VDD", "VDDA", "VBAT", "VBUS"}:
+        return True
+    if normalized.startswith("+"):
+        return True
+    return bool(re.search(r"(^|_)(GND|VSS|VCC|VDD|VBAT|VBUS|3V3|5V)(_|$)", normalized))
+
+
 def _endpoint(item: Any) -> tuple[str, str] | None:
     if isinstance(item, dict):
         ref = item.get("ref") or item.get("reference")
@@ -1293,9 +1444,19 @@ def _endpoint(item: Any) -> tuple[str, str] | None:
     return str(ref), str(pin)
 
 
+def _endpoint_allow_hidden_power(item: Any) -> bool:
+    return isinstance(item, dict) and bool(item.get("allow_hidden_power", False))
+
+
+def _auto_net_name(ref_a: str, pin_a: str, ref_b: str, pin_b: str) -> str:
+    safe = "_".join([ref_a, pin_a, ref_b, pin_b])
+    return "".join(char if char.isalnum() else "_" for char in safe).upper()
+
+
 def _empty_intent() -> dict[str, Any]:
     return {
         "name": None,
+        "paper": None,
         "parts": [],
         "rails": {},
         "pin_rules": [],
@@ -1304,10 +1465,11 @@ def _empty_intent() -> dict[str, Any]:
         "bulk_connections": [],
         "no_connect_rules": [],
         "layout_hints": {},
+        "allow_hidden_power": False,
     }
 
 
-def _sorted_nets(nets: dict[str, list[list[str]]]) -> dict[str, list[list[str]]]:
+def _sorted_nets(nets: dict[str, list[Any]]) -> dict[str, list[Any]]:
     return dict(sorted(nets.items(), key=lambda item: item[0]))
 
 

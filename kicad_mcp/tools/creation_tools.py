@@ -992,20 +992,38 @@ def register_creation_tools(mcp: FastMCP) -> None:
         fail_on_erc_violations: bool = False,
         replace_existing: bool = False,
         ctx: Context | None = None,
+        verify: bool | None = None,
+        verify_native_netlist: bool | None = None,
+        run_erc: bool = True,
+        rollback_on_failure: bool | None = None,
     ) -> dict[str, Any]:
         """Primary agent tool for schematic wiring. Prefer this over raw wire/point tools."""
         if ctx:
             await ctx.info(f"Applying {len(connections)} schematic connections")
+        effective_verify_native = run_native_netlist
+        effective_run_erc = run_erc
+        if verify is not None:
+            effective_verify_native = bool(verify)
+            if verify is False:
+                effective_run_erc = False
+        if verify_native_netlist is not None:
+            effective_verify_native = bool(verify_native_netlist)
+        effective_rollback = (
+            rollback_on_failed_membership
+            if rollback_on_failure is None
+            else bool(rollback_on_failure)
+        )
         result = apply_connection_plan(
             schematic_path,
             connections,
             no_connects,
-            run_native_netlist,
-            rollback_on_failed_membership,
+            effective_verify_native,
+            effective_rollback,
             fail_on_erc_violations,
             replace_existing=replace_existing,
+            run_erc=effective_run_erc,
         )
-        if ctx and run_native_netlist:
+        if ctx and effective_verify_native:
             await ctx.info("Applied schematic edits; checked native netlist membership")
         return result
 
@@ -2015,8 +2033,36 @@ def _design_intent_counts(expanded_spec: dict[str, Any], summary: dict[str, Any]
     return {"total_part_count": total_parts, "connection_count": connections}
 
 
+def _preview_size_estimate(expanded_spec: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    counts = _design_intent_counts(expanded_spec, summary)
+    parts = counts["total_part_count"]
+    connections = counts["connection_count"]
+    if parts <= 15 and connections <= 40:
+        mode = "direct"
+    elif parts <= 25 and connections <= 75:
+        mode = "quick_apply"
+    elif parts <= 60 and connections <= 180:
+        mode = "background_job"
+    else:
+        mode = "staged"
+    return {
+        **counts,
+        "recommended_mode": mode,
+        "thresholds": {
+            "direct": {"max_parts": 15, "max_connections": 40},
+            "quick_apply": {"max_parts": 25, "max_connections": 75},
+            "background_job": {"max_parts": 60, "max_connections": 180},
+        },
+    }
+
+
 def _with_large_design_recommendation(base: dict[str, Any], expanded_spec: dict[str, Any]) -> None:
-    counts = _design_intent_counts(expanded_spec, base.get("summary", {}))
+    estimate = _preview_size_estimate(expanded_spec, base.get("summary", {}))
+    base["preview_size_estimate"] = estimate
+    counts = {
+        "total_part_count": estimate["total_part_count"],
+        "connection_count": estimate["connection_count"],
+    }
     if counts["total_part_count"] <= 25 and counts["connection_count"] <= 75:
         return
     base["recommended_next_tool"] = "schematic_build_from_spec_v2"

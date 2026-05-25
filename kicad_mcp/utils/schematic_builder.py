@@ -362,6 +362,7 @@ def apply_connection_plan(
     rollback_on_failed_membership: bool = True,
     fail_on_erc_violations: bool = False,
     replace_existing: bool = False,
+    run_erc: bool = True,
 ) -> dict[str, Any]:
     """Apply a batch connection plan transactionally through the v2 intent engine."""
     # Preserve existing tests and callers that monkeypatch this module's native
@@ -374,7 +375,7 @@ def apply_connection_plan(
         connections,
         no_connects,
         verify_native_netlist=run_native_netlist,
-        run_erc=True,
+        run_erc=run_erc,
         auto_snap=True,
         rollback_on_failure=rollback_on_failed_membership,
         fail_on_erc_violations=fail_on_erc_violations,
@@ -1214,6 +1215,8 @@ def _apply_spec_to_existing_schematic(
 ) -> KiCadSchematic:
     if edit_summary is None:
         edit_summary = {}
+    if spec.get("paper"):
+        schematic.set_paper(str(spec["paper"]))
     removed_conflicting = edit_summary.setdefault("removed_conflicting_no_connects", [])
     skipped_no_connects = edit_summary.setdefault("skipped_no_connects", [])
     existing_refs = {symbol["reference"] for symbol in schematic.list_symbols()}

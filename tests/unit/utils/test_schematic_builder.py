@@ -32,6 +32,20 @@ def test_alias_symbol_embedding_is_flattened_for_native_netlist():
     assert any(child.head() == "symbol" for child in node.child_lists())
 
 
+def test_update_mode_applies_spec_paper_to_existing_schematic(tmp_path: Path):
+    schematic_path = tmp_path / "demo.kicad_sch"
+    schematic = KiCadSchematic.empty(paper="A3")
+
+    updated = _apply_spec_to_existing_schematic(
+        schematic,
+        str(schematic_path),
+        {"paper": "A1", "symbols": [], "connections": [], "no_connects": []},
+        "update",
+    )
+
+    assert schematic_builder._paper(updated) == "A1"
+
+
 def test_pin_map_rotation_matches_kicad_sheet_coordinates(tmp_path: Path):
     _resolve_symbol_pins_cached.cache_clear()
     schematic_path = tmp_path / "demo.kicad_sch"

@@ -350,6 +350,7 @@ def verify_connection_plan_v2(
     fail_on_erc_violations: bool = True,
 ) -> dict[str, Any]:
     """Verify planned connections with native netlist and optional ERC."""
+    artifact_result = verify_schematic_artifacts(schematic_path, connections)
     use_batch = _using_default_cli_helper(export_native_netlist) and _using_default_cli_helper(run_erc_via_cli)
     bundle = (
         validate_schematic_batch(
@@ -382,13 +383,14 @@ def verify_connection_plan_v2(
         and fail_on_erc_violations
         and erc_result.get("total_violations", 0) > 0
     )
-    success = bool(native_result.get("success")) and not erc_blocking
+    success = bool(artifact_result.get("success")) and bool(native_result.get("success")) and not erc_blocking
     if run_erc and not erc_result.get("success"):
         # ERC unavailable is reported but not treated as destructive-edit failure;
         # native netlist verification remains the rollback gate.
-        success = bool(native_result.get("success"))
+        success = bool(artifact_result.get("success")) and bool(native_result.get("success"))
     return {
         "success": success,
+        "schematic_artifact_verification": artifact_result,
         "native_verification": native_result,
         "erc": {
             "success": erc_result.get("success"),
@@ -400,7 +402,7 @@ def verify_connection_plan_v2(
             "error": erc_result.get("error"),
             "skipped": erc_result.get("skipped", False),
         },
-        "reason": _verification_reason(native_result, erc_result, erc_blocking),
+        "reason": _verification_reason(artifact_result, native_result, erc_result, erc_blocking),
     }
 
 
@@ -452,6 +454,79 @@ def verify_native_memberships(
             "connectivity_complete": native.get("connectivity_complete"),
             "netlist_quality": native.get("netlist_quality"),
         },
+    }
+
+
+def verify_schematic_artifacts(
+    schematic_path: str,
+    connections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Verify label-style connections against schematic labels/wires before native netlist export."""
+    required_label_connections = [
+        connection
+        for connection in connections
+        if connection.get("required", True)
+        and str(connection.get("connection_style", "label")) == "label"
+    ]
+    if not required_label_connections:
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "no required label-style connections to verify",
+            "checked_count": 0,
+            "missing": [],
+        }
+    try:
+        schematic = KiCadSchematic.from_file(schematic_path)
+    except Exception as exc:
+        return {
+            "success": False,
+            "reason": f"unable to read schematic artifact for verification: {exc}",
+            "checked_count": 0,
+            "missing": [],
+        }
+    missing: list[dict[str, Any]] = []
+    checked_count = 0
+    for connection in required_label_connections:
+        checked_count += 1
+        try:
+            attached = pin_attached_nets(
+                schematic,
+                schematic_path,
+                connection["ref"],
+                connection["pin"],
+            )
+        except Exception as exc:
+            missing.append(
+                {
+                    "ref": connection.get("ref"),
+                    "pin": connection.get("pin"),
+                    "net": connection.get("net"),
+                    "reason": str(exc),
+                    "connection": connection,
+                }
+            )
+            continue
+        if connection["net"] not in attached.get("nets", []):
+            missing.append(
+                {
+                    "ref": connection["ref"],
+                    "pin": connection["pin"],
+                    "net": connection["net"],
+                    "attached_nets": attached.get("nets", []),
+                    "reason": f"no attached schematic label/wire for {connection['net']}",
+                    "connection": connection,
+                }
+            )
+    return {
+        "success": not missing,
+        "skipped": False,
+        "reason": "all required label-style schematic artifacts verified"
+        if not missing
+        else "missing required label-style schematic artifacts",
+        "checked_count": checked_count,
+        "missing": missing,
+        "missing_connection_count": len(missing),
     }
 
 
@@ -802,8 +877,10 @@ def _label_text(node: SExprList) -> str:
 
 
 def _verification_reason(
-    native: dict[str, Any], erc: dict[str, Any], erc_blocking: bool
+    artifacts: dict[str, Any], native: dict[str, Any], erc: dict[str, Any], erc_blocking: bool
 ) -> str:
+    if not artifacts.get("success"):
+        return str(artifacts.get("reason", "schematic artifact verification failed"))
     if not native.get("success"):
         return str(native.get("reason", "native verification failed"))
     if erc_blocking:

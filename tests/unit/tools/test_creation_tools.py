@@ -149,6 +149,84 @@ def _skip_cli_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_apply_connection_plan_verify_false_disables_native_and_erc_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict = {}
+
+    def fake_apply_connection_plan(
+        schematic_path,
+        connections,
+        no_connects=None,
+        run_native_netlist=True,
+        rollback_on_failed_membership=True,
+        fail_on_erc_violations=False,
+        replace_existing=False,
+        run_erc=True,
+    ):
+        captured.update(
+            {
+                "schematic_path": schematic_path,
+                "connections": connections,
+                "run_native_netlist": run_native_netlist,
+                "rollback_on_failed_membership": rollback_on_failed_membership,
+                "run_erc": run_erc,
+            }
+        )
+        return {"success": True}
+
+    monkeypatch.setattr(creation_tools, "apply_connection_plan", fake_apply_connection_plan)
+    server = create_server()
+    tools = await server.get_tools()
+
+    result = await tools["schematic_apply_connection_plan"].fn(
+        "demo.kicad_sch",
+        [{"type": "pin_to_net", "ref": "U1", "pin": "1", "net": "NET"}],
+        verify=False,
+        rollback_on_failure=False,
+    )
+
+    assert result["success"] is True
+    assert captured["run_native_netlist"] is False
+    assert captured["run_erc"] is False
+    assert captured["rollback_on_failed_membership"] is False
+
+
+@pytest.mark.asyncio
+async def test_apply_connection_plan_verify_native_netlist_alias_only_controls_native(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict = {}
+
+    def fake_apply_connection_plan(
+        schematic_path,
+        connections,
+        no_connects=None,
+        run_native_netlist=True,
+        rollback_on_failed_membership=True,
+        fail_on_erc_violations=False,
+        replace_existing=False,
+        run_erc=True,
+    ):
+        captured["run_native_netlist"] = run_native_netlist
+        captured["run_erc"] = run_erc
+        return {"success": True}
+
+    monkeypatch.setattr(creation_tools, "apply_connection_plan", fake_apply_connection_plan)
+    server = create_server()
+    tools = await server.get_tools()
+
+    await tools["schematic_apply_connection_plan"].fn(
+        "demo.kicad_sch",
+        [{"type": "pin_to_net", "ref": "U1", "pin": "1", "net": "NET"}],
+        verify_native_netlist=False,
+    )
+
+    assert captured["run_native_netlist"] is False
+    assert captured["run_erc"] is True
+
+
 def test_connection_plan_missing_type_returns_supported_examples():
     normalized = normalize_connections([{"from": {"ref": "U1", "pin": "1"}, "net": "N1"}])
 

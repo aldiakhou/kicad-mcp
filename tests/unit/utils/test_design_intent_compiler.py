@@ -63,6 +63,8 @@ def test_select_pins_supports_exact_regex_type_contains_and_exclude():
     pins = _base_parts()[0]["pins"]
 
     assert [pin["name"] for pin in select_pins(pins, {"pin": "VDD"})] == ["VDD"]
+    assert [pin["name"] for pin in select_pins(pins, {"name": "VDD"})] == ["VDD"]
+    assert [pin["name"] for pin in select_pins(pins, {"number": "1"})] == ["VDD"]
     assert {pin["name"] for pin in select_pins(pins, {"pins": ["VDD", "VDDA"]})} == {
         "VDD",
         "VDDA",
@@ -122,6 +124,111 @@ def test_pin_rules_connect_all_power_pins_without_manual_listing(tmp_path: Path)
     assert result["expanded_spec"]["nets"]["+3V3"] == [["U1", "VDD"], ["U1", "VDDA"]]
     assert result["expanded_spec"]["nets"]["GND"] == [["U1", "VSS"], ["U1", "VSSA"]]
     assert Path(result["expanded_spec_path"]).exists()
+
+
+def test_pin_rules_exact_name_and_number_aliases_do_not_substring_match(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [_base_parts()[0]],
+            "pin_rules": [
+                {"ref": "U1", "match": {"name": "VDD"}, "net": "+3V3"},
+                {"ref": "U1", "match": {"number": "3"}, "net": "GND"},
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    assert result["expanded_spec"]["nets"]["+3V3"] == [["U1", "VDD"]]
+    assert result["expanded_spec"]["nets"]["GND"] == [["U1", "VSS"]]
+
+
+def test_pin_rules_propagate_allow_hidden_power_metadata(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "HIDDEN_POWER",
+                    "footprint": "Package_DIP:DIP-2_W7.62mm",
+                    "pins": [
+                        {"number": "1", "name": "VDD", "type": "power_in", "hidden": True},
+                        {"number": "2", "name": "IO", "type": "bidirectional"},
+                    ],
+                }
+            ],
+            "pin_rules": [{"ref": "U1", "match": {"name": "VDD"}, "net": "+3V3"}],
+        },
+    )
+
+    assert result["success"] is True
+    assert result["expanded_spec"]["nets"]["+3V3"] == [
+        {"ref": "U1", "pin": "VDD", "allow_hidden_power": True}
+    ]
+
+
+def test_hidden_power_non_power_net_requires_explicit_allow_hidden_power(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "HIDDEN_POWER",
+                    "footprint": "Package_DIP:DIP-2_W7.62mm",
+                    "pins": [{"number": "1", "name": "VDD", "type": "power_in", "hidden": True}],
+                }
+            ],
+            "pin_rules": [{"ref": "U1", "match": {"name": "VDD"}, "net": "ANALOG_REF"}],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["errors"][0]["error"] == "hidden power pin connection requires allow_hidden_power"
+
+
+def test_support_circuit_aliases_expand_to_connections(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [_base_parts()[0]],
+            "support_circuits": [
+                {"type": "pullup", "target": "U1", "pin": "NRST", "rail": "+3V3", "net": "RESET_N"},
+                {"type": "crystal", "xin": "OSC_IN", "xout": "OSC_OUT"},
+                {"type": "ferrite_filter", "rail": "+3V3", "supply_rail": "+3V3_A"},
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    nets = result["expanded_spec"]["nets"]
+    assert ["U1", "NRST"] in nets["RESET_N"]
+    assert any(endpoint[0].startswith("Y") and endpoint[1] == "1" for endpoint in nets["OSC_IN"])
+    assert any(endpoint[0].startswith("FB") and endpoint[1] == "1" for endpoint in nets["+3V3"])
+    assert any(endpoint[0].startswith("FB") and endpoint[1] == "2" for endpoint in nets["+3V3_A"])
+
+
+def test_bulk_connections_accept_connection_plan_aliases(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": _base_parts()[:2],
+            "bulk_connections": [
+                {"type": "pin_to_net", "ref": "U1", "pin": "PB6", "net": "I2C_SCL"},
+                {
+                    "type": "pin_to_pin",
+                    "from": {"ref": "U1", "pin": "PB7"},
+                    "to": {"ref": "U2", "pin": "SDA"},
+                    "net": "I2C_SDA",
+                },
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    assert result["expanded_spec"]["nets"]["I2C_SCL"] == [["U1", "PB6"]]
+    assert result["expanded_spec"]["nets"]["I2C_SDA"] == [["U1", "PB7"], ["U2", "SDA"]]
 
 
 def test_i2c_interface_expands_devices_interrupt_address_and_pullups(tmp_path: Path):

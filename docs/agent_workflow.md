@@ -16,7 +16,7 @@ Recommended order:
 10. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
 11. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
 
-For large schematics, prefer staged calls over one long request: run `schematic_preview_design_intent`, then place the expanded spec's `parts` with `schematic_build_from_spec_v2`, then apply connection batches of 20-40 with `schematic_apply_connection_plan`, then run `export_schematic_preview` and `schematic_quality_report`. Preview responses over 25 parts or 75 connections recommend this workflow explicitly.
+For large schematics, prefer staged calls over one long request: run `schematic_preview_design_intent`, then follow `preview_size_estimate.recommended_mode`. For `staged`, place the expanded spec's `parts` with `schematic_build_from_spec_v2`, apply connection batches of 20-40 with `schematic_apply_connection_plan`, then run `export_schematic_preview` and `schematic_quality_report`. Preview responses over 25 parts or 75 connections recommend this workflow explicitly.
 
 For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. Run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Transactional KiCad CLI validation stays enabled by default; disable it only for agent-controlled staging with `unsafe_fast_apply=true`, which sets `run_cli_validation=false`. Use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation is still required and the client may time out.
 
@@ -46,8 +46,8 @@ Use this bulk design-intent shape for normal complete circuits:
     }
   ],
   "pin_rules": [
-    {"ref": "U1", "match": {"name_regex": "VDD|VDDA|VBAT"}, "net": "+3V3"},
-    {"ref": "U1", "match": {"name_regex": "VSS|VSSA|GND"}, "net": "GND"}
+    {"ref": "U1", "match": {"name": "VDD"}, "net": "+3V3"},
+    {"ref": "U1", "match": {"name_regex": "^(VSS|VSSA|GND)$"}, "net": "GND", "allow_hidden_power": true}
   ],
   "interfaces": [
     {
@@ -61,11 +61,24 @@ Use this bulk design-intent shape for normal complete circuits:
   "support_circuits": [
     {"type": "decoupling", "target": "U1", "rail": "+3V3", "ground": "GND", "capacitors": ["100n", "4.7u"]}
   ],
+  "layout_hints": {
+    "paper_strategy": "auto",
+    "max_paper": "A1",
+    "visual_gate": "strict"
+  },
   "no_connect_rules": [
     {"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PB6", "PB7"], "action": "mark_no_connect"}
   ]
 }
 ```
+
+Pin selectors support exact `name` and `number` aliases. Regex selectors use substring matching, so anchor regexes when you need exact matches, for example `{"name_regex": "^VDD$"}`. Hidden power pins on power or ground nets are auto-authorized during design-intent compile; for intentional nonstandard hidden power wiring, pass `allow_hidden_power=true` on the pin rule or at the intent top level.
+
+`bulk_connections` in design intent should normally use `{"net": "...", "pins": [[ref, pin], ...]}`. The compiler also accepts `type=pin_to_net` and `type=pin_to_pin` as forgiving aliases, but `schematic_apply_connection_plan` is the preferred tool for incremental connection-plan entries.
+
+Support-circuit aliases are accepted for common agent output: `crystal` can use `xin`/`xout`, `ferrite_filter` can use `rail`/`supply_rail`, and `pullup` can use `target` or `ref` plus `pin` to connect the target pin before adding the resistor.
+
+For fragile incremental wiring, `schematic_apply_connection_plan` accepts `verify=false`, `verify_native_netlist=false`, `run_erc=false`, and `rollback_on_failure=false`. Use those only to get past native netlist/export timing issues, then run `schematic_quality_report` after layout is stable.
 
 `no_connect_rules` can exclude pins either inside the selector or at the rule level:
 
