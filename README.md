@@ -49,10 +49,8 @@ source .venv/bin/activate
 Create a `.env` file to customize where the server looks for your KiCad projects:
 
 ```bash
-# Copy the example environment file
-cp .env.example .env
-
-# Edit the .env file
+# Create and edit the .env file
+touch .env
 vim .env
 ```
 
@@ -246,7 +244,6 @@ kicad-mcp/
 ├── README.md                       # Project documentation
 ├── main.py                         # Entry point that runs the server
 ├── pyproject.toml                  # Project metadata and dependencies
-├── .env.example                    # Example environment configuration
 ├── kicad_mcp/                      # Main package directory
 │   ├── __init__.py
 │   ├── server.py                   # MCP server setup

@@ -128,6 +128,35 @@ def test_v2_builder_applies_readable_defaults_without_explicit_layout(monkeypatc
     assert captured["spec"]["connections"][0]["connection_style"] == "auto"
 
 
+def test_v2_preview_applies_same_readable_defaults_as_build(monkeypatch):
+    captured: dict = {}
+
+    def fake_preview(project_path, spec):
+        captured["spec"] = spec
+        return {"success": True, "project_path": project_path}
+
+    monkeypatch.setattr(schematic_builder, "preview_build_from_spec", fake_preview)
+
+    result = schematic_builder.preview_build_from_spec_v2(
+        "demo.kicad_pro",
+        {
+            "custom_parts": [
+                {
+                    "ref": "U1",
+                    "value": "IC",
+                    "pins": [{"number": "1", "name": "A"}, {"number": "2", "name": "B"}],
+                }
+            ],
+            "nets": {"SIG": [["U1", "A"]]},
+        },
+    )
+
+    assert result["success"] is True
+    assert captured["spec"]["paper"] == "A3"
+    assert captured["spec"]["connections"][0]["label_placement"] == "external_stubs"
+    assert captured["spec"]["connections"][0]["connection_style"] == "auto"
+
+
 def test_v2_builder_preserves_explicit_pin_anchor_layout(monkeypatch):
     captured: dict = {}
 

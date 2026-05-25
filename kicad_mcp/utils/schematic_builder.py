@@ -366,6 +366,7 @@ def apply_connection_plan(
 
 def preview_build_from_spec_v2(project_path: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Preview an agent-friendly v2 circuit specification."""
+    spec = _apply_default_v2_visual_layout(spec)
     return preview_build_from_spec(project_path, normalize_build_spec_v2(spec))
 
 

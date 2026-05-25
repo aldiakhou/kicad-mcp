@@ -44,9 +44,9 @@ These settings control how the server locates KiCad:
 
 The recommended way to configure the server is by creating a `.env` file in the project root:
 
-1. Copy the example file:
+1. Create the file:
    ```bash
-   cp .env.example .env
+   touch .env
    ```
 
 2. Edit the `.env` file:

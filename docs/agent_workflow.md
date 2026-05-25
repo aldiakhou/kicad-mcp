@@ -8,12 +8,14 @@ Recommended order:
 2. `find_symbols` / `find_footprints` for unknown library IDs
 3. `schematic_preview_design_intent`, when you want to inspect expansion first
 4. `schematic_apply_design_intent`
-5. `schematic_build_from_spec_v2`, only when you already have explicit parts/nets
-6. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
-7. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
-8. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
-9. `schematic_quality_report`
-10. `project_design_state`
+5. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
+6. `schematic_quality_report`
+7. `project_design_state`
+8. `schematic_build_from_spec_v2`, only when you already have explicit parts/nets
+9. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
+10. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
+
+For large schematics, prefer staged calls over one long request: run `schematic_preview_design_intent`, then `schematic_apply_design_intent`, then `export_schematic_preview`, then `schematic_quality_report`. This keeps compile, write, visual feedback, and verification work split across tool calls.
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 
