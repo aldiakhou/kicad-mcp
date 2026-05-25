@@ -406,9 +406,13 @@ def build_schematic_from_spec_v2(
 ) -> dict[str, Any]:
     """Build a schematic from the v2 parts/nets/no_connects spec format."""
     spec = _apply_default_v2_visual_layout(spec, enabled=apply_default_visual_layout)
+    normalized = normalize_build_spec_v2(spec)
+    visual_failure = _prewrite_visual_gate(project_path, normalized)
+    if visual_failure is not None:
+        return visual_failure
     return build_schematic_from_spec(
         project_path,
-        normalize_build_spec_v2(spec),
+        normalized,
         mode=mode,
         run_erc=run_erc,
         allow_destructive_replace=allow_destructive_replace,
@@ -434,9 +438,102 @@ def _apply_default_v2_visual_layout(spec: dict[str, Any], *, enabled: bool = Tru
         and layout_hints["visual_layout"].get("enabled") is False
     ):
         return spec
-    if isinstance(layout_hints, dict) and layout_hints:
+    if isinstance(layout_hints, dict) and layout_hints and not _layout_hints_allow_default_visual(layout_hints):
         return spec
     return apply_visual_layout_to_v2_spec(spec, page=str(spec.get("paper") or "A3"), style="readable")
+
+
+def _layout_hints_allow_default_visual(layout_hints: dict[str, Any]) -> bool:
+    passive_keys = {
+        "fixed_paper",
+        "max_paper",
+        "paper_strategy",
+        "visual_gate",
+        "visual_layout",
+        "label_clearance_mm",
+    }
+    return set(layout_hints).issubset(passive_keys)
+
+
+def _prewrite_visual_gate(
+    project_path: str,
+    normalized_spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    layout_hints = normalized_spec.get("layout_hints", {})
+    if not isinstance(layout_hints, dict):
+        return None
+    gate = str(layout_hints.get("visual_gate") or "strict")
+    if gate == "report_only":
+        return None
+    visual_layout = layout_hints.get("visual_layout", {})
+    if isinstance(visual_layout, dict) and visual_layout.get("layout_failed"):
+        recommended: dict[str, Any] = {}
+        paper = normalized_spec.get("paper", "A4")
+        next_paper = _next_larger_paper(str(paper))
+        if next_paper:
+            recommended["paper"] = next_paper
+            recommended["layout_hints"] = {"paper_strategy": "auto", "max_paper": "A1"}
+        return {
+            "success": False,
+            "project_path": project_path,
+            "stage": "layout_failed",
+            "error": f"Design does not fit on {paper} without overlaps",
+            "visual_layout": visual_layout,
+            "recoverable": True,
+            "recommended_next_arguments": recommended,
+        }
+    if not (isinstance(visual_layout, dict) and visual_layout.get("enabled")):
+        return None
+    if normalized_spec.get("normalization_errors"):
+        return None
+    schematic_path = project_path if project_path.endswith(".kicad_sch") else f"{project_path}.kicad_sch"
+    try:
+        schematic = _build_in_memory_schematic(schematic_path, normalized_spec)
+    except Exception:
+        return None
+    native = {"success": False, "skipped": True, "nets": {}}
+    visual = _visual_quality(schematic, schematic_path, native)
+    outside = _outside_page_symbols(schematic, schematic_path)
+    blocking_counts = {
+        "outside_page": len(outside),
+        "symbol_overlap": int(visual.get("symbol_overlap_count", 0)),
+        "label_inside_symbol": int(visual.get("label_inside_symbol_count", 0)),
+        "dangling_labels": sum(1 for item in visual.get("blocking", []) if item.get("type") == "label_not_attached"),
+        "visual_quality": int(visual.get("blocking_count", 0)),
+    }
+    if any(count > 0 for count in blocking_counts.values()):
+        recommended: dict[str, Any] = {"layout_hints": {"visual_gate": "report_only"}}
+        paper = normalized_spec.get("paper", "A4")
+        next_paper = _next_larger_paper(str(paper))
+        if next_paper:
+            recommended["paper"] = next_paper
+            recommended["layout_hints"] = {"paper_strategy": "auto", "max_paper": "A1"}
+        return {
+            "success": False,
+            "project_path": project_path,
+            "stage": "layout_failed",
+            "error": "Visual gate failed before writing schematic",
+            "visual_gate": {
+                "mode": gate,
+                "passed": False,
+                "blocking_counts": blocking_counts,
+                "symbols_outside_page": outside,
+                "visual_quality": visual,
+            },
+            "recoverable": True,
+            "recommended_next_arguments": recommended,
+        }
+    return None
+
+
+def _next_larger_paper(paper: str) -> str | None:
+    order = ["A4", "A3", "A2", "A1"]
+    if paper not in order:
+        return "A3"
+    index = order.index(paper)
+    if index >= len(order) - 1:
+        return None
+    return order[index + 1]
 
 
 def cleanup_schematic_visuals(
@@ -902,14 +999,7 @@ def schematic_quality_report(project_or_schematic_path: str, run_erc: bool = Tru
         if not str(symbol.get("reference", "")).startswith("#") and not symbol.get("footprint")
     ]
     off_grid = _off_grid_items(schematic)
-    outside = [
-        symbol["reference"]
-        for symbol in schematic.list_symbols()
-        if symbol["position"]["x"] < 0
-        or symbol["position"]["y"] < 0
-        or symbol["position"]["x"] > width
-        or symbol["position"]["y"] > height
-    ]
+    outside = _outside_page_symbols(schematic, schematic_path)
     bundle = (
         validate_schematic_batch(
             schematic_path,
@@ -1409,6 +1499,18 @@ def _compact_native_netlist(native: dict[str, Any]) -> dict[str, Any]:
     if "reason" in native:
         compact["reason"] = native.get("reason")
     return compact
+
+
+def _outside_page_symbols(schematic: KiCadSchematic, schematic_path: str) -> list[str]:
+    bounds = schematic.get_sheet_bounds()
+    width = float(bounds["width"])
+    height = float(bounds["height"])
+    outside = []
+    for symbol in schematic.list_symbols():
+        rect = _approx_symbol_rect(schematic, schematic_path, symbol)
+        if rect[0] < 0 or rect[1] < 0 or rect[2] > width or rect[3] > height:
+            outside.append(symbol["reference"])
+    return outside
 
 
 def _compact_quality_report(quality: dict[str, Any]) -> dict[str, Any]:

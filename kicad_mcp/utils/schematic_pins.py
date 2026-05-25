@@ -249,17 +249,42 @@ def _place_external_label_endpoint(
     label_side: str,
     clearance_mm: float,
 ) -> dict[str, float]:
-    direction = _direction_from_angle(angle, label_side)
+    escape_direction = _pin_escape_direction(angle, label_side)
+    label_direction = _label_direction_from_angle(angle, label_side)
     length = max(clearance_mm, 7.62)
-    base = {
-        "x": _snap(start["x"] + direction["dx"] * length),
-        "y": _snap(start["y"] + direction["dy"] * length),
-    }
-    occupied = [_label_rect(label) for label in schematic.list_labels()]
-    if not occupied:
-        return base
+    normalized = int(round(angle / 90.0) * 90) % 360
+    if normalized in {90, 270} and label_side not in {"top", "bottom"}:
+        base = {
+            "x": _snap(start["x"] + escape_direction["dx"] * length + label_direction["dx"] * length),
+            "y": _snap(start["y"] + escape_direction["dy"] * length + label_direction["dy"] * length),
+        }
+    else:
+        base = {
+            "x": _snap(start["x"] + label_direction["dx"] * length),
+            "y": _snap(start["y"] + label_direction["dy"] * length),
+        }
+    occupied = _label_placement_obstacles(schematic)
     label_angle = _readable_label_angle(angle)
-    perpendicular = {"dx": -direction["dy"], "dy": direction["dx"]}
+    page_rect = _schematic_page_rect(schematic)
+    perpendicular = {"dx": -label_direction["dy"], "dy": label_direction["dx"]}
+    for push in range(0, 8):
+        pushed_base = {
+            "x": _snap(base["x"] + label_direction["dx"] * push * SCHEMATIC_GRID_MM * 2.0),
+            "y": _snap(base["y"] + label_direction["dy"] * push * SCHEMATIC_GRID_MM * 2.0),
+        }
+        for step in range(0, 18):
+            offset = step * SCHEMATIC_GRID_MM * 2.0
+            signs = [1.0] if step == 0 else [1.0, -1.0]
+            for sign in signs:
+                candidate = {
+                    "x": _snap(pushed_base["x"] + perpendicular["dx"] * offset * sign),
+                    "y": _snap(pushed_base["y"] + perpendicular["dy"] * offset * sign),
+                }
+                candidate_rect = _text_rect(candidate, text, label_angle)
+                if not _rect_inside(candidate_rect, page_rect):
+                    continue
+                if not any(_rects_intersect(candidate_rect, rect, padding=0.5) for rect in occupied):
+                    return candidate
     for step in range(0, 18):
         offset = step * SCHEMATIC_GRID_MM * 2.0
         signs = [1.0] if step == 0 else [1.0, -1.0]
@@ -269,7 +294,7 @@ def _place_external_label_endpoint(
                 "y": _snap(base["y"] + perpendicular["dy"] * offset * sign),
             }
             candidate_rect = _text_rect(candidate, text, label_angle)
-            if not any(_rects_intersect(candidate_rect, rect, padding=0.5) for rect in occupied):
+            if _rect_inside(candidate_rect, page_rect):
                 return candidate
     return base
 
@@ -281,14 +306,15 @@ def _external_stub_points(
     label_side: str,
     clearance_mm: float,
 ) -> list[dict[str, float]]:
-    direction = _direction_from_angle(angle, label_side)
-    base = {
-        "x": _snap(start["x"] + direction["dx"] * max(clearance_mm, 7.62)),
-        "y": _snap(start["y"] + direction["dy"] * max(clearance_mm, 7.62)),
+    escape_direction = _pin_escape_direction(angle, label_side)
+    length = max(clearance_mm, 7.62)
+    knee = {
+        "x": _snap(start["x"] + escape_direction["dx"] * length),
+        "y": _snap(start["y"] + escape_direction["dy"] * length),
     }
-    if base == end:
+    if knee == end:
         return [start, end]
-    return [start, base, end]
+    return [start, knee, end]
 
 
 def _add_stub_wires(schematic: KiCadSchematic, points: list[dict[str, float]]) -> Any:
@@ -303,6 +329,10 @@ def _add_stub_wires(schematic: KiCadSchematic, points: list[dict[str, float]]) -
 
 
 def _direction_from_angle(angle: float, label_side: str) -> dict[str, float]:
+    return _pin_escape_direction(angle, label_side)
+
+
+def _pin_escape_direction(angle: float, label_side: str) -> dict[str, float]:
     if label_side == "right":
         return {"dx": 1.0, "dy": 0.0}
     if label_side == "left":
@@ -321,11 +351,59 @@ def _direction_from_angle(angle: float, label_side: str) -> dict[str, float]:
     return {"dx": 1.0, "dy": 0.0}
 
 
-def _readable_label_angle(angle: float) -> float:
+def _label_direction_from_angle(angle: float, label_side: str) -> dict[str, float]:
+    if label_side == "left":
+        return {"dx": -1.0, "dy": 0.0}
+    if label_side == "right":
+        return {"dx": 1.0, "dy": 0.0}
     normalized = int(round(angle / 90.0) * 90) % 360
     if normalized == 180:
-        return 0.0
-    return float(normalized if normalized in {0, 90, 180, 270} else 0)
+        return {"dx": -1.0, "dy": 0.0}
+    return {"dx": 1.0, "dy": 0.0}
+
+
+def _readable_label_angle(angle: float) -> float:
+    return 0.0
+
+
+def _label_placement_obstacles(schematic: KiCadSchematic) -> list[tuple[float, float, float, float]]:
+    obstacles = [_label_rect(label) for label in schematic.list_labels()]
+    for symbol in schematic.list_symbols():
+        bounds = symbol.get("bounds", {})
+        if not bounds:
+            continue
+        obstacles.append(
+            (
+                float(bounds["left"]) - 1.27,
+                float(bounds["top"]) - 1.27,
+                float(bounds["right"]) + 1.27,
+                float(bounds["bottom"]) + 1.27,
+            )
+        )
+    return obstacles
+
+
+def _schematic_page_rect(schematic: KiCadSchematic) -> tuple[float, float, float, float]:
+    bounds = schematic.get_sheet_bounds()
+    margin = 2.54
+    return (
+        margin,
+        margin,
+        float(bounds["width"]) - margin,
+        float(bounds["height"]) - margin,
+    )
+
+
+def _rect_inside(
+    inner: tuple[float, float, float, float],
+    outer: tuple[float, float, float, float],
+) -> bool:
+    return (
+        inner[0] >= outer[0]
+        and inner[1] >= outer[1]
+        and inner[2] <= outer[2]
+        and inner[3] <= outer[3]
+    )
 
 
 def _label_rect(label: dict[str, Any]) -> tuple[float, float, float, float]:
