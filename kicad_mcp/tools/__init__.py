@@ -74,6 +74,7 @@ AGENT_PROFILE_TOOLS = {
     "find_symbols",
     "find_footprints",
     "resolve_symbol",
+    "resolve_symbols",
     "resolve_footprint",
 }
 

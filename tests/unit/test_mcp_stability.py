@@ -106,6 +106,7 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "generate_validation_report" in tools
     assert "run_erc_check" in tools
     assert "resolve_symbol" in tools
+    assert "resolve_symbols" in tools
     assert "resolve_footprint" in tools
     assert "schematic_add_wire" not in tools
     assert "schematic_get_pin_map" not in tools

@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -1575,6 +1576,138 @@ async def test_resolve_symbol_flattens_inherited_pins_and_fuzzy_footprint(
     assert footprint["success"] is True
     assert footprint["resolution"] == "fuzzy"
     assert footprint["footprint_id"] == "Connector_USB:USB_Micro-B_Molex-105017-0001"
+
+
+@pytest.mark.asyncio
+async def test_resolve_symbol_compact_default_and_batch_partial_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+
+    symbol = tools["resolve_symbol"].fn("Device:R")
+    full_symbol = tools["resolve_symbol"].fn(symbol="Device:R", detail="full")
+    batch = tools["resolve_symbols"].fn(
+        symbols=[
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"symbol": "Device:Missing", "ref": "MISSING"},
+        ],
+    )
+
+    assert symbol["success"] is True
+    assert "source" not in symbol
+    assert symbol["source_omitted"] is True
+    assert symbol["pin_count"] == 2
+    assert set(symbol["pins"][0]) == {"number", "name", "pintype"}
+    assert full_symbol["success"] is True
+    assert full_symbol["source_omitted"] is False
+    assert '"Device:R"' in full_symbol["source"]
+    assert batch["success"] is True
+    assert batch["partial_success"] is True
+    assert batch["resolved_count"] == 1
+    assert batch["failed_count"] == 1
+    assert batch["results"][0]["ref"] == "R1"
+    assert batch["results"][1]["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_response_policy_writes_artifact_for_oversized_symbol_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    monkeypatch.setenv("KICAD_MCP_MAX_INLINE_BYTES", "900")
+    monkeypatch.setenv("KICAD_MCP_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    server = create_server()
+    tools = await server.get_tools()
+
+    symbol = tools["resolve_symbol"].fn(
+        "Device:R",
+        detail="full",
+        include_source=True,
+        include_pins=False,
+    )
+
+    assert symbol["success"] is True
+    assert symbol["truncated"] is True
+    assert Path(symbol["artifact_path"]).exists()
+    if "source" in symbol:
+        assert symbol["source"]["omitted"] is True
+        assert symbol["source_omitted"] is True
+        assert "source" in symbol["payload_policy"]["omitted_fields"]
+
+
+@pytest.mark.asyncio
+async def test_common_agent_parameter_aliases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+
+    project = tools["create_kicad_project"].fn(directory=str(tmp_path), project_name="alias_demo")
+    symbol = tools["resolve_symbol"].fn(symbol_id="Device:R")
+    footprint = tools["resolve_footprint"].fn(footprint="Resistor_SMD:R_0603_1608Metric")
+
+    assert project["success"] is True
+    assert symbol["success"] is True
+    assert footprint["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_parallel_resolve_symbol_stress_returns_compact_responses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_fixture_libraries(tmp_path, monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(lambda _: tools["resolve_symbol"].fn("Device:R"), range(10)))
+
+    assert len(results) == 10
+    assert all(result["success"] is True for result in results)
+    assert all("source" not in result for result in results)
+    assert all(result["pin_count"] == 2 for result in results)
+
+
+@pytest.mark.asyncio
+async def test_project_design_state_empty_project_recommends_design_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _skip_cli_validation(monkeypatch)
+    server = create_server()
+    tools = await server.get_tools()
+    project = tools["create_kicad_project"].fn(str(tmp_path), "empty_state", True, True, "A4")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools.build_quality_report",
+        lambda path, run_erc=True: {
+            "success": True,
+            "schematic_path": path,
+            "symbol_count": 0,
+            "quality_gate": {"passed": True, "blocking_counts": {}},
+            "erc": {"unacceptable_categories": {}},
+        },
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools._native_netlist_for_tool",
+        lambda path: {
+            "success": True,
+            "component_count": 0,
+            "net_count": 0,
+            "connectivity_complete": True,
+        },
+    )
+
+    state = await tools["project_design_state"].fn(path=project["project_path"], run_erc=False)
+
+    assert state["success"] is True
+    assert state["stage"] == "empty_project"
+    assert state["schematic_syntax_valid"] is True
+    assert state["schematic_complete"] is False
+    assert state["symbol_count"] == 0
+    assert state["recommended_next_tool"] == "schematic_apply_design_intent"
+    assert "pcb_sync_place_and_report" in state["tools_to_avoid_now"]
 
 
 @pytest.mark.asyncio

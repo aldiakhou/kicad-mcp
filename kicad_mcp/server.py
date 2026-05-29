@@ -6,10 +6,14 @@ import atexit
 from collections.abc import Callable
 import functools
 import inspect
+import json
 import logging
 import os
+from pathlib import Path
 import signal
+import time
 from typing import Any
+import uuid
 
 from fastmcp import FastMCP
 
@@ -53,6 +57,21 @@ DEFAULT_SSE_PATH = "/sse"
 DEFAULT_HTTP_PATH = "/mcp"
 SUPPORTED_TOOL_PROFILES = {"agent", "default", "advanced", "debug", "all"}
 DEFAULT_TOOL_PROFILE = "agent"
+DEFAULT_MAX_INLINE_BYTES = 50_000
+LARGE_RESPONSE_FIELD_NAMES = {
+    "source",
+    "diff",
+    "preview",
+    "svg",
+    "report",
+    "violations",
+    "nets",
+    "components",
+    "native_netlist",
+    "full_native_netlist",
+}
+
+
 def add_cleanup_handler(handler: Callable) -> None:
     """Register a function to be called during cleanup.
 
@@ -162,6 +181,7 @@ def create_server() -> FastMCP:
     # Register tools
     logging.info("Registering tools...")
     register_all_tools(mcp)
+    _instrument_registered_tools(mcp)
     _apply_tool_profile(mcp, get_tool_profile())
 
     # Register prompts
@@ -200,6 +220,265 @@ def create_server() -> FastMCP:
 
     logging.info("Server initialization complete")
     return mcp
+
+
+def _max_inline_bytes() -> int:
+    try:
+        return max(0, int(os.getenv("KICAD_MCP_MAX_INLINE_BYTES", str(DEFAULT_MAX_INLINE_BYTES))))
+    except ValueError:
+        return DEFAULT_MAX_INLINE_BYTES
+
+
+def _json_bytes(payload: Any) -> int:
+    return len(json.dumps(payload, default=str, ensure_ascii=False).encode("utf-8"))
+
+
+def _artifact_root_for_payload(payload: Any) -> Path:
+    configured = os.getenv("KICAD_MCP_ARTIFACT_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if isinstance(payload, dict):
+        project_path = payload.get("project_path")
+        if isinstance(project_path, str) and project_path:
+            project = Path(project_path).expanduser()
+            base = project.parent if project.suffix else project
+            return (base / ".kicad_mcp" / "artifacts").resolve()
+    return (Path.cwd() / ".kicad_mcp" / "artifacts").resolve()
+
+
+def _write_response_artifact(tool_name: str, request_id: str, payload: Any) -> Path:
+    artifact_root = _artifact_root_for_payload(payload)
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    safe_tool_name = "".join(
+        character if character.isalnum() or character in "-_" else "_" for character in tool_name
+    )
+    artifact_path = artifact_root / f"{safe_tool_name}_{request_id}.json"
+    artifact_path.write_text(
+        json.dumps(payload, default=str, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return artifact_path
+
+
+def _compact_oversized_value(
+    value: Any,
+    *,
+    artifact_path: str,
+    max_inline_bytes: int,
+    omitted_fields: list[str],
+    field_path: str,
+) -> Any:
+    try:
+        value_bytes = _json_bytes(value)
+    except TypeError:
+        return value
+    field_budget = max(4096, max_inline_bytes // 4)
+    large_field_threshold = min(1024, max(256, max_inline_bytes // 10))
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for key, child in value.items():
+            child_path = f"{field_path}.{key}" if field_path else str(key)
+            child_bytes = _json_bytes(child)
+            if str(key) in LARGE_RESPONSE_FIELD_NAMES and child_bytes > large_field_threshold:
+                omitted_fields.append(child_path)
+                compacted[key] = {
+                    "omitted": True,
+                    "bytes": child_bytes,
+                    "artifact_path": artifact_path,
+                }
+                continue
+            if child_bytes > field_budget:
+                omitted_fields.append(child_path)
+                compacted[key] = {
+                    "omitted": True,
+                    "bytes": child_bytes,
+                    "artifact_path": artifact_path,
+                }
+                continue
+            compacted[key] = _compact_oversized_value(
+                child,
+                artifact_path=artifact_path,
+                max_inline_bytes=max_inline_bytes,
+                omitted_fields=omitted_fields,
+                field_path=child_path,
+            )
+        for key in LARGE_RESPONSE_FIELD_NAMES:
+            omitted_marker = compacted.get(key)
+            if isinstance(omitted_marker, dict) and omitted_marker.get("omitted") is True:
+                compacted[f"{key}_omitted"] = True
+        return compacted
+    if isinstance(value, list) and len(value) > 25 and value_bytes > field_budget:
+        omitted_fields.append(field_path or "<list>")
+        return {
+            "omitted": True,
+            "item_count": len(value),
+            "bytes": value_bytes,
+            "artifact_path": artifact_path,
+        }
+    return value
+
+
+def _minimal_truncated_response(
+    tool_name: str,
+    payload: Any,
+    *,
+    max_inline_bytes: int,
+    original_inline_bytes: int,
+    artifact_path: str | None = None,
+    artifact_error: str | None = None,
+) -> dict[str, Any]:
+    success = payload.get("success", True) if isinstance(payload, dict) else True
+    response: dict[str, Any] = {
+        "success": success,
+        "tool": tool_name,
+        "truncated": True,
+        "payload_policy": {
+            "max_inline_bytes": max_inline_bytes,
+            "original_inline_bytes": original_inline_bytes,
+        },
+    }
+    if artifact_path:
+        response["artifact_path"] = artifact_path
+        response["payload_policy"]["artifact_path"] = artifact_path
+    if artifact_error:
+        response["payload_policy"]["artifact_error"] = artifact_error
+    return response
+
+
+def _enforce_response_policy(tool_name: str, request_id: str, payload: Any) -> Any:
+    max_inline_bytes = _max_inline_bytes()
+    if max_inline_bytes <= 0:
+        return payload
+    payload_bytes = _json_bytes(payload)
+    if payload_bytes <= max_inline_bytes:
+        return payload
+    try:
+        artifact_path = _write_response_artifact(tool_name, request_id, payload)
+    except Exception as exc:
+        logging.error(
+            "MCP tool response artifact write failed request_id=%s tool=%s error=%s",
+            request_id,
+            tool_name,
+            exc,
+            exc_info=True,
+        )
+        return _minimal_truncated_response(
+            tool_name,
+            payload,
+            max_inline_bytes=max_inline_bytes,
+            original_inline_bytes=payload_bytes,
+            artifact_error=str(exc),
+        )
+    artifact_path_text = str(artifact_path)
+    omitted_fields: list[str] = []
+    compacted = _compact_oversized_value(
+        payload,
+        artifact_path=artifact_path_text,
+        max_inline_bytes=max_inline_bytes,
+        omitted_fields=omitted_fields,
+        field_path="",
+    )
+    if isinstance(compacted, dict):
+        compacted["truncated"] = True
+        compacted["artifact_path"] = artifact_path_text
+        compacted["payload_policy"] = {
+            "max_inline_bytes": max_inline_bytes,
+            "original_inline_bytes": payload_bytes,
+            "artifact_path": artifact_path_text,
+            "omitted_fields": omitted_fields,
+        }
+        if _json_bytes(compacted) <= max_inline_bytes:
+            return compacted
+    return _minimal_truncated_response(
+        tool_name,
+        payload,
+        max_inline_bytes=max_inline_bytes,
+        original_inline_bytes=payload_bytes,
+        artifact_path=artifact_path_text,
+    )
+
+
+def _looks_like_timeout(exc: BaseException) -> bool:
+    return "timeout" in exc.__class__.__name__.lower() or "timed out" in str(exc).lower()
+
+
+def _instrument_registered_tools(mcp: FastMCP) -> None:
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(tool_manager, "_tools", {})
+    for tool_name, tool in tools.items():
+        fn = getattr(tool, "fn", None)
+        if not callable(fn) or getattr(fn, "_kicad_mcp_instrumented", False):
+            continue
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def async_wrapper(
+                *args: Any, __fn: Callable = fn, __tool_name: str = tool_name, **kwargs: Any
+            ) -> Any:
+                request_id = uuid.uuid4().hex[:12]
+                started = time.monotonic()
+                logging.info(
+                    "MCP tool request start request_id=%s tool=%s", request_id, __tool_name
+                )
+                try:
+                    result = await __fn(*args, **kwargs)
+                    result = _enforce_response_policy(__tool_name, request_id, result)
+                    duration_ms = (time.monotonic() - started) * 1000
+                    logging.info(
+                        "MCP tool request end request_id=%s tool=%s duration_ms=%.1f payload_bytes=%d",
+                        request_id,
+                        __tool_name,
+                        duration_ms,
+                        _json_bytes(result),
+                    )
+                    return result
+                except Exception as exc:
+                    duration_ms = (time.monotonic() - started) * 1000
+                    logging.exception(
+                        "MCP tool request failed request_id=%s tool=%s duration_ms=%.1f timeout=%s",
+                        request_id,
+                        __tool_name,
+                        duration_ms,
+                        _looks_like_timeout(exc),
+                    )
+                    raise
+
+            async_wrapper._kicad_mcp_instrumented = True  # type: ignore[attr-defined]
+            tool.fn = async_wrapper
+            continue
+
+        @functools.wraps(fn)
+        def sync_wrapper(
+            *args: Any, __fn: Callable = fn, __tool_name: str = tool_name, **kwargs: Any
+        ) -> Any:
+            request_id = uuid.uuid4().hex[:12]
+            started = time.monotonic()
+            logging.info("MCP tool request start request_id=%s tool=%s", request_id, __tool_name)
+            try:
+                result = __fn(*args, **kwargs)
+                result = _enforce_response_policy(__tool_name, request_id, result)
+                duration_ms = (time.monotonic() - started) * 1000
+                logging.info(
+                    "MCP tool request end request_id=%s tool=%s duration_ms=%.1f payload_bytes=%d",
+                    request_id,
+                    __tool_name,
+                    duration_ms,
+                    _json_bytes(result),
+                )
+                return result
+            except Exception as exc:
+                duration_ms = (time.monotonic() - started) * 1000
+                logging.exception(
+                    "MCP tool request failed request_id=%s tool=%s duration_ms=%.1f timeout=%s",
+                    request_id,
+                    __tool_name,
+                    duration_ms,
+                    _looks_like_timeout(exc),
+                )
+                raise
+
+        sync_wrapper._kicad_mcp_instrumented = True  # type: ignore[attr-defined]
+        tool.fn = sync_wrapper
 
 
 def setup_signal_handlers() -> None:
