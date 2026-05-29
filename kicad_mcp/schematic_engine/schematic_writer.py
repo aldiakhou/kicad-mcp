@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from typing import Any
+import uuid
 
 from kicad_mcp.schematic_engine.models import (
     CanonicalCircuit,
@@ -95,7 +95,6 @@ class SchematicWriter:
         """Write schematics using KiUtils library."""
         try:
             from kiutils.schematic import Schematic
-            from kiutils.items.common import Position
 
             generated_files: list[str] = []
 
@@ -164,8 +163,8 @@ class SchematicWriter:
     ) -> None:
         """Add a symbol to a KiUtils schematic."""
         try:
-            from kiutils.items.schitems import SchematicSymbol
             from kiutils.items.common import Position, Property
+            from kiutils.items.schitems import SchematicSymbol
 
             symbol = SchematicSymbol()
             symbol.libId = part.lib_id
@@ -208,8 +207,8 @@ class SchematicWriter:
     ) -> None:
         """Add net labels to a KiUtils schematic."""
         try:
-            from kiutils.items.schitems import NetLabel, GlobalLabel
             from kiutils.items.common import Position
+            from kiutils.items.schitems import GlobalLabel, NetLabel
 
             ref_set = set(refs)
             placed_labels: set[str] = set()
@@ -265,8 +264,8 @@ class SchematicWriter:
     ) -> None:
         """Add hierarchical sheet symbols to root schematic."""
         try:
-            from kiutils.items.schitems import HierarchicalSheet
             from kiutils.items.common import Position
+            from kiutils.items.schitems import HierarchicalSheet
 
             x_offset = 50.0
             y_offset = 50.0
@@ -384,7 +383,7 @@ class SchematicWriter:
                 placed_labels.add(ep.net)
 
         # Add no-connect markers
-        for nc_ref, nc_pin in canonical.no_connects:
+        for nc_ref, _nc_pin in canonical.no_connects:
             if nc_ref in ref_set:
                 placement = sheet_plan.placements.get(nc_ref)
                 if placement:
@@ -417,18 +416,18 @@ class SchematicWriter:
             y = y_offset + (i // 3) * (sheet_h + gap)
             sheet_uuid = uuid.uuid4()
             lines.append(f"  (sheet (at {x:.2f} {y:.2f}) (size {sheet_w:.2f} {sheet_h:.2f})")
-            lines.append(f'    (stroke (width 0.001) (type solid) (color 0 0 0 1))')
-            lines.append(f'    (fill (color 255 255 255 1))')
+            lines.append('    (stroke (width 0.001) (type solid) (color 0 0 0 1))')
+            lines.append('    (fill (color 255 255 255 1))')
             lines.append(f'    (uuid "{sheet_uuid}")')
             lines.append(f'    (property "Sheetname" "{sheet_name}"')
             lines.append(f'      (at {x + 1:.2f} {y - 1:.2f} 0)')
-            lines.append(f"      (effects (font (size 1.27 1.27)))")
-            lines.append(f"    )")
+            lines.append("      (effects (font (size 1.27 1.27)))")
+            lines.append("    )")
             lines.append(f'    (property "Sheetfile" "{sheet_name}.kicad_sch"')
             lines.append(f'      (at {x + 1:.2f} {y + sheet_h + 1:.2f} 0)')
-            lines.append(f"      (effects (font (size 1.27 1.27)))")
-            lines.append(f"    )")
-            lines.append(f"  )")
+            lines.append("      (effects (font (size 1.27 1.27)))")
+            lines.append("    )")
+            lines.append("  )")
 
         lines.append(")")
         return "\n".join(lines)
@@ -445,29 +444,29 @@ class SchematicWriter:
         # Properties
         lines.append(f'    (property "Reference" "{part.ref}"')
         lines.append(f'      (at {placement.x:.2f} {placement.y - 2.54:.2f} 0)')
-        lines.append(f"      (effects (font (size 1.27 1.27)))")
-        lines.append(f"    )")
+        lines.append("      (effects (font (size 1.27 1.27)))")
+        lines.append("    )")
 
         lines.append(f'    (property "Value" "{part.value}"')
         lines.append(f'      (at {placement.x:.2f} {placement.y + 2.54:.2f} 0)')
-        lines.append(f"      (effects (font (size 1.27 1.27)))")
-        lines.append(f"    )")
+        lines.append("      (effects (font (size 1.27 1.27)))")
+        lines.append("    )")
 
         if part.footprint:
             lines.append(f'    (property "Footprint" "{part.footprint}"')
             lines.append(f'      (at {placement.x:.2f} {placement.y + 5.08:.2f} 0)')
-            lines.append(f"      (effects (font (size 1.27 1.27)) hide)")
-            lines.append(f"    )")
+            lines.append("      (effects (font (size 1.27 1.27)) hide)")
+            lines.append("    )")
 
         # MCP metadata
         for key, value in part.properties.items():
             if key.startswith("KICAD_MCP_"):
                 lines.append(f'    (property "{key}" "{value}"')
                 lines.append(f'      (at {placement.x:.2f} {placement.y:.2f} 0)')
-                lines.append(f"      (effects (font (size 1.27 1.27)) hide)")
-                lines.append(f"    )")
+                lines.append("      (effects (font (size 1.27 1.27)) hide)")
+                lines.append("    )")
 
-        lines.append(f"  )")
+        lines.append("  )")
         return "\n".join(lines)
 
     def _label_sexpr(

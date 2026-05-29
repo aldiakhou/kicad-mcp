@@ -6,10 +6,10 @@ generated schematics. All commands are executed through SecureSubprocessRunner.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import logging
 import os
-from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -177,7 +177,7 @@ class KicadCliVerifier:
     def _parse_erc_result(self, erc_path: str) -> dict[str, Any]:
         """Parse ERC JSON result file."""
         try:
-            with open(erc_path, "r", encoding="utf-8") as f:
+            with open(erc_path, encoding="utf-8") as f:
                 data = json.load(f)
 
             violations = data.get("violations", [])

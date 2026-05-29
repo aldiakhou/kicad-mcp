@@ -16,7 +16,6 @@ from kicad_mcp.schematic_engine.models import (
     CircuitPart,
 )
 
-
 # Default footprints for common passives when not specified
 _PASSIVE_FOOTPRINT_DEFAULTS: dict[str, str] = {
     "R": "Resistor_SMD:R_0402_1005Metric",

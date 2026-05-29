@@ -8,16 +8,15 @@ Requires optional dependency: skidl>=2.2.3
 
 from __future__ import annotations
 
+from collections import defaultdict
+from dataclasses import dataclass, field
 import json
 import logging
 import os
-from collections import defaultdict
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from kicad_mcp.schematic_engine.library_map import resolve_lib_id
-from kicad_mcp.schematic_engine.models import CanonicalCircuit, NormalizedNetlist, NetlistEntry
+from kicad_mcp.schematic_engine.models import CanonicalCircuit, NetlistEntry, NormalizedNetlist
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +72,15 @@ class SkidlCompiler:
             SkidlCompileResult with expected netlist and diagnostics.
         """
         if _SKIDL_AVAILABLE:
-            return self._compile_with_skidl(canonical)
+            result = self._compile_with_skidl(canonical)
+            # If SKiDL failed due to library issues, fall back to pure-Python
+            if not result.success and any(
+                "Can't open" in e or "not found" in e or "import" in e.lower()
+                for e in result.erc_errors
+            ):
+                logger.info("SKiDL library loading failed, using fallback compiler")
+                return self._compile_fallback(canonical)
+            return result
         return self._compile_fallback(canonical)
 
     def _compile_fallback(self, canonical: CanonicalCircuit) -> SkidlCompileResult:
@@ -113,7 +120,8 @@ class SkidlCompiler:
     def _compile_with_skidl(self, canonical: CanonicalCircuit) -> SkidlCompileResult:
         """Compile using SKiDL for full ERC and netlist generation."""
         try:
-            from skidl import Circuit, Net, Part, ERC as run_erc, KICAD8
+            from skidl import ERC as run_erc
+            from skidl import KICAD8, Circuit, Net, Part
 
             circuit = Circuit()
             parts_by_ref: dict[str, Any] = {}
@@ -122,6 +130,7 @@ class SkidlCompiler:
             erc_errors: list[str] = []
 
             # Create parts
+            parts_failed = 0
             for part_def in canonical.parts:
                 lib, name = resolve_lib_id(part_def.lib_id)
                 try:
@@ -135,10 +144,21 @@ class SkidlCompiler:
                     )
                     parts_by_ref[part_def.ref] = skidl_part
                 except Exception as e:
+                    parts_failed += 1
                     erc_warnings.append(
                         f"Could not create SKiDL part {part_def.ref} "
                         f"({part_def.lib_id}): {e}"
                     )
+
+            # If most parts failed to load, SKiDL libraries are not available
+            # Fall back to pure-Python netlist generation
+            if parts_failed > 0 and parts_failed >= len(canonical.parts) * 0.5:
+                return SkidlCompileResult(
+                    success=False,
+                    error="SKiDL library loading failed for most parts",
+                    erc_errors=["Part not found" for _ in range(parts_failed)],
+                    erc_warnings=erc_warnings,
+                )
 
             # Create nets and connect endpoints
             for endpoint in canonical.endpoints:

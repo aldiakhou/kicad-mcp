@@ -189,8 +189,17 @@ module = [
     "kicad_mcp.utils.netlist_parser",
     "kicad_mcp.utils.pattern_recognition",
     "kicad_mcp.utils.secure_subprocess",
+    "kicad_mcp.schematic_engine.*",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "skidl.*",
+    "kiutils.*",
+    "kicad_skip.*",
+]
+ignore_missing_imports = true
 
 
 [tool.pytest.ini_options]

@@ -27,7 +27,6 @@ from kicad_mcp.schematic_engine.expected_netlist import (
     parse_kicad_netlist,
 )
 from kicad_mcp.schematic_engine.kicad_cli_verifier import KicadCliVerifier
-from kicad_mcp.schematic_engine.models import CanonicalCircuit
 from kicad_mcp.schematic_engine.normalize import normalize_design_intent
 from kicad_mcp.schematic_engine.result import EngineResult
 from kicad_mcp.schematic_engine.schematic_writer import SchematicWriter

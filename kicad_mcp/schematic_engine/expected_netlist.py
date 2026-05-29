@@ -121,7 +121,7 @@ def parse_kicad_netlist(netlist_path: str) -> NormalizedNetlist:
         NormalizedNetlist with all nets and their endpoints.
     """
     try:
-        with open(netlist_path, "r", encoding="utf-8") as f:
+        with open(netlist_path, encoding="utf-8") as f:
             content = f.read()
         return _parse_sexpr_netlist(content)
     except Exception as e:
@@ -139,7 +139,7 @@ def load_expected_netlist(path: str) -> NormalizedNetlist:
         NormalizedNetlist.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         nets_data = data.get("nets", data)
         return NormalizedNetlist.from_dict(nets_data)
@@ -190,18 +190,44 @@ def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
     """
     nets: dict[str, set[NetlistEntry]] = {}
 
-    # Find all net blocks
-    net_pattern = re.compile(
-        r'\(net\s+\(code\s+\d+\)\s+\(name\s+"([^"]+)"\)(.*?)\)',
-        re.DOTALL,
+    # Find net blocks by matching balanced parentheses
+    net_start_pattern = re.compile(
+        r'\(net\s+\(code\s+\d+\)\s+\(name\s+"([^"]+)"\)',
     )
     node_pattern = re.compile(
         r'\(node\s+\(ref\s+"([^"]+)"\)\s+\(pin\s+"([^"]+)"\)',
     )
 
-    for net_match in net_pattern.finditer(content):
-        net_name = net_match.group(1)
-        net_body = net_match.group(2)
+    for match in net_start_pattern.finditer(content):
+        net_name = match.group(1)
+        # Extract the body after the name match until we find the matching close paren
+        start_pos = match.start()
+        body_start = match.end()
+
+        # Count parentheses to find the end of this net block
+        depth = 1
+        pos = body_start
+        # We start inside the (net ...) block, find its end
+        # First count the opening paren at start
+        for i in range(start_pos, body_start):
+            if content[i] == '(':
+                depth += 1
+            elif content[i] == ')':
+                depth -= 1
+
+        # Now find the matching close of the (net block
+        # Actually we need to start fresh: the net_start matched the opening (net
+        # so depth should be 1 (we're inside the net block)
+        depth = 1
+        pos = body_start
+        while pos < len(content) and depth > 0:
+            if content[pos] == '(':
+                depth += 1
+            elif content[pos] == ')':
+                depth -= 1
+            pos += 1
+
+        net_body = content[body_start:pos]
 
         entries: set[NetlistEntry] = set()
         for node_match in node_pattern.finditer(net_body):
