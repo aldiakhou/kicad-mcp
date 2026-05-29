@@ -8,6 +8,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from difflib import unified_diff
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ from kicad_mcp.utils.kicad_s_expr import (
 from kicad_mcp.utils.path_validator import (
     PathValidationError,
     PathValidator,
+    get_application_temp_root,
     get_configured_trusted_roots,
     get_configured_validator,
     validate_configured_directory,
@@ -44,9 +46,14 @@ class TransactionalEditError(RuntimeError):
 
 @contextmanager
 def transactional_file_lock(file_path: str):
-    """Serialize transactional writers for one target file across processes."""
-    target = Path(file_path)
-    lock_path = target.parent / f".{target.name}.lock"
+    """Serialize transactional writers for one target file across processes.
+
+    The lock marker lives in KiCad MCP's private temp area, not in the project
+    directory. It is intentionally reused rather than unlinked on every unlock:
+    removing lock files is racy when another process already has the old lock
+    file open or is waiting on it.
+    """
+    lock_path = _transactional_lock_path(file_path)
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         if os.name == "nt":
@@ -74,6 +81,18 @@ def transactional_file_lock(file_path: str):
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def _transactional_lock_path(file_path: str | Path) -> Path:
+    target_key = os.path.normcase(os.path.realpath(os.path.expanduser(str(file_path))))
+    digest = hashlib.sha256(target_key.encode("utf-8", "surrogatepass")).hexdigest()
+    lock_dir = Path(get_application_temp_root()) / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(lock_dir, 0o700)
+    except OSError:
+        pass
+    return lock_dir / f"{digest}.lock"
 
 
 def atomic_write_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:

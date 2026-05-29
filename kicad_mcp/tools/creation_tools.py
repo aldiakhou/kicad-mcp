@@ -2066,6 +2066,7 @@ def _native_dry_run_design_intent(
             return {
                 "mode": "native",
                 "success": bool(built.get("success")),
+                "stage": built.get("stage"),
                 "changed_original": False,
                 "temp_project_path": temp_project,
                 "native_verification": native,
@@ -2660,7 +2661,7 @@ def _schematic_apply_expanded_spec_response(
     response: dict[str, Any] = {
         "success": bool(built.get("success")),
         "tool": "schematic_apply_expanded_spec",
-        "stage": "schematic_built" if built.get("success") else "build_failed",
+        "stage": "schematic_built" if built.get("success") else built.get("stage", "build_failed"),
         "project_path": project_path,
         "expanded_spec_path": resolved_path,
         "mode": mode,
@@ -2991,7 +2992,7 @@ def _schematic_design_intent_response(
         apply_default_visual_layout=visual_layout,
         run_cli_validation=run_cli_validation,
     )
-    base["stage"] = "schematic_built" if built.get("success") else "build_failed"
+    base["stage"] = "schematic_built" if built.get("success") else built.get("stage", "build_failed")
     base["success"] = bool(built.get("success"))
     base["changed"] = bool(built.get("success"))
     if not built.get("success"):

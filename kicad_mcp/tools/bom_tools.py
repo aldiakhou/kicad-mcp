@@ -243,8 +243,10 @@ def register_bom_tools(mcp: FastMCP) -> None:
         # Try to export BOM
         # This will depend on KiCad's command-line tools or Python modules
         export_result = {"success": False}
+        tried_internal_parser = False
 
         if kicad_modules_available:
+            tried_internal_parser = True
             try:
                 if ctx:
                     await ctx.info("Attempting to export BOM using the internal schematic parser...")
@@ -271,7 +273,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
                     await ctx.info(f"Error using command-line tools: {str(e)}")
                 export_result = {"success": False, "error": str(e)}
 
-        if not export_result.get("success", False):
+        if not export_result.get("success", False) and not tried_internal_parser:
             try:
                 if ctx:
                     await ctx.info("Attempting to export BOM using the internal schematic parser...")

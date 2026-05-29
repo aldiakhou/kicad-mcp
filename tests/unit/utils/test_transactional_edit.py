@@ -11,6 +11,7 @@ from kicad_mcp.utils.transactional_edit import (
     backup_project_files,
     get_file_diff_against_backup,
     restore_backup_manifest,
+    transactional_file_lock,
     validate_local_path,
     validate_schematic_file_safely,
 )
@@ -56,6 +57,25 @@ def test_apply_transactional_schematic_edit_creates_backup_and_diff(tmp_path: Pa
     diff_result = get_file_diff_against_backup(str(schematic_path), result["backup_path"])
     assert diff_result["success"] is True
     assert "@@" in diff_result["diff"]
+
+
+def test_transactional_file_lock_uses_private_temp_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import kicad_mcp.utils.path_validator as path_validator
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    schematic_path = project_dir / "demo.kicad_sch"
+    schematic_path.write_text("(kicad_sch)", encoding="utf-8")
+    monkeypatch.setattr(path_validator.tempfile, "gettempdir", lambda: str(tmp_path / "system_tmp"))
+
+    with transactional_file_lock(str(schematic_path)):
+        assert not (project_dir / ".demo.kicad_sch.lock").exists()
+
+    private_lock_dir = Path(path_validator.get_application_temp_root()) / "locks"
+    assert list(private_lock_dir.glob("*.lock"))
+    assert not (project_dir / ".demo.kicad_sch.lock").exists()
 
 
 def test_apply_transactional_schematic_edit_rolls_back_on_failed_validation(

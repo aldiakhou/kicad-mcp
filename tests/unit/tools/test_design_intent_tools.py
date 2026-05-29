@@ -417,6 +417,55 @@ def test_schematic_apply_design_intent_quick_apply_skips_expensive_post_steps(
     assert "schematic_preview" not in result
 
 
+def test_schematic_apply_design_intent_preserves_visual_gate_failure_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        creation_tools,
+        "compile_design_intent",
+        lambda project_path, intent, strict=False: {
+            "success": True,
+            "expanded_spec": {"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}},
+            "summary": {},
+            "generated_refs": {},
+            "warnings": [],
+            "errors": [],
+            "expanded_spec_path": str(tmp_path / "expanded.json"),
+        },
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_schematic_from_spec_v2",
+        lambda *args, **kwargs: {
+            "success": False,
+            "stage": "visual_gate_error",
+            "error": "Visual gate preview failed before write: preview failed",
+            "visual_gate": {"passed": False},
+            "recoverable": True,
+        },
+    )
+
+    result = creation_tools._schematic_design_intent_response(
+        str(tmp_path),
+        {},
+        mode="update",
+        dry_run=False,
+        strict=False,
+        detail="compact",
+        include_expanded_spec=False,
+        tool_name="schematic_apply_design_intent",
+        quick_apply=True,
+        include_preview=False,
+        run_quality_report=False,
+        run_native_validation=False,
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "visual_gate_error"
+    assert result["visual_gate"] == {"passed": False}
+    assert result["build_result_summary"]["stage"] == "visual_gate_error"
+
+
 def test_schematic_apply_design_intent_unsafe_fast_apply_skips_cli_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -630,6 +679,43 @@ def test_schematic_apply_expanded_spec_unsafe_fast_apply_skips_cli_validation(
     assert result["success"] is True
     assert result["post_steps"]["run_cli_validation"] is False
     assert captured["kwargs"]["run_cli_validation"] is False
+
+
+def test_schematic_apply_expanded_spec_preserves_visual_gate_failure_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        creation_tools,
+        "build_schematic_from_spec_v2",
+        lambda *args, **kwargs: {
+            "success": False,
+            "stage": "visual_gate_error",
+            "error": "Visual gate preview failed before write: preview failed",
+            "visual_gate": {"passed": False},
+            "recoverable": True,
+        },
+    )
+
+    result = creation_tools._schematic_apply_expanded_spec_response(
+        str(tmp_path),
+        expanded_spec_path=None,
+        spec={"parts": [], "nets": {}, "no_connects": [], "layout_hints": {}},
+        mode="update",
+        strict=False,
+        detail="compact",
+        quick_apply=True,
+        include_preview=False,
+        run_quality_report=False,
+        run_native_validation=False,
+        run_cli_validation=True,
+        unsafe_fast_apply=False,
+        visual_layout=True,
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "visual_gate_error"
+    assert result["visual_gate"] == {"passed": False}
+    assert result["build_result_summary"]["stage"] == "visual_gate_error"
 
 
 def test_large_design_preview_recommends_staged_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

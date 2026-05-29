@@ -280,6 +280,36 @@ def test_v2_builder_forwards_cli_validation_toggle(monkeypatch):
     assert captured["kwargs"]["run_cli_validation"] is False
 
 
+def test_v2_builder_visual_gate_preview_error_returns_structured_failure(monkeypatch):
+    def fail_preview_build(*_args, **_kwargs):
+        raise RuntimeError("preview failed")
+
+    def fail_write(*_args, **_kwargs):
+        raise AssertionError("build_schematic_from_spec should not write after visual gate failure")
+
+    monkeypatch.setattr(schematic_builder, "_build_in_memory_schematic", fail_preview_build)
+    monkeypatch.setattr(schematic_builder, "build_schematic_from_spec", fail_write)
+
+    result = schematic_builder.build_schematic_from_spec_v2(
+        "demo.kicad_pro",
+        {
+            "custom_parts": [
+                {
+                    "ref": "U1",
+                    "value": "IC",
+                    "pins": [{"number": "1", "name": "A"}, {"number": "2", "name": "B"}],
+                }
+            ],
+            "nets": {},
+            "layout_hints": {"visual_gate": "strict", "visual_layout": {"enabled": True}},
+        },
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "visual_gate_error"
+    assert result["visual_gate"]["passed"] is False
+
+
 def test_v2_normalizer_rejects_unit_name_without_lib_id():
     normalized = normalize_build_spec_v2(
         {"parts": [{"ref": "R1", "symbol": "R_1_1"}], "nets": {}}
