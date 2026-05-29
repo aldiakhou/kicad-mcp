@@ -313,7 +313,7 @@ def _normalize_crystal(
     pins = spec.get("pins", ["PF0", "PF1"])
     ground = spec.get("ground", "GND")
 
-    # Try Device:Crystal_GND2 first, fall back to Device:Crystal
+    # Try Device:Crystal_GND24 first, fall back to Device:Crystal
     crystal_lib_id = spec.get("lib_id", "Device:Crystal_GND24")
     use_grounded = "GND" in crystal_lib_id
 

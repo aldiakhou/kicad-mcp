@@ -205,19 +205,8 @@ def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
         body_start = match.end()
 
         # Count parentheses to find the end of this net block
-        depth = 1
-        pos = body_start
-        # We start inside the (net ...) block, find its end
-        # First count the opening paren at start
-        for i in range(start_pos, body_start):
-            if content[i] == '(':
-                depth += 1
-            elif content[i] == ')':
-                depth -= 1
-
-        # Now find the matching close of the (net block
-        # Actually we need to start fresh: the net_start matched the opening (net
-        # so depth should be 1 (we're inside the net block)
+        # Find the matching close of the (net block
+        # depth=1 because we're inside the net block after its opening paren
         depth = 1
         pos = body_start
         while pos < len(content) and depth > 0:

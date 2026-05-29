@@ -70,3 +70,7 @@ fp-info-cache
 *.kicad_sch.lck
 *.kicad_pcb.lck
 *.kicad_pro.lck
+
+# SKiDL/test artifacts
+*.erc
+*_sklib.py
