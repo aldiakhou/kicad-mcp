@@ -322,18 +322,21 @@ def test_extract_netlist_ignores_embedded_library_symbols(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_extract_schematic_netlist_reports_missing_file_via_async_ctx(monkeypatch):
+async def test_extract_schematic_netlist_reports_missing_file_via_async_ctx(
+    monkeypatch, tmp_path: Path
+):
     """Async tool paths should await ctx.info instead of leaking un-awaited coroutines."""
     monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "all")
     server = create_server()
     tools = await server.get_tools()
     fake_ctx = FakeContext()
-    missing_path = "/tmp/does-not-exist.kicad_sch"
+    missing_path = tmp_path / "does-not-exist.kicad_sch"
 
-    result = await tools["extract_schematic_netlist"].fn(missing_path, fake_ctx)
+    result = await tools["extract_schematic_netlist"].fn(str(missing_path), fake_ctx)
 
-    assert result == {"success": False, "error": f"Schematic file not found: {missing_path}"}
-    assert fake_ctx.info_messages == [f"Schematic file not found: {missing_path}"]
+    assert result["success"] is False
+    assert "does not exist" in result["error"]
+    assert fake_ctx.info_messages == ["Schematic file not found or is outside trusted roots"]
 
 
 @pytest.mark.asyncio
@@ -366,7 +369,10 @@ async def test_run_drc_via_cli_uses_explicit_timeout(monkeypatch, tmp_path: Path
         output_path.write_text(json.dumps({"violations": []}), encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
+    monkeypatch.setattr(
+        "kicad_mcp.utils.secure_subprocess.get_kicad_cli_path",
+        lambda required=True: str(tmp_path / "kicad-cli.exe"),
+    )
     monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_run)
 
     result = await run_drc_via_cli(str(board), None, timeout_seconds=12.5)
@@ -389,7 +395,10 @@ async def test_run_drc_via_cli_uses_env_timeout(monkeypatch, tmp_path: Path):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setenv("KICAD_DRC_TIMEOUT", "88")
-    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
+    monkeypatch.setattr(
+        "kicad_mcp.utils.secure_subprocess.get_kicad_cli_path",
+        lambda required=True: str(tmp_path / "kicad-cli.exe"),
+    )
     monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_run)
 
     result = await run_drc_via_cli(str(board), None)
@@ -407,7 +416,10 @@ async def test_run_drc_via_cli_reports_timeout(monkeypatch, tmp_path: Path):
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         raise subprocess.TimeoutExpired(cmd, timeout)
 
-    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
+    monkeypatch.setattr(
+        "kicad_mcp.utils.secure_subprocess.get_kicad_cli_path",
+        lambda required=True: str(tmp_path / "kicad-cli.exe"),
+    )
     monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_run)
 
     result = await run_drc_via_cli(str(board), None, timeout_seconds=1)
@@ -500,18 +512,20 @@ def test_get_kicad_cli_path_can_return_none_when_not_required(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_find_component_connections_marks_results_as_inferred(monkeypatch):
+async def test_find_component_connections_marks_results_as_inferred(monkeypatch, tmp_path: Path):
     """Connection lookup should expose incomplete connectivity explicitly."""
     monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "all")
     server = create_server()
     tools = await server.get_tools()
     fake_ctx = FakeContext()
-    project_path = Path("/tmp/test-project.kicad_pro")
+    project_path = tmp_path / "test-project.kicad_pro"
     project_path.write_text("{}")
+    schematic_path = tmp_path / "demo.kicad_sch"
+    schematic_path.write_text("(kicad_sch)", encoding="utf-8")
 
     monkeypatch.setattr(
         "kicad_mcp.tools.netlist_tools.get_project_files",
-        lambda path: {"schematic": "/tmp/demo.kicad_sch"},
+        lambda path: {"schematic": str(schematic_path)},
     )
     monkeypatch.setattr(
         "kicad_mcp.tools.netlist_tools.extract_netlist",

@@ -228,7 +228,20 @@ class BoundaryValidator:
 
             # Handle position as tuple or list
             if isinstance(position, list | tuple) and len(position) >= 2:
-                x, y = float(position[0]), float(position[1])
+                try:
+                    x, y = float(position[0]), float(position[1])
+                except (TypeError, ValueError):
+                    issues.append(
+                        ValidationIssue(
+                            severity=ValidationSeverity.ERROR,
+                            component_ref=component_ref,
+                            message=f"Component {component_ref} has non-numeric position: {position}",
+                            position=(0, 0),
+                            component_type=component_type,
+                        )
+                    )
+                    out_of_bounds_count += 1
+                    continue
             else:
                 issues.append(
                     ValidationIssue(

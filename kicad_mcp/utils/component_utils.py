@@ -19,22 +19,24 @@ def extract_voltage_from_regulator(value: str) -> str:
     # LDOs often have voltage in the part number, like LM1117-3.3
 
     # 78xx/79xx series
-    match = re.search(r'78(\d\d)|79(\d\d)', value, re.IGNORECASE)
+    match = re.search(r'(?:LM|MC|L)?(78|79)(\d\d)', value, re.IGNORECASE)
     if match:
-        group = match.group(1) or match.group(2)
+        series = match.group(1)
+        group = match.group(2)
         # Convert code to voltage (e.g., 05 -> 5V, 12 -> 12V)
         try:
             voltage = int(group)
-            # For 78xx series, voltage code is directly in volts
+            # For 78xx/79xx series, voltage code is directly in volts; 79xx is negative.
             if voltage < 50:  # Sanity check to prevent weird values
-                return f"{voltage}V"
+                sign = "-" if series == "79" else ""
+                return f"{sign}{voltage}V"
         except ValueError:
             pass
 
     # Look for common voltage indicators in the string
     voltage_patterns = [
+        r'(-\d+\.?\d*)V',  # -5V, -12V, etc. (for negative regulators)
         r'(\d+\.?\d*)V',  # 3.3V, 5V, etc.
-        r'-(\d+\.?\d*)V',  # -5V, -12V, etc. (for negative regulators)
         r'(\d+\.?\d*)[_-]?V',  # 3.3_V, 5-V, etc.
         r'[_-](\d+\.?\d*)',  # LM1117-3.3, LD1117-3.3, etc.
     ]
@@ -44,7 +46,7 @@ def extract_voltage_from_regulator(value: str) -> str:
         if match:
             try:
                 voltage = float(match.group(1))
-                if 0 < voltage < 50:  # Sanity check
+                if -50 < voltage < 50 and voltage != 0:  # Sanity check
                     # Format as integer if it's a whole number
                     if voltage.is_integer():
                         return f"{int(voltage)}V"
@@ -154,22 +156,6 @@ def extract_resistance_value(value: str) -> tuple[float | None, str | None]:
     Returns:
         Tuple of (numeric value, unit) or (None, None) if parsing fails
     """
-    # Common resistance patterns
-    # 10k, 4.7k, 100R, 1M, 10, etc.
-    match = re.search(r'(\d+\.?\d*)([kKmMrRΩ]?)', value)
-    if match:
-        try:
-            resistance = float(match.group(1))
-            unit = match.group(2).upper() if match.group(2) else "Ω"
-
-            # Normalize unit
-            if unit == "R" or unit == "":
-                unit = "Ω"
-
-            return resistance, unit
-        except ValueError:
-            pass
-
     # Handle special case like "4k7" (means 4.7k)
     match = re.search(r'(\d+)[kKmM](\d+)', value)
     if match:
@@ -178,6 +164,25 @@ def extract_resistance_value(value: str) -> tuple[float | None, str | None]:
             value2 = int(match.group(2))
             resistance = float(f"{value1}.{value2}")
             unit = "k" if "k" in value.lower() else "M" if "m" in value.lower() else "Ω"
+
+            return resistance, unit
+        except ValueError:
+            pass
+
+    # Common resistance patterns
+    # 10k, 4.7k, 100R, 1M, 10, etc.
+    match = re.search(r'(\d+\.?\d*)([kKmMrRΩ]?)', value)
+    if match:
+        try:
+            resistance = float(match.group(1))
+            raw_unit = match.group(2) if match.group(2) else "Ω"
+            unit = raw_unit.upper()
+
+            # Normalize unit
+            if unit == "R" or unit == "":
+                unit = "Ω"
+            elif unit == "K":
+                unit = "k"
 
             return resistance, unit
         except ValueError:
@@ -312,9 +317,9 @@ def format_resistance(resistance: float, unit: str) -> str:
     """
     if unit == "Ω":
         return f"{resistance:.0f}Ω" if resistance.is_integer() else f"{resistance}Ω"
-    elif unit == "k":
+    elif unit.lower() == "k":
         return f"{resistance:.0f}kΩ" if resistance.is_integer() else f"{resistance}kΩ"
-    elif unit == "M":
+    elif unit.upper() == "M":
         return f"{resistance:.0f}MΩ" if resistance.is_integer() else f"{resistance}MΩ"
     else:
         return f"{resistance}{unit}"

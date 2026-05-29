@@ -5,11 +5,13 @@ Transactional editing helpers for safe KiCad schematic modifications.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from difflib import unified_diff
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any, cast
@@ -25,6 +27,8 @@ from kicad_mcp.utils.kicad_s_expr import (
 from kicad_mcp.utils.path_validator import (
     PathValidationError,
     PathValidator,
+    get_configured_trusted_roots,
+    get_configured_validator,
     validate_configured_directory,
     validate_configured_kicad_file,
 )
@@ -36,6 +40,126 @@ BACKUP_METADATA_NAME = "backup_manifest.json"
 
 class TransactionalEditError(RuntimeError):
     """Raised when a transactional schematic edit fails."""
+
+
+@contextmanager
+def transactional_file_lock(file_path: str):
+    """Serialize transactional writers for one target file across processes."""
+    target = Path(file_path)
+    lock_path = target.parent / f".{target.name}.lock"
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.path.getsize(lock_path) == 0:
+                os.write(fd, b"0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def atomic_write_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Write text to a same-directory temp file and atomically replace the target."""
+    target = Path(file_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(target.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+        _fsync_directory(target.parent)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _atomic_copy2(source: str, destination: str) -> None:
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".restore.tmp",
+        dir=str(target.parent),
+    )
+    os.close(fd)
+    try:
+        shutil.copy2(source, temp_name)
+        os.replace(temp_name, destination)
+        _fsync_directory(target.parent)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    if os.name == "nt" or not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sanitize_message(message: Any) -> str:
+    """Redact host-specific absolute paths from user-facing diagnostics."""
+    text = "" if message is None else str(message)
+    replacements = []
+    for label, path in (
+        ("<workspace>", os.getcwd()),
+        ("<home>", str(Path.home())),
+        ("<temp>", tempfile.gettempdir()),
+    ):
+        replacements.append((path, label))
+    for root in get_configured_trusted_roots():
+        replacements.append((root, "<trusted_root>"))
+
+    sanitized = text
+    for raw_path, label in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        if not raw_path:
+            continue
+        normalized = os.path.realpath(os.path.expanduser(raw_path))
+        variants = {normalized, normalized.replace("\\", "/"), normalized.replace("/", "\\")}
+        for variant in variants:
+            sanitized = sanitized.replace(variant, label)
+    home = str(Path.home())
+    if home:
+        sanitized = sanitized.replace(home.replace("\\", "/"), "~")
+        sanitized = sanitized.replace(home.replace("/", "\\"), "~")
+    return re.sub(r"\s+$", "", sanitized)
 
 
 def validate_local_path(file_path: str, file_type: str, must_exist: bool = True) -> str:
@@ -56,7 +180,7 @@ def validate_schematic_file_safely(schematic_path: str) -> dict[str, Any]:
     try:
         validation = validate_schematic_text(Path(validated_path).read_text(encoding="utf-8"))
     except (OSError, SExpressionError) as exc:
-        return {"success": False, "schematic_path": validated_path, "error": str(exc)}
+        return {"success": False, "schematic_path": validated_path, "error": _sanitize_message(str(exc))}
     validation["success"] = True
     validation["schematic_path"] = validated_path
     return validation
@@ -70,6 +194,7 @@ def create_backup_manifest(
 ) -> dict[str, Any]:
     """Create a timestamped backup directory with a manifest."""
     validate_local_directory(backup_root, must_exist=True)
+    configured_validator = get_configured_validator()
 
     # Include microseconds to avoid backup directory collisions during rapid successive edits.
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -78,7 +203,9 @@ def create_backup_manifest(
 
     files = []
     for source_path in source_paths:
-        source = os.path.realpath(os.path.expanduser(source_path))
+        source = configured_validator.validate_path(source_path, must_exist=True)
+        if not os.path.isfile(source):
+            raise PathValidationError(f"Backup source is not a file: {source_path}")
         backup_name = os.path.basename(source)
         destination = os.path.join(backup_dir, backup_name)
         shutil.copy2(source, destination)
@@ -91,7 +218,7 @@ def create_backup_manifest(
         "files": files,
     }
     manifest_path = os.path.join(backup_dir, BACKUP_METADATA_NAME)
-    Path(manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    atomic_write_text(manifest_path, json.dumps(manifest, indent=2))
     manifest["backup_path"] = backup_dir
     return manifest
 
@@ -125,24 +252,63 @@ def backup_project_files(project_path: str) -> dict[str, Any]:
 def load_backup_manifest(backup_path: str) -> dict[str, Any]:
     """Load a backup manifest from a backup directory."""
     validated_backup = validate_local_directory(backup_path, must_exist=True)
-    manifest_path = os.path.join(validated_backup, BACKUP_METADATA_NAME)
-    if not os.path.exists(manifest_path):
+    manifest_path = PathValidator(trusted_roots={validated_backup}).validate_path(
+        os.path.join(validated_backup, BACKUP_METADATA_NAME),
+        must_exist=True,
+    )
+    if not os.path.isfile(manifest_path):
         raise FileNotFoundError(f"Backup manifest not found: {manifest_path}")
     return cast(dict[str, Any], json.loads(Path(manifest_path).read_text(encoding="utf-8")))
+
+
+def _validated_manifest_entries(manifest: dict[str, Any], validated_backup: str) -> list[tuple[str, str]]:
+    """Return validated (backup_file, destination_file) entries from a manifest."""
+    raw_entries = manifest.get("files")
+    if not isinstance(raw_entries, list):
+        raise PathValidationError("Backup manifest files must be a list")
+
+    backup_validator = PathValidator(trusted_roots={validated_backup})
+    source_root = _manifest_source_root(manifest, validated_backup)
+    source_validator = PathValidator(trusted_roots={source_root})
+    entries: list[tuple[str, str]] = []
+    for index, entry in enumerate(raw_entries):
+        if not isinstance(entry, dict):
+            raise PathValidationError(f"Backup manifest entry {index} must be an object")
+        if not isinstance(entry.get("source"), str) or not isinstance(entry.get("backup"), str):
+            raise PathValidationError(f"Backup manifest entry {index} has invalid paths")
+        destination = source_validator.validate_path(entry["source"], must_exist=False)
+        if os.path.exists(destination) and not os.path.isfile(destination):
+            raise PathValidationError(f"Backup destination is not a file: {entry['source']}")
+        source = backup_validator.validate_path(entry["backup"], must_exist=True)
+        if not os.path.isfile(source):
+            raise PathValidationError(f"Backup entry is not a file: {entry['backup']}")
+        entries.append((source, destination))
+    return entries
+
+
+def _manifest_source_root(manifest: dict[str, Any], validated_backup: str) -> str:
+    backup_dir = Path(validated_backup)
+    if backup_dir.parent.name == BACKUP_DIR_NAME:
+        return str(backup_dir.parent.parent)
+    target_path = manifest.get("target_path")
+    if isinstance(target_path, str) and target_path.strip():
+        target = get_configured_validator().validate_path(target_path, must_exist=False)
+        return os.path.dirname(target) or target
+    raise PathValidationError("Backup manifest does not identify a trusted source root")
 
 
 def restore_backup_manifest(backup_path: str) -> dict[str, Any]:
     """Restore files from a backup manifest."""
     try:
-        manifest = load_backup_manifest(backup_path)
+        validated_backup = validate_local_directory(backup_path, must_exist=True)
+        manifest = load_backup_manifest(validated_backup)
+        entries = _validated_manifest_entries(manifest, validated_backup)
     except (FileNotFoundError, json.JSONDecodeError, PathValidationError) as exc:
-        return {"success": False, "backup_path": backup_path, "error": str(exc)}
+        return {"success": False, "backup_path": backup_path, "error": _sanitize_message(str(exc))}
 
     restored_files = []
-    for entry in manifest["files"]:
-        destination = entry["source"]
-        source = entry["backup"]
-        shutil.copy2(source, destination)
+    for source, destination in entries:
+        _atomic_copy2(source, destination)
         restored_files.append(destination)
 
     return {
@@ -155,11 +321,13 @@ def restore_backup_manifest(backup_path: str) -> dict[str, Any]:
 
 def get_backup_file_for_source(file_path: str, backup_path: str) -> str:
     """Resolve a backed-up file path for a specific source file."""
-    manifest = load_backup_manifest(backup_path)
-    source = os.path.realpath(os.path.expanduser(file_path))
-    for entry in manifest["files"]:
-        if entry["source"] == source:
-            return cast(str, entry["backup"])
+    validated_backup = validate_local_directory(backup_path, must_exist=True)
+    manifest = load_backup_manifest(validated_backup)
+    source_root = _manifest_source_root(manifest, validated_backup)
+    source = PathValidator(trusted_roots={source_root}).validate_path(file_path, must_exist=True)
+    for backup_file, entry_source in _validated_manifest_entries(manifest, validated_backup):
+        if entry_source == source:
+            return backup_file
     raise FileNotFoundError(f"No backup entry for file: {file_path}")
 
 
@@ -218,15 +386,15 @@ def validate_schematic_with_cli_export(schematic_path: str) -> dict[str, Any]:
             "success": False,
             "skipped": False,
             "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": _sanitize_message(result.stdout),
+            "stderr": _sanitize_message(result.stderr),
         }
 
     return {
         "success": True,
         "skipped": False,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+        "stdout": _sanitize_message(result.stdout),
+        "stderr": _sanitize_message(result.stderr),
     }
 
 
@@ -278,7 +446,9 @@ def export_schematic_svg_file(
                 "success": False,
                 "schematic_path": validated_path,
                 "svg_path": str(final_svg_path),
-                "error": result.stderr or result.stdout or "KiCad CLI export failed",
+                "error": _sanitize_message(
+                    result.stderr or result.stdout or "KiCad CLI export failed"
+                ),
             }
 
         if not generated_svg_path.is_file():
@@ -286,7 +456,9 @@ def export_schematic_svg_file(
                 "success": False,
                 "schematic_path": validated_path,
                 "svg_path": str(final_svg_path),
-                "error": f"KiCad CLI did not create expected SVG: {generated_svg_path}",
+                "error": _sanitize_message(
+                    f"KiCad CLI did not create expected SVG: {generated_svg_path}"
+                ),
             }
 
         if generated_svg_path != final_svg_path:
@@ -297,8 +469,8 @@ def export_schematic_svg_file(
             "success": True,
             "schematic_path": validated_path,
             "svg_path": str(final_svg_path),
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": _sanitize_message(result.stdout),
+            "stderr": _sanitize_message(result.stderr),
         }
     finally:
         if temp_dir_context is not None:
@@ -314,62 +486,63 @@ def apply_transactional_schematic_edit(
 ) -> dict[str, Any]:
     """Apply a schematic edit transactionally with backup and rollback."""
     validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
-    original_text = Path(validated_path).read_text(encoding="utf-8")
-    backup = create_file_backup(validated_path)
+    with transactional_file_lock(validated_path):
+        original_text = Path(validated_path).read_text(encoding="utf-8")
+        backup = create_file_backup(validated_path)
 
-    try:
-        before_validation = validate_schematic_text(original_text)
-        schematic = KiCadSchematic.from_text(original_text)
-        change_result = mutator(schematic)
-        updated_text = schematic.to_text()
-        after_validation = validate_schematic_text(updated_text)
-        Path(validated_path).write_text(updated_text, encoding="utf-8")
-        _invalidate_schematic_validation_cache(validated_path)
+        try:
+            before_validation = validate_schematic_text(original_text)
+            schematic = KiCadSchematic.from_text(original_text)
+            change_result = mutator(schematic)
+            updated_text = schematic.to_text()
+            after_validation = validate_schematic_text(updated_text)
+            atomic_write_text(validated_path, updated_text)
+            _invalidate_schematic_validation_cache(validated_path)
 
-        cli_validation = (
-            validate_schematic_with_cli_export(validated_path)
-            if run_cli_validation
-            else {"success": True, "skipped": True, "reason": "CLI validation disabled"}
-        )
-        if not cli_validation["success"]:
-            raise TransactionalEditError(cli_validation.get("stderr") or "CLI validation failed")
-
-        post_write_validation = (
-            post_write_validator(validated_path)
-            if post_write_validator is not None
-            else {"success": True, "skipped": True, "reason": "Post-write validation disabled"}
-        )
-        if not post_write_validation.get("success", False):
-            raise TransactionalEditError(
-                cast(str, post_write_validation.get("error") or post_write_validation.get("reason"))
+            cli_validation = (
+                validate_schematic_with_cli_export(validated_path)
+                if run_cli_validation
+                else {"success": True, "skipped": True, "reason": "CLI validation disabled"}
             )
+            if not cli_validation["success"]:
+                raise TransactionalEditError(cli_validation.get("stderr") or "CLI validation failed")
 
-        diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
-        return {
-            "success": True,
-            "schematic_path": validated_path,
-            "backup_path": backup["backup_path"],
-            "changed_objects": change_result,
-            "validation": {
-                "before": before_validation,
-                "after": after_validation,
-                "cli": cli_validation,
-                "post_write": post_write_validation,
-            },
-            "rolled_back": False,
-            "diff": diff_result["diff"],
-        }
-    except Exception as exc:
-        restore_result = restore_backup_manifest(backup["backup_path"])
-        _invalidate_schematic_validation_cache(validated_path)
-        return {
-            "success": False,
-            "schematic_path": validated_path,
-            "backup_path": backup["backup_path"],
-            "error": str(exc),
-            "rolled_back": restore_result.get("success", False),
-            "restore_result": restore_result,
-        }
+            post_write_validation = (
+                post_write_validator(validated_path)
+                if post_write_validator is not None
+                else {"success": True, "skipped": True, "reason": "Post-write validation disabled"}
+            )
+            if not post_write_validation.get("success", False):
+                raise TransactionalEditError(
+                    cast(str, post_write_validation.get("error") or post_write_validation.get("reason"))
+                )
+
+            diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
+            return {
+                "success": True,
+                "schematic_path": validated_path,
+                "backup_path": backup["backup_path"],
+                "changed_objects": change_result,
+                "validation": {
+                    "before": before_validation,
+                    "after": after_validation,
+                    "cli": cli_validation,
+                    "post_write": post_write_validation,
+                },
+                "rolled_back": False,
+                "diff": diff_result["diff"],
+            }
+        except Exception as exc:
+            restore_result = restore_backup_manifest(backup["backup_path"])
+            _invalidate_schematic_validation_cache(validated_path)
+            return {
+                "success": False,
+                "schematic_path": validated_path,
+                "backup_path": backup["backup_path"],
+                "error": _sanitize_message(str(exc)),
+                "rolled_back": restore_result.get("success", False),
+                "restore_result": restore_result,
+            }
 
 
 def validate_block_connectivity_snapshots(
@@ -422,90 +595,91 @@ def apply_transactional_schematic_cleanup(
 ) -> dict[str, Any]:
     """Apply the high-level cleanup workflow transactionally."""
     validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
-    original_text = Path(validated_path).read_text(encoding="utf-8")
-    backup = create_file_backup(validated_path)
-    try:
-        before_validation = validate_schematic_text(original_text)
-        schematic = KiCadSchematic.from_text(original_text)
-        preview = schematic.preview_cleanup(
-            layout_style=layout_style,
-            spacing_x=spacing_x,
-            spacing_y=spacing_y,
-            arrange_properties=arrange_properties,
-            preserve_connectivity=preserve_connectivity,
-        )
-        cleanup_plan = cast(dict[str, Any], preview["cleanup_plan"])
-        if not preview["success"]:
+    with transactional_file_lock(validated_path):
+        original_text = Path(validated_path).read_text(encoding="utf-8")
+        backup = create_file_backup(validated_path)
+        try:
+            before_validation = validate_schematic_text(original_text)
+            schematic = KiCadSchematic.from_text(original_text)
+            preview = schematic.preview_cleanup(
+                layout_style=layout_style,
+                spacing_x=spacing_x,
+                spacing_y=spacing_y,
+                arrange_properties=arrange_properties,
+                preserve_connectivity=preserve_connectivity,
+            )
+            cleanup_plan = cast(dict[str, Any], preview["cleanup_plan"])
+            if not preview["success"]:
+                return {
+                    "success": False,
+                    "schematic_path": validated_path,
+                    "backup_path": backup["backup_path"],
+                    "error": _sanitize_message(preview.get("error", "Cleanup preview failed")),
+                    "cleanup_plan": cleanup_plan,
+                    "rolled_back": False,
+                }
+
+            before_snapshots = [
+                schematic.block_connectivity_snapshot(symbol_refs=move["symbols"])
+                for move in cast(list[dict[str, Any]], cleanup_plan["block_moves"])
+            ]
+            changed_objects = schematic.apply_cleanup(
+                layout_style=layout_style,
+                spacing_x=spacing_x,
+                spacing_y=spacing_y,
+                arrange_properties=arrange_properties,
+                preserve_connectivity=preserve_connectivity,
+            )
+            updated_text = schematic.to_text()
+            after_validation = validate_schematic_text(updated_text)
+            atomic_write_text(validated_path, updated_text)
+            _invalidate_schematic_validation_cache(validated_path)
+
+            cli_validation = validate_schematic_with_cli_export(validated_path)
+            if not cli_validation["success"]:
+                raise TransactionalEditError(cli_validation.get("stderr") or "CLI validation failed")
+
+            connectivity_validation = validate_block_connectivity_snapshots(
+                validated_path, before_snapshots
+            )
+            if not connectivity_validation["success"]:
+                raise TransactionalEditError(cast(str, connectivity_validation["reason"]))
+
+            export_result = export_schematic_svg_file(validated_path, output_path)
+            if not export_result["success"]:
+                raise TransactionalEditError(cast(str, export_result["error"]))
+
+            diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
+            return {
+                "success": True,
+                "schematic_path": validated_path,
+                "backup_path": backup["backup_path"],
+                "cleanup_plan": cleanup_plan,
+                "changed_objects": changed_objects,
+                "validation": {
+                    "before": before_validation,
+                    "after": after_validation,
+                    "cli": cli_validation,
+                    "post_write": connectivity_validation,
+                    "syntax": "ok",
+                    "cli_export": "ok",
+                    "connectivity": "preserved",
+                },
+                "svg_preview": export_result["svg_path"],
+                "rolled_back": False,
+                "diff": diff_result["diff"],
+            }
+        except Exception as exc:
+            restore_result = restore_backup_manifest(backup["backup_path"])
+            _invalidate_schematic_validation_cache(validated_path)
             return {
                 "success": False,
                 "schematic_path": validated_path,
                 "backup_path": backup["backup_path"],
-                "error": preview.get("error", "Cleanup preview failed"),
-                "cleanup_plan": cleanup_plan,
-                "rolled_back": False,
+                "error": _sanitize_message(str(exc)),
+                "rolled_back": restore_result.get("success", False),
+                "restore_result": restore_result,
             }
-
-        before_snapshots = [
-            schematic.block_connectivity_snapshot(symbol_refs=move["symbols"])
-            for move in cast(list[dict[str, Any]], cleanup_plan["block_moves"])
-        ]
-        changed_objects = schematic.apply_cleanup(
-            layout_style=layout_style,
-            spacing_x=spacing_x,
-            spacing_y=spacing_y,
-            arrange_properties=arrange_properties,
-            preserve_connectivity=preserve_connectivity,
-        )
-        updated_text = schematic.to_text()
-        after_validation = validate_schematic_text(updated_text)
-        Path(validated_path).write_text(updated_text, encoding="utf-8")
-        _invalidate_schematic_validation_cache(validated_path)
-
-        cli_validation = validate_schematic_with_cli_export(validated_path)
-        if not cli_validation["success"]:
-            raise TransactionalEditError(cli_validation.get("stderr") or "CLI validation failed")
-
-        connectivity_validation = validate_block_connectivity_snapshots(
-            validated_path, before_snapshots
-        )
-        if not connectivity_validation["success"]:
-            raise TransactionalEditError(cast(str, connectivity_validation["reason"]))
-
-        export_result = export_schematic_svg_file(validated_path, output_path)
-        if not export_result["success"]:
-            raise TransactionalEditError(cast(str, export_result["error"]))
-
-        diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
-        return {
-            "success": True,
-            "schematic_path": validated_path,
-            "backup_path": backup["backup_path"],
-            "cleanup_plan": cleanup_plan,
-            "changed_objects": changed_objects,
-            "validation": {
-                "before": before_validation,
-                "after": after_validation,
-                "cli": cli_validation,
-                "post_write": connectivity_validation,
-                "syntax": "ok",
-                "cli_export": "ok",
-                "connectivity": "preserved",
-            },
-            "svg_preview": export_result["svg_path"],
-            "rolled_back": False,
-            "diff": diff_result["diff"],
-        }
-    except Exception as exc:
-        restore_result = restore_backup_manifest(backup["backup_path"])
-        _invalidate_schematic_validation_cache(validated_path)
-        return {
-            "success": False,
-            "schematic_path": validated_path,
-            "backup_path": backup["backup_path"],
-            "error": str(exc),
-            "rolled_back": restore_result.get("success", False),
-            "restore_result": restore_result,
-        }
 
 
 def _invalidate_schematic_validation_cache(schematic_path: str) -> None:

@@ -12,6 +12,8 @@ from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.utils.drc_history import compare_with_previous, get_drc_history, save_drc_result
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.native_netlist import run_erc_via_cli
+from kicad_mcp.utils.path_validator import PathValidationError
+from kicad_mcp.utils.transactional_edit import validate_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +37,14 @@ def register_drc_tools(mcp: FastMCP) -> None:
         """
         logger.info(f"Getting DRC history for project: {project_path}")
 
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Project not found: {project_path}")
-            return {"success": False, "error": f"Project not found: {project_path}"}
+            return {"success": False, "error": str(exc)}
 
         # Get history entries
-        history_entries = get_drc_history(project_path)
+        history_entries = get_drc_history(validated_project)
 
         # Calculate trend information
         trend = None
@@ -60,7 +64,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return {
             "success": True,
-            "project_path": project_path,
+            "project_path": validated_project,
             "history_entries": history_entries,
             "entry_count": len(history_entries),
             "trend": trend,
@@ -72,13 +76,18 @@ def register_drc_tools(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Run an Electrical Rule Check on a KiCad schematic or project."""
         logger.info("Running ERC check for: %s", project_path)
-        if not os.path.exists(project_path):
-            return {"success": False, "error": f"Path not found: {project_path}"}
-        schematic_path = project_path
-        if project_path.endswith(".kicad_pro"):
-            files = get_project_files(project_path)
+        try:
+            if project_path.endswith(".kicad_pro"):
+                validated_path = validate_local_path(project_path, "project", must_exist=True)
+            else:
+                validated_path = validate_local_path(project_path, "schematic", must_exist=True)
+        except PathValidationError as exc:
+            return {"success": False, "error": str(exc)}
+        schematic_path = validated_path
+        if validated_path.endswith(".kicad_pro"):
+            files = get_project_files(validated_path)
             if "schematic" not in files:
-                return {"success": False, "project_path": project_path, "error": "Schematic file not found in project"}
+                return {"success": False, "project_path": validated_path, "error": "Schematic file not found in project"}
             schematic_path = files["schematic"]
         if ctx:
             await ctx.report_progress(10, 100)
@@ -86,8 +95,8 @@ def register_drc_tools(mcp: FastMCP) -> None:
         result = run_erc_via_cli(schematic_path, timeout_seconds=timeout_seconds)
         if ctx:
             await ctx.report_progress(100, 100)
-        if project_path.endswith(".kicad_pro"):
-            result["project_path"] = project_path
+        if validated_path.endswith(".kicad_pro"):
+            result["project_path"] = validated_path
         return result
 
     @mcp.tool()
@@ -105,12 +114,14 @@ def register_drc_tools(mcp: FastMCP) -> None:
         """
         logger.info(f"Running DRC check for project: {project_path}")
 
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Project not found: {project_path}")
-            return {"success": False, "error": f"Project not found: {project_path}"}
+            return {"success": False, "error": str(exc)}
 
         # Get PCB file from project
-        files = get_project_files(project_path)
+        files = get_project_files(validated_project)
         if "pcb" not in files:
             logger.info("PCB file not found in project")
             return {"success": False, "error": "PCB file not found in project"}
@@ -137,10 +148,10 @@ def register_drc_tools(mcp: FastMCP) -> None:
         if drc_results and drc_results.get("success", False):
             # logging.info(f"[DRC] DRC check successful for {pcb_file}. Saving results.") # <-- Remove log
             # Save results to history
-            save_drc_result(project_path, drc_results)
+            save_drc_result(validated_project, drc_results)
 
             # Add comparison with previous run
-            comparison = compare_with_previous(project_path, drc_results)
+            comparison = compare_with_previous(validated_project, drc_results)
             if comparison:
                 drc_results["comparison"] = comparison
 
@@ -158,16 +169,23 @@ def register_drc_tools(mcp: FastMCP) -> None:
                             "No change in the number of DRC violations since the last check."
                         )
         elif drc_results:
-            # logging.warning(f"[DRC] DRC check reported failure for {pcb_file}: {drc_results.get('error')}") # <-- Remove log
-            # Pass or print a warning if needed
-            pass
+            logger.warning(
+                "DRC check reported failure for %s: %s",
+                pcb_file,
+                drc_results.get("error") or drc_results,
+            )
+            drc_results.setdefault("project_path", validated_project)
+            drc_results.setdefault("pcb_path", pcb_file)
         else:
-            # logging.error(f"[DRC] DRC check returned None for {pcb_file}") # <-- Remove log
-            # Pass or print an error if needed
-            pass
+            logger.error("DRC check returned no diagnostics for %s", pcb_file)
 
         # Complete progress
         if ctx:
             await ctx.report_progress(100, 100)
 
-        return drc_results or {"success": False, "error": "DRC check failed with an unknown error"}
+        return drc_results or {
+            "success": False,
+            "project_path": validated_project,
+            "pcb_path": pcb_file,
+            "error": "DRC check failed with no diagnostics from KiCad CLI",
+        }

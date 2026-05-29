@@ -71,6 +71,9 @@ class SecureSubprocessRunner:
         """
         # Get and validate KiCad CLI path
         kicad_cli = get_kicad_cli_path(required=True)
+        if not os.path.isabs(kicad_cli):
+            raise SecureSubprocessError("KiCad CLI path must be absolute")
+        kicad_cli = os.path.realpath(os.path.expanduser(kicad_cli))
 
         # Validate input files
         if input_files:
@@ -168,8 +171,22 @@ class SecureSubprocessRunner:
         executable = command[0]
 
         # Validate executable against whitelist if provided
-        if allowed_commands and executable not in allowed_commands:
-            raise SecureSubprocessError(f"Command '{executable}' not in allowed list")
+        if allowed_commands:
+            allowed_paths = set()
+            for allowed in allowed_commands:
+                if not os.path.isabs(allowed):
+                    raise SecureSubprocessError(
+                        "Allowed command entries must be absolute executable paths"
+                    )
+                allowed_paths.add(os.path.realpath(os.path.expanduser(allowed)))
+            if not os.path.isabs(executable):
+                raise SecureSubprocessError(
+                    f"Command '{executable}' must be an absolute path when a whitelist is used"
+                )
+            resolved_executable = os.path.realpath(os.path.expanduser(executable))
+            if resolved_executable not in allowed_paths:
+                raise SecureSubprocessError(f"Command '{executable}' not in allowed list")
+            command = [resolved_executable, *command[1:]]
 
         # Validate working directory
         if working_dir:

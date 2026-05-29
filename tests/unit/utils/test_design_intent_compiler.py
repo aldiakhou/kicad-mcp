@@ -143,6 +143,19 @@ def test_pin_rules_exact_name_and_number_aliases_do_not_substring_match(tmp_path
     assert result["expanded_spec"]["nets"]["GND"] == [["U1", "VSS"]]
 
 
+def test_pin_rules_report_invalid_regex_as_structured_error(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [_base_parts()[0]],
+            "pin_rules": [{"ref": "U1", "match": {"name_regex": "["}, "net": "+3V3"}],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["errors"][0]["error"] == "invalid regex selector"
+
+
 def test_pin_rules_propagate_allow_hidden_power_metadata(tmp_path: Path):
     result = compile_design_intent(
         str(tmp_path),

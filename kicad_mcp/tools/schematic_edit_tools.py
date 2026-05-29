@@ -585,23 +585,28 @@ def register_schematic_edit_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def export_schematic_preview(project_path: str, ctx: Context | None = None) -> dict[str, Any]:
         """Export and return a schematic preview for a KiCad project."""
-        files = get_project_files(project_path)
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except Exception as exc:
+            return {"success": False, "project_path": project_path, "error": str(exc)}
+
+        files = get_project_files(validated_project)
         if "schematic" not in files:
-            return {"success": False, "project_path": project_path, "error": "No schematic file found in project"}
+            return {"success": False, "project_path": validated_project, "error": "No schematic file found in project"}
 
         if ctx:
             await ctx.report_progress(10, 100)
             await ctx.info(f"Exporting schematic preview for {os.path.basename(files['schematic'])}")
         export_result = _export_schematic_svg(files["schematic"], None)
         if not export_result.get("success"):
-            export_result["project_path"] = project_path
+            export_result["project_path"] = validated_project
             return export_result
         if ctx:
             await ctx.report_progress(100, 100)
 
         return {
             "success": True,
-            "project_path": project_path,
+            "project_path": validated_project,
             "schematic_path": files["schematic"],
             "svg_path": export_result["svg_path"],
             "preview": export_result["preview"],

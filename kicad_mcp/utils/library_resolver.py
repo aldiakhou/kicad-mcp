@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from kicad_mcp.utils.kicad_s_expr import (
+    SExpressionError,
     SExprAtom,
     SExprList,
     parse_s_expression,
@@ -78,7 +79,7 @@ def find_symbols(
             ):
                 continue
             root = parse_s_expression(library_text)
-        except Exception:
+        except (OSError, UnicodeDecodeError, SExpressionError):
             continue
         for symbol in root.child_lists("symbol"):
             symbol_name = _atom_text(symbol.items[1] if len(symbol.items) > 1 else None) or ""

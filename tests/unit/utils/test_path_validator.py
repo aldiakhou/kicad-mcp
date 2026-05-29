@@ -10,6 +10,8 @@ import pytest
 from kicad_mcp.utils.path_validator import (
     PathValidationError,
     PathValidator,
+    get_application_temp_root,
+    get_configured_trusted_roots,
     validate_directory,
     validate_kicad_file,
     validate_path,
@@ -194,6 +196,22 @@ class TestPathValidator:
             link_result = validator.validate_path(link_file, must_exist=True)
 
             assert real_result == link_result == os.path.realpath(real_file)
+
+    def test_configured_roots_use_private_temp_root(self, monkeypatch):
+        """Configured roots must not trust the shared system temp directory."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            monkeypatch.setattr(tempfile, "gettempdir", lambda: temp_dir)
+            import kicad_mcp.utils.path_validator as path_validator
+
+            monkeypatch.setattr(path_validator.tempfile, "gettempdir", lambda: temp_dir)
+            monkeypatch.setattr(path_validator.config, "ADDITIONAL_SEARCH_PATHS", [])
+            monkeypatch.setattr(path_validator.config, "KICAD_USER_DIR", os.path.join(temp_dir, "user"))
+            monkeypatch.delenv(path_validator.TRUSTED_ROOTS_ENV_VAR, raising=False)
+
+            roots = get_configured_trusted_roots()
+
+            assert os.path.realpath(temp_dir) not in roots
+            assert get_application_temp_root() in roots
 
 
 class TestConvenienceFunctions:

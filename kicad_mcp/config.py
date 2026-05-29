@@ -25,7 +25,7 @@ Platform Support:
     - macOS (Darwin): Full support with application bundle paths
     - Windows: Standard installation paths
     - Linux: System package paths
-    - Unknown: Defaults to macOS paths for compatibility
+    - Unknown: Raises an explicit configuration error
 
 Dependencies:
     - os: File system operations and environment variables
@@ -63,10 +63,7 @@ elif system == "Linux":
     default_user_dir = "~/KiCad"
     default_app_path = "/usr/share/kicad"
 else:
-    # Default to macOS paths if system is unknown for maximum compatibility
-    # This ensures the server can start even on unrecognized platforms
-    default_user_dir = "~/Documents/KiCad"
-    default_app_path = "/Applications/KiCad/KiCad.app"
+    raise RuntimeError(f"Unsupported platform for KiCad MCP configuration: {system}")
 
 KICAD_USER_DIR = os.path.expanduser(os.getenv("KICAD_USER_DIR", default_user_dir))
 KICAD_APP_PATH = os.path.expanduser(os.getenv("KICAD_APP_PATH", default_app_path))

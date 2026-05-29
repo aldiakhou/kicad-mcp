@@ -157,7 +157,7 @@ def attach_net_to_pin(
             net_name,
             end["x"],
             end["y"],
-            "local" if label_type == "global" else label_type,
+            label_type,
             _readable_label_angle(angle),
         )
     else:

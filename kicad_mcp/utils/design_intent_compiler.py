@@ -10,6 +10,8 @@ from typing import Any
 
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
+from kicad_mcp.utils.path_validator import PathValidationError, get_configured_validator
+from kicad_mcp.utils.transactional_edit import atomic_write_text
 from kicad_mcp.utils.schematic_pins import PinVisibility, _resolve_symbol_pins, classify_pin
 
 DEFAULT_FOOTPRINTS = {
@@ -1133,7 +1135,19 @@ class _DesignIntentCompiler:
         if not isinstance(selector, dict):
             self.errors.append({"path": path, "error": "selector must be an object", "ref": ref})
             return []
-        pins = select_pins(self.pin_maps[ref], selector)
+        try:
+            pins = select_pins(self.pin_maps[ref], selector)
+        except re.error as exc:
+            self.errors.append(
+                {
+                    "path": path,
+                    "error": "invalid regex selector",
+                    "ref": ref,
+                    "selector": selector,
+                    "detail": str(exc),
+                }
+            )
+            return []
         if not pins:
             self.errors.append({"path": path, "error": "selector matched zero pins", "ref": ref, "selector": selector})
         return pins
@@ -1331,16 +1345,16 @@ class _DesignIntentCompiler:
             normalized_path = base / "design_intent.normalized.json"
             expanded_path = base / "design_intent.expanded_spec.json"
             report_path = base / "design_intent.report.json"
-            normalized_path.write_text(json.dumps(normalized, indent=2, sort_keys=True), encoding="utf-8")
-            expanded_path.write_text(json.dumps(expanded_spec, indent=2, sort_keys=True), encoding="utf-8")
+            atomic_write_text(normalized_path, json.dumps(normalized, indent=2, sort_keys=True))
+            atomic_write_text(expanded_path, json.dumps(expanded_spec, indent=2, sort_keys=True))
             compact_report = {key: value for key, value in report.items() if key != "expanded_spec"}
-            report_path.write_text(json.dumps(compact_report, indent=2, sort_keys=True), encoding="utf-8")
+            atomic_write_text(report_path, json.dumps(compact_report, indent=2, sort_keys=True))
             return {
                 "normalized_intent_path": str(normalized_path),
                 "expanded_spec_path": str(expanded_path),
                 "report_path": str(report_path),
             }
-        except Exception as exc:
+        except (OSError, PathValidationError) as exc:
             self.warnings.append({"path": ".kicad_mcp", "warning": "unable to save design intent artifacts", "detail": str(exc)})
             return {}
 
@@ -1506,7 +1520,8 @@ def _schematic_path_if_exists(project_path: str) -> str | None:
 
 
 def _artifact_dir(project_path: str) -> Path:
-    path = Path(project_path)
+    validated = get_configured_validator().validate_path(project_path, must_exist=False)
+    path = Path(validated)
     if path.suffix in {".kicad_pro", ".kicad_sch"}:
         return path.parent / ".kicad_mcp"
     return path / ".kicad_mcp"

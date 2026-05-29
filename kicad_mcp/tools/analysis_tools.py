@@ -2,12 +2,14 @@
 Analysis and validation tools for KiCad projects.
 """
 
-import os
+import json
 from typing import Any
 
 from fastmcp import FastMCP
 
 from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.path_validator import PathValidationError
+from kicad_mcp.utils.transactional_edit import validate_local_path
 
 
 def register_analysis_tools(mcp: FastMCP) -> None:
@@ -20,11 +22,13 @@ def register_analysis_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def validate_project(project_path: str) -> dict[str, Any]:
         """Basic validation of a KiCad project."""
-        if not os.path.exists(project_path):
-            return {"valid": False, "error": f"Project not found: {project_path}"}
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
+            return {"valid": False, "error": str(exc)}
 
         issues = []
-        files = get_project_files(project_path)
+        files = get_project_files(validated_project)
 
         # Check for essential files
         if "pcb" not in files:
@@ -35,9 +39,7 @@ def register_analysis_tools(mcp: FastMCP) -> None:
 
         # Validate project file
         try:
-            with open(project_path) as f:
-                import json
-
+            with open(validated_project, encoding="utf-8") as f:
                 json.load(f)
         except json.JSONDecodeError:
             issues.append("Invalid project file format (JSON parsing error)")
@@ -46,7 +48,7 @@ def register_analysis_tools(mcp: FastMCP) -> None:
 
         return {
             "valid": len(issues) == 0,
-            "path": project_path,
+            "path": validated_project,
             "issues": issues if issues else None,
             "files_found": list(files.keys()),
         }

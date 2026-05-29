@@ -160,3 +160,26 @@ def test_connectivity_snapshot_and_comparison_report_preserved_connections():
     assert before["nearby_wires"] == ["wire-r1"]
     assert before["nearby_labels"][0]["text"] == "NET_R1"
     assert comparison["preserved"] is True
+
+
+def test_connectivity_comparison_detects_per_pin_net_swap():
+    before = {
+        "nearby_wires": ["w1", "w2"],
+        "nearby_labels": [{"uuid": "l1", "text": "VCC"}, {"uuid": "l2", "text": "GND"}],
+        "connection_points": [
+            {"local_key": (-5.08, 0.0), "wires": ["w1"], "labels": [], "net_labels": ["global:VCC"]},
+            {"local_key": (5.08, 0.0), "wires": ["w2"], "labels": [], "net_labels": ["global:GND"]},
+        ],
+    }
+    after = {
+        "nearby_wires": ["w1", "w2"],
+        "nearby_labels": [{"uuid": "l1", "text": "VCC"}, {"uuid": "l2", "text": "GND"}],
+        "connection_points": [
+            {"local_key": (-5.08, 0.0), "wires": ["w1"], "labels": [], "net_labels": ["global:GND"]},
+            {"local_key": (5.08, 0.0), "wires": ["w2"], "labels": [], "net_labels": ["global:VCC"]},
+        ],
+    }
+
+    comparison = compare_connectivity_snapshots("symbol", before, after)
+
+    assert comparison["preserved"] is False

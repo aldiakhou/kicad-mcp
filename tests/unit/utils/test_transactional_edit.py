@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import shutil
 
 import pytest
@@ -114,6 +115,31 @@ def test_backup_project_files_and_restore_backup_manifest(tmp_path: Path):
     assert restore_result["success"] is True
     restored = schematic_path.read_text(encoding="utf-8")
     assert "kicad_mcp_test" in restored
+
+
+def test_restore_backup_manifest_rejects_tampered_paths(tmp_path: Path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    project_path = project_dir / "demo.kicad_pro"
+    schematic_path = project_dir / "demo.kicad_sch"
+    victim_path = outside_dir / "victim.kicad_sch"
+    project_path.write_text("{}", encoding="utf-8")
+    shutil.copy2(FIXTURE_PATH, schematic_path)
+    victim_path.write_text("do not overwrite", encoding="utf-8")
+
+    backup_result = backup_project_files(str(project_path))
+    manifest_path = Path(backup_result["backup_path"]) / "backup_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][0]["source"] = str(victim_path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    restore_result = restore_backup_manifest(backup_result["backup_path"])
+
+    assert restore_result["success"] is False
+    assert "outside trusted directories" in restore_result["error"]
+    assert victim_path.read_text(encoding="utf-8") == "do not overwrite"
 
 
 def test_validate_local_path_rejects_file_outside_configured_roots(

@@ -13,6 +13,7 @@ import tempfile
 from kicad_mcp import config
 
 TRUSTED_ROOTS_ENV_VAR = "KICAD_MCP_TRUSTED_ROOTS"
+APP_TEMP_DIR_NAME = "kicad_mcp"
 
 
 class PathValidationError(Exception):
@@ -235,7 +236,7 @@ def get_configured_trusted_roots(extra_roots: Iterable[str] | None = None) -> se
     roots = {
         os.getcwd(),
         config.KICAD_USER_DIR,
-        tempfile.gettempdir(),
+        get_application_temp_root(),
         *config.ADDITIONAL_SEARCH_PATHS,
     }
     roots.update(_split_configured_roots(os.getenv(TRUSTED_ROOTS_ENV_VAR, "")))
@@ -246,6 +247,24 @@ def get_configured_trusted_roots(extra_roots: Iterable[str] | None = None) -> se
         for root in roots
         if isinstance(root, str) and root.strip()
     }
+
+
+def get_application_temp_root() -> str:
+    """Return KiCad MCP's private temporary root without trusting the shared temp dir."""
+    root_name = APP_TEMP_DIR_NAME
+    try:
+        if hasattr(os, "getuid"):
+            root_name = f"{APP_TEMP_DIR_NAME}_{os.getuid()}"
+    except OSError:
+        root_name = APP_TEMP_DIR_NAME
+    temp_root = os.path.realpath(os.path.join(tempfile.gettempdir(), root_name))
+    os.makedirs(temp_root, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(temp_root, 0o700)
+    except OSError:
+        # Windows permissions are ACL-based; os.chmod cannot reliably enforce owner-only access.
+        pass
+    return temp_root
 
 
 def get_configured_validator(extra_roots: Iterable[str] | None = None) -> PathValidator:

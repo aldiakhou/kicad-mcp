@@ -15,7 +15,7 @@ COL_GAP_MM = 45.72
 ROW_GAP_MM = 35.56
 LABEL_MARGIN_MM = 15.24
 GRID_MM = 1.27
-PAPER_ORDER = ["A4", "A3", "A2", "A1"]
+PAPER_ORDER = ["USLetter", "A4", "USLegal", "A3", "A2", "A1", "A0"]
 
 
 @dataclass(frozen=True)

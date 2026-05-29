@@ -87,10 +87,12 @@ from kicad_mcp.utils.schematic_pins import (
 from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import (
+    atomic_write_text,
     create_file_backup,
     export_schematic_svg_file,
     get_file_diff_against_backup,
     restore_backup_manifest,
+    transactional_file_lock,
     validate_local_directory,
     validate_local_path,
     validate_schematic_with_cli_export,
@@ -102,6 +104,7 @@ _DESIGN_INTENT_JOB_EXECUTOR = ThreadPoolExecutor(
 )
 _DESIGN_INTENT_JOBS: dict[str, dict[str, Any]] = {}
 _DESIGN_INTENT_JOBS_LOCK = threading.Lock()
+_DESIGN_INTENT_PROJECT_LOCKS: dict[str, threading.Lock] = {}
 _DESIGN_INTENT_JOB_RETAIN_LIMIT = 50
 _DESIGN_INTENT_PAYLOAD_KEYS = {
     "support_circuits",
@@ -2025,7 +2028,7 @@ def _save_visual_expanded_spec(project_path: str, spec: dict[str, Any]) -> str:
     artifact_dir = _design_intent_artifact_dir(project_path)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     output_path = artifact_dir / "design_intent.visual_expanded_spec.json"
-    output_path.write_text(json.dumps(spec, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_text(output_path, json.dumps(spec, indent=2, sort_keys=True))
     return str(output_path)
 
 
@@ -2143,33 +2146,57 @@ def _trim_design_intent_jobs_locked() -> None:
         _DESIGN_INTENT_JOBS.pop(str(job["job_id"]), None)
 
 
+def _design_intent_project_key(project_path: str) -> str:
+    return os.path.realpath(os.path.expanduser(project_path))
+
+
+def _design_intent_project_lock(project_key: str) -> threading.Lock:
+    with _DESIGN_INTENT_JOBS_LOCK:
+        lock = _DESIGN_INTENT_PROJECT_LOCKS.get(project_key)
+        if lock is None:
+            lock = threading.Lock()
+            _DESIGN_INTENT_PROJECT_LOCKS[project_key] = lock
+        return lock
+
+
 def _run_design_intent_job(job_id: str, project_path: str, intent: dict[str, Any], options: dict[str, Any]) -> None:
+    project_key = _design_intent_project_key(project_path)
+    project_lock = _design_intent_project_lock(project_key)
     with _DESIGN_INTENT_JOBS_LOCK:
         job = _DESIGN_INTENT_JOBS.get(job_id)
         if job is None or job.get("status") == "cancelled":
             return
-        job["status"] = "running"
-        job["started_at"] = _utc_now()
+        job["project_key"] = project_key
     try:
-        result = _schematic_design_intent_response(
-            project_path,
-            intent,
-            mode=options["mode"],
-            dry_run=False,
-            strict=options["strict"],
-            detail=options["detail"],
-            include_expanded_spec=options["include_expanded_spec"],
-            tool_name="schematic_apply_design_intent",
-            visual_layout=options["visual_layout"],
-            visual_style=options["visual_style"],
-            quick_apply=options["quick_apply"],
-            include_preview=options["include_preview"],
-            run_quality_report=options["run_quality_report"],
-            run_native_validation=options["run_native_validation"],
-            run_cli_validation=options["run_cli_validation"],
-            unsafe_fast_apply=options["unsafe_fast_apply"],
-            allow_background_redirect=False,
-        )
+        with project_lock:
+            with _DESIGN_INTENT_JOBS_LOCK:
+                job = _DESIGN_INTENT_JOBS.get(job_id)
+                if job is None or job.get("status") == "cancelled" or job.get("cancel_requested"):
+                    if job is not None:
+                        job["status"] = "cancelled"
+                        job.setdefault("finished_at", _utc_now())
+                    return
+                job["status"] = "running"
+                job["started_at"] = _utc_now()
+            result = _schematic_design_intent_response(
+                project_path,
+                intent,
+                mode=options["mode"],
+                dry_run=False,
+                strict=options["strict"],
+                detail=options["detail"],
+                include_expanded_spec=options["include_expanded_spec"],
+                tool_name="schematic_apply_design_intent",
+                visual_layout=options["visual_layout"],
+                visual_style=options["visual_style"],
+                quick_apply=options["quick_apply"],
+                include_preview=options["include_preview"],
+                run_quality_report=options["run_quality_report"],
+                run_native_validation=options["run_native_validation"],
+                run_cli_validation=options["run_cli_validation"],
+                unsafe_fast_apply=options["unsafe_fast_apply"],
+                allow_background_redirect=False,
+            )
         status = "completed" if result.get("success") else "failed"
         with _DESIGN_INTENT_JOBS_LOCK:
             job = _DESIGN_INTENT_JOBS.get(job_id)
@@ -2226,6 +2253,7 @@ def _start_design_intent_job(
         "job_id": job_id,
         "status": "pending",
         "project_path": project_path,
+        "project_key": _design_intent_project_key(project_path),
         "created_at": _utc_now(),
         "options": options,
         "cancel_requested": False,
@@ -4254,7 +4282,7 @@ def _create_schematic_file(
         backup = create_file_backup(str(schematic_path)) if schematic_path.exists() else None
         schematic = KiCadSchematic.empty(paper=paper)
         validation = validate_schematic_text(schematic.to_text())
-        schematic_path.write_text(schematic.to_text(), encoding="utf-8")
+        atomic_write_text(schematic_path, schematic.to_text())
         cli_validation = validate_schematic_with_cli_export(str(schematic_path))
         if not cli_validation["success"]:
             if backup:
@@ -4297,7 +4325,7 @@ def _create_kicad_project(
                 "project_path": str(project_path),
                 "error": "Project already exists",
             }
-        project_path.write_text(json.dumps(_default_project_json(), indent=2), encoding="utf-8")
+        atomic_write_text(project_path, json.dumps(_default_project_json(), indent=2))
 
         created_files = {"project": str(project_path)}
         schematic_result = None
@@ -4993,7 +5021,7 @@ def _create_pcb_file(
         backup = create_file_backup(str(pcb_path)) if pcb_path.exists() else None
         pcb = KiCadPcb.empty(board_width_mm, board_height_mm)
         validation = validate_pcb_text(pcb.to_text())
-        pcb_path.write_text(pcb.to_text(), encoding="utf-8")
+        atomic_write_text(pcb_path, pcb.to_text())
         return {
             "success": True,
             "project_path": validated_project,
@@ -5030,71 +5058,78 @@ def _apply_transactional_pcb_edit(
     post_write_validator: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     validated_path = validate_local_path(pcb_path, "pcb", must_exist=True)
-    original_text = Path(validated_path).read_text(encoding="utf-8")
-    backup = create_file_backup(validated_path)
-    try:
-        before_validation = validate_pcb_text(original_text)
-        pcb = KiCadPcb.from_text(original_text)
-        change_result = mutator(pcb)
-        updated_text = pcb.to_text()
-        after_validation = validate_pcb_text(updated_text)
-        Path(validated_path).write_text(updated_text, encoding="utf-8")
-        cli_export = (
-            _validate_pcb_with_cli_export(validated_path)
-            if run_cli_validation
-            else {"success": True, "skipped": True, "reason": "PCB CLI validation disabled"}
-        )
-        if not cli_export.get("success"):
-            raise ValueError(cli_export.get("stderr") or cli_export.get("error") or "PCB CLI export failed")
-        drc = (
-            _run_pcb_drc_sync(validated_path)
-            if run_drc
-            else {"success": True, "skipped": True, "reason": "run_drc=False"}
-        )
-        if run_drc and not drc.get("success"):
-            raise ValueError(drc.get("error", "PCB DRC failed"))
-        post_write = (
-            post_write_validator(validated_path)
-            if post_write_validator is not None
-            else {"success": True, "skipped": True, "reason": "Post-write validation disabled"}
-        )
-        if not post_write.get("success"):
-            raise ValueError(post_write.get("error") or post_write.get("reason") or "PCB post-write validation failed")
-        diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
-        return {
-            "success": True,
-            "tool": "pcb_transactional_edit",
-            "stage": "pcb_authoring",
-            "changed": True,
-            "pcb_path": validated_path,
-            "backup_path": backup["backup_path"],
-            "changed_objects": change_result,
-            "validation": {
-                "before": before_validation,
-                "after": after_validation,
-                "cli_export": cli_export,
-                "drc": drc,
-                "post_write": post_write,
-            },
-            "warnings": [],
-            "recommended_next_tool": "pcb_quality_report",
-            "recommended_next_arguments": {},
-            "rolled_back": False,
-            "diff": diff_result["diff"],
-        }
-    except Exception as exc:
-        restore_result = restore_backup_manifest(backup["backup_path"])
-        return {
-            "success": False,
-            "pcb_path": validated_path,
-            "backup_path": backup["backup_path"],
-            "error": str(exc),
-            "rolled_back": restore_result.get("success", False),
-            "recoverable": True,
-            "recommended_next_tool": "pcb_quality_report",
-            "debug": {},
-            "restore_result": restore_result,
-        }
+    with transactional_file_lock(validated_path):
+        original_text = Path(validated_path).read_text(encoding="utf-8")
+        backup = create_file_backup(validated_path)
+        try:
+            before_validation = validate_pcb_text(original_text)
+            pcb = KiCadPcb.from_text(original_text)
+            change_result = mutator(pcb)
+            updated_text = pcb.to_text()
+            after_validation = validate_pcb_text(updated_text)
+            atomic_write_text(validated_path, updated_text)
+            cli_export = (
+                _validate_pcb_with_cli_export(validated_path)
+                if run_cli_validation
+                else {"success": True, "skipped": True, "reason": "PCB CLI validation disabled"}
+            )
+            if not cli_export.get("success"):
+                raise ValueError(
+                    cli_export.get("stderr") or cli_export.get("error") or "PCB CLI export failed"
+                )
+            drc = (
+                _run_pcb_drc_sync(validated_path)
+                if run_drc
+                else {"success": True, "skipped": True, "reason": "run_drc=False"}
+            )
+            if run_drc and not drc.get("success"):
+                raise ValueError(drc.get("error", "PCB DRC failed"))
+            post_write = (
+                post_write_validator(validated_path)
+                if post_write_validator is not None
+                else {"success": True, "skipped": True, "reason": "Post-write validation disabled"}
+            )
+            if not post_write.get("success"):
+                raise ValueError(
+                    post_write.get("error")
+                    or post_write.get("reason")
+                    or "PCB post-write validation failed"
+                )
+            diff_result = get_file_diff_against_backup(validated_path, backup["backup_path"])
+            return {
+                "success": True,
+                "tool": "pcb_transactional_edit",
+                "stage": "pcb_authoring",
+                "changed": True,
+                "pcb_path": validated_path,
+                "backup_path": backup["backup_path"],
+                "changed_objects": change_result,
+                "validation": {
+                    "before": before_validation,
+                    "after": after_validation,
+                    "cli_export": cli_export,
+                    "drc": drc,
+                    "post_write": post_write,
+                },
+                "warnings": [],
+                "recommended_next_tool": "pcb_quality_report",
+                "recommended_next_arguments": {},
+                "rolled_back": False,
+                "diff": diff_result["diff"],
+            }
+        except Exception as exc:
+            restore_result = restore_backup_manifest(backup["backup_path"])
+            return {
+                "success": False,
+                "pcb_path": validated_path,
+                "backup_path": backup["backup_path"],
+                "error": str(exc),
+                "rolled_back": restore_result.get("success", False),
+                "recoverable": True,
+                "recommended_next_tool": "pcb_quality_report",
+                "debug": {},
+                "restore_result": restore_result,
+            }
 
 
 def _validate_pcb_with_cli_export(pcb_path: str) -> dict[str, Any]:

@@ -877,6 +877,7 @@ class KiCadSchematic:
                     {
                         "x": endpoint["point"]["x"],
                         "y": endpoint["point"]["y"],
+                        "local_key": _local_connection_key(endpoint["point"], symbol["position"]),
                         "wires": [],
                         "labels": [],
                     },
@@ -912,13 +913,18 @@ class KiCadSchematic:
                 if all(existing["uuid"] != label_entry["uuid"] for existing in group["labels"]):
                     group["labels"].append(label_entry)
 
+        for group in point_groups.values():
+            group["net_labels"] = self._connection_net_labels(group["x"], group["y"])
+
         connection_points = sorted(
             (
                 {
                     "x": group["x"],
                     "y": group["y"],
+                    "local_key": group["local_key"],
                     "wires": sorted(group["wires"]),
                     "labels": sorted(group["labels"], key=lambda entry: entry["uuid"]),
+                    "net_labels": group["net_labels"],
                 }
                 for group in point_groups.values()
             ),
@@ -2252,6 +2258,31 @@ class KiCadSchematic:
             <= CONNECTIVITY_TOLERANCE_MM
         ]
 
+    def _connection_net_labels(self, x: float, y: float) -> list[str]:
+        labels: set[str] = set()
+        for label in self._labels_touching_point(x, y):
+            text = label.get("text")
+            if text:
+                labels.add(f"{label.get('type', 'local')}:{text}")
+
+        touching_wires = self.find_wires_touching_point(x, y)
+        touching_wire_ids = {
+            wire.get("uuid") for wire in touching_wires if wire.get("uuid") is not None
+        }
+        for label in self.list_labels():
+            text = label.get("text")
+            if not text:
+                continue
+            position = label.get("position", {})
+            if "x" not in position or "y" not in position:
+                continue
+            if any(
+                wire.get("uuid") in touching_wire_ids
+                for wire in self.find_wires_touching_point(position["x"], position["y"])
+            ):
+                labels.add(f"{label.get('type', 'local')}:{text}")
+        return sorted(labels)
+
     def _wire_touches_junction_at_points(self, points: list[dict[str, float]]) -> bool:
         return any(self.find_junctions_touching_point(point["x"], point["y"]) for point in points)
 
@@ -2959,18 +2990,18 @@ def compare_connectivity_snapshots(
     if target_type == "symbol":
         before_label_texts = sorted(label["text"] for label in before.get("nearby_labels", []))
         after_label_texts = sorted(label["text"] for label in after.get("nearby_labels", []))
-        before_point_wire_counts = sorted(
-            len(point.get("wires", [])) for point in before.get("connection_points", [])
-        )
-        after_point_wire_counts = sorted(
-            len(point.get("wires", [])) for point in after.get("connection_points", [])
-        )
+        before_point_signatures = _symbol_point_net_signatures(before)
+        after_point_signatures = _symbol_point_net_signatures(after)
         preserved = (
             sorted(before.get("nearby_wires", [])) == sorted(after.get("nearby_wires", []))
             and before_label_texts == after_label_texts
-            and before_point_wire_counts == after_point_wire_counts
+            and before_point_signatures == after_point_signatures
         )
-        reason = "connectivity preserved" if preserved else "attached wires or labels changed"
+        reason = (
+            "connectivity preserved"
+            if preserved
+            else "attached wires, labels, or per-pin net identities changed"
+        )
         return {
             "preserved": preserved,
             "reason": reason,
@@ -3005,6 +3036,7 @@ def compare_block_connectivity_snapshots(
         and before.get("boundary_wire_count") == after.get("boundary_wire_count")
         and sorted(before.get("internal_symbols", [])) == sorted(after.get("internal_symbols", []))
         and sorted(before.get("labels", [])) == sorted(after.get("labels", []))
+        and sorted(before.get("label_texts", [])) == sorted(after.get("label_texts", []))
         and sorted(before.get("wires", [])) == sorted(after.get("wires", []))
     )
     reason = "block connectivity preserved" if preserved else "block connectivity changed"
@@ -3013,6 +3045,32 @@ def compare_block_connectivity_snapshots(
 
 def _point_key(x: float, y: float) -> tuple[float, float]:
     return (round(x, 6), round(y, 6))
+
+
+def _symbol_point_net_signatures(snapshot: dict[str, Any]) -> list[tuple[Any, ...]]:
+    signatures = []
+    for point in snapshot.get("connection_points", []):
+        local_key = tuple(point.get("local_key", (round(point.get("x", 0.0), 6), round(point.get("y", 0.0), 6))))
+        net_labels = tuple(sorted(str(label) for label in point.get("net_labels", [])))
+        direct_labels = tuple(
+            sorted(
+                f"{label.get('type', 'label')}:{label.get('text', '')}"
+                for label in point.get("labels", [])
+            )
+        )
+        signatures.append((local_key, len(point.get("wires", [])), net_labels, direct_labels))
+    return sorted(signatures, key=repr)
+
+
+def _local_connection_key(
+    point: dict[str, float], symbol_position: dict[str, float]
+) -> tuple[float, float]:
+    dx = float(point["x"]) - float(symbol_position["x"])
+    dy = float(point["y"]) - float(symbol_position["y"])
+    angle = math.radians(float(symbol_position.get("angle", 0.0)))
+    cos_a = math.cos(-angle)
+    sin_a = math.sin(-angle)
+    return (round(dx * cos_a - dy * sin_a, 6), round(dx * sin_a + dy * cos_a, 6))
 
 
 def _coerce_point(point: dict[str, float]) -> dict[str, float]:

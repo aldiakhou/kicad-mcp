@@ -49,7 +49,10 @@ def test_run_erc_via_cli_parses_report_and_timeout(monkeypatch, tmp_path: Path):
     schematic = tmp_path / "demo.kicad_sch"
     schematic.write_text("(kicad_sch)", encoding="utf-8")
 
-    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
+    monkeypatch.setattr(
+        "kicad_mcp.utils.secure_subprocess.get_kicad_cli_path",
+        lambda required=True: str(tmp_path / "kicad-cli.exe"),
+    )
 
     def fake_run(cmd, capture_output, text, timeout, **kwargs):
         output = Path(cmd[cmd.index("--output") + 1])

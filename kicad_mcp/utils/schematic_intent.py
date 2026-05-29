@@ -8,6 +8,7 @@ KiCad's native netlist/ERC when available.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from kicad_mcp.utils.kicad_cli_batch import validate_schematic_batch
@@ -78,6 +79,12 @@ def connect_pins(
 ) -> dict[str, Any]:
     """Connect two symbol pins by assigning both pins to the same named net."""
     resolved_net = net_name or _auto_net_name(ref_a, pin_a, ref_b, pin_b)
+    if style in {"wire", "auto"} and not (style == "auto" and _is_power_net(resolved_net)):
+        group = [
+            _pin_to_net({"connection_style": "wire"}, ref_a, pin_a, resolved_net),
+            _pin_to_net({"connection_style": "wire"}, ref_b, pin_b, resolved_net),
+        ]
+        return _apply_wire_connection_group(schematic, schematic_path, group)
     return {
         "net_name": resolved_net,
         "style": style,
@@ -88,6 +95,7 @@ def connect_pins(
                 ref_a,
                 pin_a,
                 resolved_net,
+                connection_style=style,
             ),
             connect_pin_to_net(
                 schematic,
@@ -95,6 +103,7 @@ def connect_pins(
                 ref_b,
                 pin_b,
                 resolved_net,
+                connection_style=style,
             ),
         ],
     }
@@ -111,8 +120,12 @@ def apply_connection_plan_v2(
     rollback_on_failure: bool = True,
     fail_on_erc_violations: bool = False,
     replace_existing: bool = False,
+    native_netlist_exporter: Callable[[str], dict[str, Any]] | None = None,
+    erc_runner: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Apply normalized electrical-intent connections transactionally."""
+    native_netlist_exporter = native_netlist_exporter or export_native_netlist
+    erc_runner = erc_runner or run_erc_via_cli
     no_connects = no_connects or []
     normalized = normalize_connections(connections)
     normalized_no_connects = normalize_no_connects(no_connects)
@@ -259,6 +272,8 @@ def apply_connection_plan_v2(
             verify_native_netlist=verify_native_netlist,
             run_erc=run_erc,
             fail_on_erc_violations=fail_on_erc_violations,
+            native_netlist_exporter=native_netlist_exporter,
+            erc_runner=erc_runner,
         )
 
     result = apply_transactional_schematic_edit(
@@ -284,6 +299,8 @@ def apply_connection_plan_v2(
                 verify_native_netlist=verify_native_netlist,
                 run_erc=run_erc,
                 fail_on_erc_violations=fail_on_erc_violations,
+                native_netlist_exporter=native_netlist_exporter,
+                erc_runner=erc_runner,
             )
             result.setdefault("validation", {})["post_write"] = verification
             native_verification = verification.get("native_verification", native_verification)
@@ -393,10 +410,14 @@ def verify_connection_plan_v2(
     verify_native_netlist: bool = True,
     run_erc: bool = True,
     fail_on_erc_violations: bool = True,
+    native_netlist_exporter: Callable[[str], dict[str, Any]] | None = None,
+    erc_runner: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify planned connections with native netlist and optional ERC."""
+    native_netlist_exporter = native_netlist_exporter or export_native_netlist
+    erc_runner = erc_runner or run_erc_via_cli
     artifact_result = verify_schematic_artifacts(schematic_path, connections)
-    use_batch = _using_default_cli_helper(export_native_netlist) and _using_default_cli_helper(run_erc_via_cli)
+    use_batch = _using_default_cli_helper(native_netlist_exporter) and _using_default_cli_helper(erc_runner)
     bundle = (
         validate_schematic_batch(
             schematic_path,
@@ -412,6 +433,7 @@ def verify_connection_plan_v2(
             schematic_path,
             connections,
             native_netlist=bundle.native_netlist if bundle is not None else None,
+            native_netlist_exporter=native_netlist_exporter,
         )
         if verify_native_netlist
         else {"success": True, "skipped": True, "missing": []}
@@ -419,7 +441,7 @@ def verify_connection_plan_v2(
     erc_result = (
         bundle.erc
         if bundle is not None and bundle.erc is not None
-        else run_erc_via_cli(schematic_path)
+        else erc_runner(schematic_path)
         if run_erc
         else {"success": True, "skipped": True}
     )
@@ -456,9 +478,11 @@ def verify_native_memberships(
     connections: list[dict[str, Any]],
     *,
     native_netlist: dict[str, Any] | None = None,
+    native_netlist_exporter: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify every required connection against KiCad's native netlist."""
-    native = native_netlist if native_netlist is not None else export_native_netlist(schematic_path)
+    native_netlist_exporter = native_netlist_exporter or export_native_netlist
+    native = native_netlist if native_netlist is not None else native_netlist_exporter(schematic_path)
     if not native.get("success"):
         return {"success": False, "reason": native.get("error"), "missing": [], "native_netlist": native}
     missing = []

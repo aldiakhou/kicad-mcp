@@ -15,7 +15,7 @@ from kicad_mcp.utils.schematic_pins import (
     _rects_intersect,
     _text_rect,
 )
-from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
+from kicad_mcp.utils.schematic_visual_layout import _candidate_papers, apply_visual_layout_to_v2_spec
 
 
 def _large_mcu_part() -> dict:
@@ -98,6 +98,12 @@ def test_v2_normalizer_uses_visual_layout_positions():
 
     assert normalized["symbols"][0]["x"] == laid_out["parts"][0]["x"]
     assert normalized["symbols"][0]["y"] == laid_out["parts"][0]["y"]
+
+
+def test_auto_paper_candidates_include_us_sizes_and_a0():
+    assert "USLetter" in _candidate_papers("USLetter", "auto", "A0")
+    assert "USLegal" in _candidate_papers("USLetter", "auto", "A0")
+    assert _candidate_papers("A1", "auto", "A0") == ["A1", "A0"]
 
 
 def test_external_stub_labels_are_outside_symbol_body(tmp_path: Path, monkeypatch):

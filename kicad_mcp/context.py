@@ -53,6 +53,15 @@ class KiCadAppContext:
     cache: BoundedCache
 
 
+def get_kicad_app_context(ctx: Any | None) -> KiCadAppContext | None:
+    """Safely extract the KiCad lifespan context from a FastMCP request context."""
+    if ctx is None:
+        return None
+    request_context = getattr(ctx, "request_context", None)
+    lifespan_context = getattr(request_context, "lifespan_context", None)
+    return lifespan_context if isinstance(lifespan_context, KiCadAppContext) else None
+
+
 @asynccontextmanager
 async def kicad_lifespan(
     server: FastMCP, kicad_modules_available: bool = False
@@ -83,9 +92,6 @@ async def kicad_lifespan(
     # Create in-memory cache for expensive operations
     cache = BoundedCache()
 
-    # Initialize any other resources that need cleanup later
-    created_temp_dirs = []  # Assuming this is managed elsewhere or not needed for now
-
     try:
         # --- Removed Python module preloading section ---
         # if kicad_modules_available:
@@ -109,15 +115,5 @@ async def kicad_lifespan(
         if cache:
             logging.info(f"Clearing cache with {len(cache)} entries")
             cache.clear()
-
-        # Clean up any temporary directories
-        import shutil
-
-        for temp_dir in created_temp_dirs:
-            try:
-                logging.info(f"Removing temporary directory: {temp_dir}")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception as e:
-                logging.error(f"Error cleaning up temporary directory {temp_dir}: {str(e)}")
 
         logging.info("KiCad MCP server shutdown complete")

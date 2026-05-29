@@ -8,6 +8,8 @@ from typing import Any
 from fastmcp import Context, FastMCP
 
 from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.path_validator import PathValidationError
+from kicad_mcp.utils.transactional_edit import validate_local_path
 from kicad_mcp.utils.netlist_parser import extract_netlist
 from kicad_mcp.utils.pattern_recognition import (
     identify_amplifiers,
@@ -24,21 +26,23 @@ async def _identify_circuit_patterns_impl(
     schematic_path: str, ctx: Context | None
 ) -> dict[str, Any]:
     """Identify circuit patterns without MCP decoration."""
-    if not os.path.exists(schematic_path):
+    try:
+        validated_schematic = validate_local_path(schematic_path, "schematic", must_exist=True)
+    except PathValidationError as exc:
         if ctx:
-            await ctx.info(f"Schematic file not found: {schematic_path}")
-        return {"success": False, "error": f"Schematic file not found: {schematic_path}"}
+            await ctx.info("Schematic file not found or is outside trusted roots")
+        return {"success": False, "error": str(exc)}
 
     if ctx:
         await ctx.report_progress(10, 100)
-        await ctx.info(f"Loading schematic file: {os.path.basename(schematic_path)}")
+        await ctx.info(f"Loading schematic file: {os.path.basename(validated_schematic)}")
 
     try:
         if ctx:
             await ctx.report_progress(20, 100)
             await ctx.info("Parsing schematic structure...")
 
-        netlist_data = extract_netlist(schematic_path)
+        netlist_data = extract_netlist(validated_schematic)
 
         if "error" in netlist_data:
             if ctx:
@@ -101,7 +105,7 @@ async def _identify_circuit_patterns_impl(
 
         result = {
             "success": True,
-            "schematic_path": schematic_path,
+            "schematic_path": validated_schematic,
             "component_count": netlist_data["component_count"],
             "identified_patterns": identified_patterns,
         }
@@ -164,10 +168,12 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         Returns:
             Dictionary with identified circuit patterns
         """
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             if ctx:
-                await ctx.info(f"Project not found: {project_path}")
-            return {"success": False, "error": f"Project not found: {project_path}"}
+                await ctx.info("Project not found or is outside trusted roots")
+            return {"success": False, "error": str(exc)}
 
         # Report progress
         if ctx:
@@ -175,7 +181,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
 
         # Get the schematic file
         try:
-            files = get_project_files(project_path)
+            files = get_project_files(validated_project)
 
             if "schematic" not in files:
                 if ctx:
@@ -192,7 +198,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
 
             # Add project path to result
             if "success" in result and result["success"]:
-                result["project_path"] = project_path
+                result["project_path"] = validated_project
 
             return result
 

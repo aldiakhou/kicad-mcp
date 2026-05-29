@@ -170,7 +170,10 @@ class TestSecureSubprocessRunner:
                 mock_result = MagicMock(returncode=0)
                 mock_run.return_value = mock_result
 
-                result = runner.run_safe_command(["echo", "test"], allowed_commands=["echo"])
+                result = runner.run_safe_command(
+                    [sys.executable, "-c", "print('test')"],
+                    allowed_commands=[sys.executable],
+                )
 
                 assert result is mock_result
 
@@ -186,7 +189,24 @@ class TestSecureSubprocessRunner:
         runner = SecureSubprocessRunner()
 
         with pytest.raises(SecureSubprocessError, match="not in allowed list"):
-            runner.run_safe_command(["rm", "-rf", "/"], allowed_commands=["echo", "ls"])
+            runner.run_safe_command(
+                [sys.executable, "--version"],
+                allowed_commands=[os.path.realpath(os.getcwd())],
+            )
+
+    def test_run_safe_command_rejects_relative_whitelist_entry(self):
+        """Test safe command rejects name-only whitelist entries."""
+        runner = SecureSubprocessRunner()
+
+        with pytest.raises(SecureSubprocessError, match="absolute executable paths"):
+            runner.run_safe_command(["echo", "test"], allowed_commands=["echo"])
+
+    def test_run_safe_command_rejects_relative_command_with_whitelist(self):
+        """Test safe command rejects PATH-resolved executables when whitelisted."""
+        runner = SecureSubprocessRunner()
+
+        with pytest.raises(SecureSubprocessError, match="must be an absolute path"):
+            runner.run_safe_command(["echo", "test"], allowed_commands=[sys.executable])
 
     def test_run_safe_command_invalid_working_dir(self):
         """Test safe command with invalid working directory."""

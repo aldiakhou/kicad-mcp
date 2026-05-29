@@ -7,14 +7,17 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 from fastmcp import Context, FastMCP
 import pandas as pd
 
 from kicad_mcp.config import TIMEOUT_CONSTANTS
+from kicad_mcp.context import get_kicad_app_context
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import KiCadCLIError
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import validate_local_path
@@ -93,6 +96,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
 
         total_unique_components = 0
         total_components = 0
+        seen_bom_signatures: dict[tuple[Any, ...], str] = {}
 
         for file_type, file_path in bom_files.items():
             try:
@@ -108,17 +112,23 @@ def register_bom_tools(mcp: FastMCP) -> None:
 
                 # Analyze the BOM data
                 analysis = analyze_bom_data(bom_data, format_info)
+                signature = _bom_signature(bom_data)
+                duplicate_of = seen_bom_signatures.get(signature)
+                if duplicate_of is None:
+                    seen_bom_signatures[signature] = file_type
 
                 # Add to results
                 results["bom_files"][file_type] = {
                     "path": file_path,
                     "format": format_info,
                     "analysis": analysis,
+                    "duplicate_of": duplicate_of,
                 }
 
                 # Update totals
-                total_unique_components += analysis["unique_component_count"]
-                total_components += analysis["total_component_count"]
+                if duplicate_of is None:
+                    total_unique_components += analysis["unique_component_count"]
+                    total_components += analysis["total_component_count"]
 
                 logger.info(f"Successfully analyzed BOM file: {file_path}")
 
@@ -140,6 +150,8 @@ def register_bom_tools(mcp: FastMCP) -> None:
             all_categories = {}
             for _file_type, file_info in results["bom_files"].items():
                 if "analysis" in file_info and "categories" in file_info["analysis"]:
+                    if file_info.get("duplicate_of"):
+                        continue
                     for category, count in file_info["analysis"]["categories"].items():
                         if category not in all_categories:
                             all_categories[category] = 0
@@ -153,6 +165,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
             for _file_type, file_info in results["bom_files"].items():
                 if (
                     "analysis" in file_info
+                    and not file_info.get("duplicate_of")
                     and "total_cost" in file_info["analysis"]
                     and file_info["analysis"]["total_cost"] > 0
                 ):
@@ -202,7 +215,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
             return {"success": False, "project_path": project_path, "error": str(exc)}
 
         # Get access to the app context
-        app_context = ctx.request_context.lifespan_context if ctx else None
+        app_context = get_kicad_app_context(ctx)
         kicad_modules_available = app_context.kicad_modules_available if app_context else False
 
         # Report progress
@@ -233,16 +246,15 @@ def register_bom_tools(mcp: FastMCP) -> None:
 
         if kicad_modules_available:
             try:
-                # Try to use KiCad Python modules
                 if ctx:
-                    await ctx.info("Attempting to export BOM using KiCad Python modules...")
+                    await ctx.info("Attempting to export BOM using the internal schematic parser...")
                 export_result = await export_bom_with_python(
                     schematic_file, project_dir, project_name, ctx
                 )
             except Exception as e:
-                logger.info(f"Error exporting BOM with Python modules: {str(e)}", exc_info=True)
+                logger.info(f"Error exporting BOM with internal parser: {str(e)}", exc_info=True)
                 if ctx:
-                    await ctx.info(f"Error using Python modules: {str(e)}")
+                    await ctx.info(f"Error using internal parser: {str(e)}")
                 export_result = {"success": False, "error": str(e)}
 
         # If Python method failed, try command-line method
@@ -257,6 +269,19 @@ def register_bom_tools(mcp: FastMCP) -> None:
                 logger.info(f"Error exporting BOM with CLI: {str(e)}", exc_info=True)
                 if ctx:
                     await ctx.info(f"Error using command-line tools: {str(e)}")
+                export_result = {"success": False, "error": str(e)}
+
+        if not export_result.get("success", False):
+            try:
+                if ctx:
+                    await ctx.info("Attempting to export BOM using the internal schematic parser...")
+                export_result = await export_bom_with_python(
+                    schematic_file, project_dir, project_name, ctx
+                )
+            except Exception as e:
+                logger.info(f"Error exporting BOM with internal parser: {str(e)}", exc_info=True)
+                if ctx:
+                    await ctx.info(f"Error using internal parser: {str(e)}")
                 export_result = {"success": False, "error": str(e)}
 
         if ctx:
@@ -405,6 +430,36 @@ def parse_bom_file(file_path: str) -> tuple[list[dict[str, Any]], dict[str, Any]
             format_info["sample_fields"] = list(components[0].keys())
 
     return components, format_info
+
+
+def _bom_signature(components: list[dict[str, Any]]) -> tuple[Any, ...]:
+    refs = sorted(_bom_component_refs(components))
+    if refs:
+        return ("refs", tuple(refs))
+    normalized_rows = tuple(
+        sorted(json.dumps(row, sort_keys=True, default=str) for row in components)
+    )
+    return ("rows", normalized_rows)
+
+
+def _bom_component_refs(components: list[dict[str, Any]]) -> set[str]:
+    refs: set[str] = set()
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        lowered = {str(key).strip().lower(): value for key, value in component.items()}
+        for key in ("reference", "references", "designator", "designators", "refdes", "ref"):
+            value = lowered.get(key)
+            if value is None:
+                continue
+            for ref in re_split_refs(str(value)):
+                refs.add(ref)
+            break
+    return refs
+
+
+def re_split_refs(value: str) -> list[str]:
+    return [item for item in re.split(r"[\s,;]+", value.strip()) if item]
 
 
 def analyze_bom_data(
@@ -623,7 +678,7 @@ def analyze_bom_data(
 async def export_bom_with_python(
     schematic_file: str, output_dir: str, project_name: str, ctx: Context | None
 ) -> dict[str, Any]:
-    """Export a BOM using KiCad Python modules.
+    """Export a BOM using the internal schematic parser.
 
     Args:
         schematic_file: Path to the schematic file
@@ -639,30 +694,52 @@ async def export_bom_with_python(
         await ctx.report_progress(30, 100)
 
     try:
-        # Try to import KiCad Python modules
-        # This is a placeholder since exporting BOMs from schematic files
-        # is complex and KiCad's API for this is not well-documented
-        import kicad
+        validated_schematic = validate_local_path(schematic_file, "schematic", must_exist=True)
+        output_dir = PathValidator(trusted_roots={os.path.dirname(validated_schematic)}).validate_directory(
+            output_dir,
+            must_exist=True,
+        )
+        schematic = KiCadSchematic.from_file(validated_schematic)
+        rows = []
+        for symbol in schematic.list_symbols():
+            reference = str(symbol.get("reference") or "")
+            if not reference or reference.startswith("#"):
+                continue
+            rows.append(
+                {
+                    "Reference": reference,
+                    "Value": symbol.get("value") or "",
+                    "Footprint": symbol.get("footprint") or "",
+                    "LibId": symbol.get("lib_id") or "",
+                    "Quantity": "1",
+                }
+            )
 
-        # For now, return a message indicating this method is not implemented yet
-        _ = kicad
-        logger.info("BOM export with Python modules not fully implemented")
+        output_file = os.path.join(output_dir, f"{project_name}_bom.csv")
+        temp_file = f"{output_file}.tmp"
+        with open(temp_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["Reference", "Value", "Footprint", "LibId", "Quantity"],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, output_file)
+
         if ctx:
-            await ctx.info("BOM export with Python modules not fully implemented yet")
-
+            await ctx.info(f"Exported BOM with {len(rows)} components")
         return {
-            "success": False,
-            "error": "BOM export using Python modules is not fully implemented yet. Try using the command-line method.",
-            "schematic_file": schematic_file,
+            "success": True,
+            "method": "internal_schematic_parser",
+            "schematic_file": validated_schematic,
+            "output_file": output_file,
+            "component_count": len(rows),
         }
-
-    except ImportError:
-        logger.info("Failed to import KiCad Python modules")
-        return {
-            "success": False,
-            "error": "Failed to import KiCad Python modules",
-            "schematic_file": schematic_file,
-        }
+    except Exception as exc:
+        logger.info("Failed to export BOM with internal parser: %s", exc, exc_info=True)
+        return {"success": False, "error": str(exc), "schematic_file": schematic_file}
 
 
 async def export_bom_with_cli(

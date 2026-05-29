@@ -8,6 +8,7 @@ from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.library_resolver import resolve_symbol
 from kicad_mcp.utils.native_netlist import export_native_netlist
+from kicad_mcp.utils.schematic_intent import connect_pins
 from kicad_mcp.utils.schematic_builder import (
     _apply_spec_to_existing_schematic,
     _build_in_memory_schematic,
@@ -19,6 +20,7 @@ from kicad_mcp.utils.schematic_builder import (
 from kicad_mcp.utils.schematic_pins import (
     _resolve_symbol_pins_cached,
     add_no_connect_to_pin,
+    attach_net_to_pin,
     get_symbol_pin_map_from_schematic,
 )
 
@@ -68,6 +70,66 @@ def test_pin_map_rotation_matches_kicad_sheet_coordinates(tmp_path: Path):
     assert pins["1"]["position"]["angle"] == 180
     assert pins["2"]["connection_point"] == {"x": 54.61, "y": 50.8}
     assert pins["2"]["position"]["angle"] == 0
+
+
+def test_external_stub_preserves_requested_global_label_type(tmp_path: Path):
+    schematic_path = tmp_path / "demo.kicad_sch"
+    schematic = KiCadSchematic.empty()
+    schematic.add_symbol(
+        "Device:R",
+        "R1",
+        "10k",
+        50.8,
+        50.8,
+        0,
+        "Resistor_SMD:R_0603_1608Metric",
+        lib_symbol=resolve_symbol("Device:R")["node"],
+    )
+
+    attach_net_to_pin(
+        schematic,
+        str(schematic_path),
+        "R1",
+        "1",
+        "GLOBAL_NET",
+        label_type="global",
+        label_placement="external_stubs",
+    )
+
+    labels = schematic.list_labels()
+    assert labels[0]["text"] == "GLOBAL_NET"
+    assert labels[0]["type"] == "global"
+
+
+def test_connect_pins_wire_style_routes_wire_instead_of_labels(tmp_path: Path):
+    schematic_path = tmp_path / "demo.kicad_sch"
+    schematic = KiCadSchematic.empty()
+    resistor = resolve_symbol("Device:R")["node"]
+    schematic.add_symbol(
+        "Device:R",
+        "R1",
+        "10k",
+        50.8,
+        50.8,
+        0,
+        "Resistor_SMD:R_0603_1608Metric",
+        lib_symbol=resistor,
+    )
+    schematic.add_symbol(
+        "Device:R",
+        "R2",
+        "10k",
+        70.8,
+        50.8,
+        180,
+        "Resistor_SMD:R_0603_1608Metric",
+        lib_symbol=resistor,
+    )
+
+    result = connect_pins(schematic, str(schematic_path), "R1", "2", "R2", "2", style="wire")
+
+    assert result["style"] == "wire"
+    assert len(schematic.list_wires()) >= 1
 
 
 def test_validate_connection_plan_ignores_power_flag_symbols(monkeypatch):

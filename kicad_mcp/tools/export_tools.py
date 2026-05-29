@@ -5,10 +5,12 @@ Export tools for KiCad projects.
 import asyncio
 import logging
 import os
+import tempfile
 
 from fastmcp import Context, FastMCP
 
 from kicad_mcp.config import TIMEOUT_CONSTANTS
+from kicad_mcp.context import get_kicad_app_context
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import KiCadCLIError
 from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
@@ -22,9 +24,7 @@ logger = logging.getLogger(__name__)
 async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
     """Generate a PCB thumbnail without MCP decoration."""
     try:
-        app_context = None
-        if ctx:
-            app_context = ctx.request_context.lifespan_context
+        app_context = get_kicad_app_context(ctx)
 
         logger.info(f"Generating thumbnail via CLI for project: {project_path}")
 
@@ -145,11 +145,15 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
         if ctx:
             await ctx.report_progress(20, 100)
 
-        # --- Determine Output Path ---
         project_dir = os.path.dirname(pcb_file)
         project_name = os.path.splitext(os.path.basename(pcb_file))[0]
-        output_file = os.path.join(project_dir, f"{project_name}_thumbnail.svg")
-        # ---------------------------
+        output_fd, output_file = tempfile.mkstemp(
+            prefix=f".{project_name}_thumbnail_",
+            suffix=".svg",
+            dir=project_dir,
+        )
+        os.close(output_fd)
+        os.unlink(output_file)
 
         if ctx:
             await ctx.report_progress(30, 100)
@@ -186,6 +190,8 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
                 logger.error("Stdout: %s", process.stdout)
                 if ctx:
                     await ctx.info(f"KiCad CLI command failed: {process.stderr or process.stdout}")
+                if os.path.exists(output_file):
+                    os.unlink(output_file)
                 return None
             logger.info(f"Command successful: {process.stdout}")
 
@@ -219,11 +225,15 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
             logger.info("KiCad CLI thumbnail export failed: %s", e)
             if ctx:
                 await ctx.info(f"KiCad CLI thumbnail export failed: {e}")
+            if "output_file" in locals() and os.path.exists(output_file):
+                os.unlink(output_file)
             return None
         except Exception as e:
             logger.exception("Error running CLI command: %s", e)
             if ctx:
                 await ctx.info(f"Error running KiCad CLI: {e}")
+            if "output_file" in locals() and os.path.exists(output_file):
+                os.unlink(output_file)
             return None
 
     except asyncio.CancelledError:

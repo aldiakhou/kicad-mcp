@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import logging
 import math
 from pathlib import Path
 from typing import Any, cast
@@ -35,6 +36,8 @@ from kicad_mcp.utils.schematic_pins import (
 )
 from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
 from kicad_mcp.utils.transactional_edit import export_schematic_svg_file
+
+logger = logging.getLogger(__name__)
 
 UNACCEPTABLE_ERC_TYPES = {
     "endpoint_off_grid",
@@ -425,11 +428,8 @@ def apply_connection_plan(
     run_erc: bool = True,
 ) -> dict[str, Any]:
     """Apply a batch connection plan transactionally through the v2 intent engine."""
-    # Preserve existing tests and callers that monkeypatch this module's native
-    # netlist helper by rebinding the v2 engine at call time.
     import kicad_mcp.utils.schematic_intent as schematic_intent
 
-    schematic_intent.export_native_netlist = export_native_netlist
     return apply_connection_plan_v2(
         schematic_path,
         connections,
@@ -440,6 +440,8 @@ def apply_connection_plan(
         rollback_on_failure=rollback_on_failed_membership,
         fail_on_erc_violations=fail_on_erc_violations,
         replace_existing=replace_existing,
+        native_netlist_exporter=export_native_netlist,
+        erc_runner=schematic_intent.run_erc_via_cli,
     )
 
 
@@ -553,16 +555,30 @@ def _prewrite_visual_gate(
         return None
     if normalized_spec.get("normalization_errors"):
         return None
+    if not normalized_spec.get("symbols"):
+        return None
     try:
         schematic_path = _schematic_path(project_path)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Using generated preview schematic path for visual gate: %s", exc)
         schematic_path = (
             project_path if project_path.endswith(".kicad_sch") else "generated_preview.kicad_sch"
         )
     try:
         schematic = _build_in_memory_schematic(schematic_path, normalized_spec)
-    except Exception:
-        return None
+    except Exception as exc:
+        return {
+            "success": False,
+            "project_path": project_path,
+            "stage": "visual_gate_error",
+            "error": f"Visual gate preview failed before write: {exc}",
+            "visual_gate": {
+                "mode": gate,
+                "passed": False,
+                "failed_metrics": {"preview_build": True},
+            },
+            "recoverable": True,
+        }
     native = {"success": False, "skipped": True, "nets": {}}
     visual = _visual_quality(schematic, schematic_path, native)
     outside = _outside_page_symbols(schematic, schematic_path)
@@ -1635,7 +1651,8 @@ def _resolved_pin_for_membership(
             or item.get("pinfunction") == requested
         ]
         return matches[0] if len(matches) == 1 else None
-    except Exception:
+    except Exception as exc:
+        logger.debug("Unable to resolve pin for membership validation: %s", exc)
         return None
 
 

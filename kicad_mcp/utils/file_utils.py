@@ -3,10 +3,13 @@ File handling utilities for KiCad MCP Server.
 """
 
 import json
+import logging
 import os
 from typing import Any
 
 from kicad_mcp.utils.kicad_utils import get_project_name_from_path
+
+logger = logging.getLogger(__name__)
 
 
 def get_project_files(project_path: str) -> dict[str, str]:
@@ -47,12 +50,24 @@ def get_project_files(project_path: str) -> dict[str, str]:
                     if not file_type:
                         file_type = ext[1:]  # Use extension if no specific type
 
-                    files[file_type] = os.path.join(project_dir, file)
-    except (OSError, FileNotFoundError):
+                    _add_project_file(files, file_type, os.path.join(project_dir, file))
+    except (OSError, FileNotFoundError) as exc:
         # Directory doesn't exist or can't be accessed - return what we have
-        pass
+        logger.debug("Unable to list KiCad project data files in %s: %s", project_dir, exc)
 
     return files
+
+
+def _add_project_file(files: dict[str, str], file_type: str, file_path: str) -> None:
+    if file_type not in files:
+        files[file_type] = file_path
+        return
+    if os.path.realpath(files[file_type]) == os.path.realpath(file_path):
+        return
+    index = 2
+    while f"{file_type}_{index}" in files:
+        index += 1
+    files[f"{file_type}_{index}"] = file_path
 
 
 def load_project_json(project_path: str) -> dict[str, Any] | None:
@@ -65,7 +80,8 @@ def load_project_json(project_path: str) -> dict[str, Any] | None:
         Parsed JSON data or None if parsing failed
     """
     try:
-        with open(project_path) as f:
+        with open(project_path, encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("Unable to load KiCad project JSON from %s: %s", project_path, exc)
         return None

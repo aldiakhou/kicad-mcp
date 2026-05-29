@@ -16,6 +16,8 @@ from kicad_mcp.utils.netlist_parser import (
     analyze_netlist,
     extract_netlist,
 )
+from kicad_mcp.utils.path_validator import PathValidationError
+from kicad_mcp.utils.transactional_edit import validate_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -57,22 +59,24 @@ async def _extract_schematic_netlist_impl(
     """Extract netlist information from a schematic without MCP decoration."""
     logger.info(f"Extracting netlist from schematic: {schematic_path}")
 
-    if not os.path.exists(schematic_path):
+    try:
+        validated_schematic = validate_local_path(schematic_path, "schematic", must_exist=True)
+    except PathValidationError as exc:
         logger.info(f"Schematic file not found: {schematic_path}")
         if ctx:
-            await ctx.info(f"Schematic file not found: {schematic_path}")
-        return {"success": False, "error": f"Schematic file not found: {schematic_path}"}
+            await ctx.info("Schematic file not found or is outside trusted roots")
+        return {"success": False, "error": str(exc)}
 
     if ctx:
         await ctx.report_progress(10, 100)
-        await ctx.info(f"Loading schematic file: {os.path.basename(schematic_path)}")
+        await ctx.info(f"Loading schematic file: {os.path.basename(validated_schematic)}")
 
     try:
         if ctx:
             await ctx.report_progress(20, 100)
             await ctx.info("Parsing schematic structure...")
 
-        netlist_data, native_netlist = _netlist_native_first(schematic_path)
+        netlist_data, native_netlist = _netlist_native_first(validated_schematic)
 
         if "error" in netlist_data:
             logger.info(f"Error extracting netlist: {netlist_data['error']}")
@@ -102,7 +106,7 @@ async def _extract_schematic_netlist_impl(
 
         result = {
             "success": True,
-            "schematic_path": schematic_path,
+            "schematic_path": validated_schematic,
             "component_count": netlist_data["component_count"],
             "net_count": netlist_data["net_count"],
             "components": netlist_data["components"],
@@ -167,11 +171,13 @@ def register_netlist_tools(mcp: FastMCP) -> None:
         """
         logger.info(f"Extracting netlist for project: {project_path}")
 
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Project not found: {project_path}")
             if ctx:
-                await ctx.info(f"Project not found: {project_path}")
-            return {"success": False, "error": f"Project not found: {project_path}"}
+                await ctx.info("Project not found or is outside trusted roots")
+            return {"success": False, "error": str(exc)}
 
         # Report progress
         if ctx:
@@ -179,7 +185,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
 
         # Get the schematic file
         try:
-            files = get_project_files(project_path)
+            files = get_project_files(validated_project)
 
             if "schematic" not in files:
                 logger.info("Schematic file not found in project")
@@ -202,7 +208,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
 
             # Add project path to result
             if "success" in result and result["success"]:
-                result["project_path"] = project_path
+                result["project_path"] = validated_project
 
             return result
 
@@ -230,20 +236,22 @@ def register_netlist_tools(mcp: FastMCP) -> None:
         """
         logger.info(f"Analyzing connections in schematic: {schematic_path}")
 
-        if not os.path.exists(schematic_path):
+        try:
+            validated_schematic = validate_local_path(schematic_path, "schematic", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Schematic file not found: {schematic_path}")
             if ctx:
-                await ctx.info(f"Schematic file not found: {schematic_path}")
-            return {"success": False, "error": f"Schematic file not found: {schematic_path}"}
+                await ctx.info("Schematic file not found or is outside trusted roots")
+            return {"success": False, "error": str(exc)}
 
         # Report progress
         if ctx:
             await ctx.report_progress(10, 100)
-            await ctx.info(f"Extracting netlist from: {os.path.basename(schematic_path)}")
+            await ctx.info(f"Extracting netlist from: {os.path.basename(validated_schematic)}")
 
         # Extract netlist information
         try:
-            netlist_data, native_netlist = _netlist_native_first(schematic_path)
+            netlist_data, native_netlist = _netlist_native_first(validated_schematic)
 
             if "error" in netlist_data:
                 logger.info(f"Error extracting netlist: {netlist_data['error']}")
@@ -321,7 +329,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
             # Build result
             result = {
                 "success": True,
-                "schematic_path": schematic_path,
+                "schematic_path": validated_schematic,
                 "analysis": analysis,
                 "limitations": netlist_data.get("limitations", NETLIST_LIMITATIONS),
                 "netlist_quality": netlist_data.get("netlist_quality", "partial"),
@@ -365,11 +373,13 @@ def register_netlist_tools(mcp: FastMCP) -> None:
         """
         logger.info(f"Finding connections for component {component_ref} in project: {project_path}")
 
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Project not found: {project_path}")
             if ctx:
-                await ctx.info(f"Project not found: {project_path}")
-            return {"success": False, "error": f"Project not found: {project_path}"}
+                await ctx.info("Project not found or is outside trusted roots")
+            return {"success": False, "error": str(exc)}
 
         # Report progress
         if ctx:
@@ -377,7 +387,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
 
         # Get the schematic file
         try:
-            files = get_project_files(project_path)
+            files = get_project_files(validated_project)
 
             if "schematic" not in files:
                 logger.info("Schematic file not found in project")
@@ -493,7 +503,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
             # Build result
             result = {
                 "success": True,
-                "project_path": project_path,
+                "project_path": validated_project,
                 "schematic_path": schematic_path,
                 "component": component_ref,
                 "component_info": component_info,
