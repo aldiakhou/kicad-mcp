@@ -1644,13 +1644,23 @@ async def test_common_agent_parameter_aliases(tmp_path: Path, monkeypatch: pytes
     server = create_server()
     tools = await server.get_tools()
 
-    project = tools["create_kicad_project"].fn(directory=str(tmp_path), project_name="alias_demo")
+    project = tools["create_kicad_project"].fn(directory=str(tmp_path), name="alias_demo")
     symbol = tools["resolve_symbol"].fn(symbol_id="Device:R")
+    symbol_batch = tools["resolve_symbols"].fn(items=["Device:R"], mode="pin_map")
     footprint = tools["resolve_footprint"].fn(footprint="Resistor_SMD:R_0603_1608Metric")
+    footprint_batch = tools["resolve_footprints"].fn(
+        items=["Resistor_SMD:R_0603_1608Metric"]
+    )
+    symbol_search = tools["find_symbols"].fn(queries=["resistor", "capacitor"], max_results=1)
 
     assert project["success"] is True
     assert symbol["success"] is True
+    assert symbol_batch["success"] is True
+    assert symbol_batch["results"][0]["detail"] == "pins"
     assert footprint["success"] is True
+    assert footprint_batch["success"] is True
+    assert symbol_search["success"] is True
+    assert symbol_search["result_count"] == 2
 
 
 @pytest.mark.asyncio

@@ -410,7 +410,7 @@ def test_schematic_apply_design_intent_quick_apply_skips_expensive_post_steps(
         "include_preview": False,
         "run_quality_report": False,
         "run_native_validation": False,
-        "run_cli_validation": True,
+        "run_cli_validation": False,
         "unsafe_fast_apply": False,
     }
     assert result["verification"]["quality_report_skipped"] is True
@@ -639,6 +639,7 @@ def test_schematic_apply_expanded_spec_reuses_saved_artifact(
     assert result["tool"] == "schematic_apply_expanded_spec"
     assert captured["project_path"] == str(tmp_path)
     assert captured["kwargs"]["run_native_validation"] is False
+    assert captured["kwargs"]["run_cli_validation"] is False
     assert captured["kwargs"]["apply_default_visual_layout"] is False
     assert captured["spec"]["layout_hints"]["visual_layout"]["enabled"] is False
 
@@ -754,6 +755,96 @@ def test_large_design_preview_recommends_staged_workflow(tmp_path: Path, monkeyp
     assert "26 parts / 76 connections" in result["recommendation_reason"]
 
 
+def test_staged_apply_rolls_back_project_on_wiring_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    restored: dict[str, object] = {}
+    monkeypatch.setattr(
+        creation_tools,
+        "backup_project_files",
+        lambda project_path: {"success": True, "backup_path": str(tmp_path / "backup")},
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "restore_backup_manifest",
+        lambda backup_path: restored.setdefault(
+            "result",
+            {"success": True, "backup_path": backup_path, "restored_files": ["demo.kicad_sch"]},
+        ),
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "preflight_build_spec",
+        lambda project_path, normalized: {"success": True},
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "build_schematic_from_spec_v2",
+        lambda *args, **kwargs: {"success": True, "symbol_count": 2},
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "get_project_files",
+        lambda project_path: {"schematic": str(tmp_path / "demo.kicad_sch")},
+    )
+    monkeypatch.setattr(
+        creation_tools,
+        "apply_connection_plan",
+        lambda *args, **kwargs: {
+            "success": False,
+            "error": "Pin J3.B9 is hidden (hidden_other)",
+            "failed_connections": [{"ref": "J3", "pin": "B9"}],
+        },
+    )
+
+    result = creation_tools._apply_expanded_spec_staged(
+        str(tmp_path / "demo.kicad_pro"),
+        {"parts": [], "nets": {"+5V": [["J3", "B9"]]}, "no_connects": []},
+        mode="update",
+        detail="compact",
+        include_preview=False,
+        run_quality_report=False,
+        run_native_validation=False,
+        run_cli_validation=False,
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "staged_wiring_failed"
+    assert result["changed"] is False
+    assert result["rolled_back"] is True
+    assert result["restore_result"]["success"] is True
+
+
+def test_project_busy_response_blocks_mutation_while_job_active(tmp_path: Path):
+    project = str(tmp_path / "busy.kicad_pro")
+    project_key = creation_tools._design_intent_project_key(project)
+    job_id = "design_intent_test_busy"
+    with creation_tools._DESIGN_INTENT_JOBS_LOCK:
+        creation_tools._DESIGN_INTENT_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "stage": "staged_wiring",
+            "project_path": project,
+            "project_key": project_key,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "progress": {"current_step": "apply_connection_batch"},
+        }
+    try:
+        result = creation_tools._run_with_project_mutation_lock(
+            project,
+            "schematic_build_from_spec_v2",
+            lambda: {"success": True},
+        )
+    finally:
+        with creation_tools._DESIGN_INTENT_JOBS_LOCK:
+            creation_tools._DESIGN_INTENT_JOBS.pop(job_id, None)
+
+    assert result["success"] is False
+    assert result["stage"] == "project_busy"
+    assert result["active_job_id"] == job_id
+    assert result["recommended_next_tool"] == "schematic_get_job_status"
+
+
 def test_design_intent_job_status_and_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         creation_tools,
@@ -783,5 +874,6 @@ def test_design_intent_job_status_and_result(tmp_path: Path, monkeypatch: pytest
 
     assert status["success"] is True
     assert status["status"] == "completed"
+    assert status["progress"]["current_step"] == "completed"
     assert result["success"] is True
     assert result["result"]["success"] is True

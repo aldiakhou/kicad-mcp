@@ -18,7 +18,7 @@ Recommended order:
 
 For large schematics, `schematic_apply_design_intent` now chooses a staged internal apply when the expanded design is above the direct-apply threshold. It places parts first, applies connection batches, then runs requested validation. Very large direct requests can return a background `job_id`; poll with `schematic_get_job_status` and finish with `schematic_get_job_result`.
 
-For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. Run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Transactional KiCad CLI validation stays enabled by default; disable it only for agent-controlled staging with `unsafe_fast_apply=true`, which sets `run_cli_validation=false`. Use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation is still required and the client may time out.
+For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. `quick_apply=true` also skips KiCad CLI export validation; run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Use `schematic_apply_design_intent_safe` or `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation may exceed the client timeout.
 
 For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
 
@@ -72,7 +72,7 @@ Use this bulk design-intent shape for normal complete circuits:
 }
 ```
 
-Pin selectors support exact `name` and `number` aliases. Regex selectors use substring matching, so anchor regexes when you need exact matches, for example `{"name_regex": "^VDD$"}`. Hidden power pins on power or ground nets are auto-authorized during design-intent compile; for intentional nonstandard hidden power wiring, pass `allow_hidden_power=true` on the pin rule or at the intent top level.
+Pin selectors support exact `name` and `number` aliases. Regex selectors use substring matching, so anchor regexes when you need exact matches, for example `{"name_regex": "^VDD$"}`. Hidden power pins on power or ground nets are auto-authorized during design-intent compile; USB-C `VBUS`/ground connector pins are treated as hidden power pins. For intentional nonstandard hidden power wiring, pass `allow_hidden_power=true` on the pin rule or at the intent top level.
 
 `bulk_connections` in design intent should normally use `{"net": "...", "pins": [[ref, pin], ...]}`. The compiler also accepts `type=pin_to_net` and `type=pin_to_pin` as forgiving aliases, but `schematic_apply_connection_plan` is the preferred tool for incremental connection-plan entries.
 

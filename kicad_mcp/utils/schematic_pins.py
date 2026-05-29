@@ -32,7 +32,21 @@ def classify_pin(pin: dict[str, Any]) -> str:
 
     if name in {"NC", "DNC", "RES", "RESERVED", "N.C."} or "NC" in name:
         return PinVisibility.HIDDEN_NO_CONNECT
-    if pin_type == "power_in" or name in {"VDD", "VCC", "VSS", "GND", "VBAT"}:
+    power_names = {
+        "VDD",
+        "VDDA",
+        "VCC",
+        "VSS",
+        "VSSA",
+        "GND",
+        "AGND",
+        "DGND",
+        "VBAT",
+        "VBUS",
+        "VIN",
+        "VOUT",
+    }
+    if pin_type in {"power_in", "power_out"} or name in power_names:
         return PinVisibility.HIDDEN_POWER
     return PinVisibility.HIDDEN_OTHER
 
@@ -125,7 +139,8 @@ def attach_net_to_pin(
     selected = matches[0]
     visibility = classify_pin(selected)
     if visibility != PinVisibility.VISIBLE and (
-        visibility != PinVisibility.HIDDEN_POWER or not allow_hidden_power
+        visibility != PinVisibility.HIDDEN_POWER
+        or not (allow_hidden_power or _is_power_net(net_name))
     ):
         raise ValueError(
             f"Pin {reference}.{selected['number']} is hidden ({visibility}); pass "

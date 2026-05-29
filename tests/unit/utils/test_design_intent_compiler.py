@@ -224,6 +224,40 @@ def test_hidden_power_non_power_net_requires_explicit_allow_hidden_power(tmp_pat
     assert result["errors"][0]["error"] == "hidden power pin connection requires allow_hidden_power"
 
 
+def test_usb_c_power_vbus_allows_hidden_power_pin_rule(tmp_path: Path):
+    result = compile_design_intent(
+        str(tmp_path),
+        {
+            "parts": [
+                {
+                    "ref": "J3",
+                    "value": "USB_C_PWR",
+                    "footprint": "Connector_USB:USB_C_Receptacle",
+                    "pins": [
+                        {"number": "A4", "name": "VBUS", "type": "passive", "hidden": True},
+                        {"number": "B9", "name": "VBUS", "type": "passive", "hidden": True},
+                        {"number": "A1", "name": "GND", "type": "passive", "hidden": True},
+                    ],
+                }
+            ],
+            "pin_rules": [
+                {
+                    "ref": "J3",
+                    "match": {"name_regex": "^VBUS$"},
+                    "net": "+5V",
+                    "allow_hidden_power": True,
+                }
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    assert result["expanded_spec"]["nets"]["+5V"] == [
+        {"ref": "J3", "pin": "A4", "allow_hidden_power": True},
+        {"ref": "J3", "pin": "B9", "allow_hidden_power": True},
+    ]
+
+
 def test_support_circuit_aliases_expand_to_connections(tmp_path: Path):
     result = compile_design_intent(
         str(tmp_path),
@@ -566,7 +600,7 @@ def test_crystal_gnd2_connects_ground_pins(tmp_path: Path, monkeypatch):
     assert ["Y1", "4"] in result["expanded_spec"]["nets"]["GNDA"]
 
 
-def test_grounded_crystal_errors_when_symbol_has_no_ground_pins(tmp_path: Path, monkeypatch):
+def test_grounded_crystal_warns_when_symbol_has_no_ground_pins(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         compiler,
         "_resolve_symbol_pins",
@@ -587,8 +621,11 @@ def test_grounded_crystal_errors_when_symbol_has_no_ground_pins(tmp_path: Path, 
         },
     )
 
-    assert result["success"] is False
-    assert result["errors"][0]["error"] == "grounded crystal requested but symbol has no ground pins"
+    assert result["success"] is True
+    assert "GND" not in result["expanded_spec"]["nets"]
+    assert result["warnings"][0]["warning"] == (
+        "crystal case ground requested but no ground/case pin found; generated 2-pin crystal"
+    )
 
 
 def test_led_indicator_uses_led_anode_toward_rail_and_cathode_to_ground(tmp_path: Path):

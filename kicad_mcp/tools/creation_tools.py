@@ -4,6 +4,7 @@ Project, schematic creation, library resolution, and conservative PCB authoring 
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 import json
 import os
@@ -12,6 +13,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 from typing import Any, cast
 import uuid
 
@@ -88,6 +90,7 @@ from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_sp
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import (
     atomic_write_text,
+    backup_project_files,
     create_file_backup,
     export_schematic_svg_file,
     get_file_diff_against_backup,
@@ -104,8 +107,9 @@ _DESIGN_INTENT_JOB_EXECUTOR = ThreadPoolExecutor(
 )
 _DESIGN_INTENT_JOBS: dict[str, dict[str, Any]] = {}
 _DESIGN_INTENT_JOBS_LOCK = threading.Lock()
-_DESIGN_INTENT_PROJECT_LOCKS: dict[str, threading.Lock] = {}
+_DESIGN_INTENT_PROJECT_LOCKS: dict[str, Any] = {}
 _DESIGN_INTENT_JOB_RETAIN_LIMIT = 50
+_DESIGN_INTENT_ACTIVE_JOB_STATUSES = {"pending", "running"}
 _DESIGN_INTENT_PAYLOAD_KEYS = {
     "support_circuits",
     "pin_rules",
@@ -201,6 +205,29 @@ def _compile_v2_or_intent_payload(
 
 
 def _apply_incremental_intent_fragment(
+    project_path: str,
+    fragment: dict[str, Any],
+    *,
+    tool_name: str,
+    run_native_validation: bool = True,
+    run_quality_report: bool = False,
+    unsafe_fast_apply: bool = False,
+) -> dict[str, Any]:
+    return _run_with_project_mutation_lock(
+        project_path,
+        tool_name,
+        lambda: _apply_incremental_intent_fragment_locked(
+            project_path,
+            fragment,
+            tool_name=tool_name,
+            run_native_validation=run_native_validation,
+            run_quality_report=run_quality_report,
+            unsafe_fast_apply=unsafe_fast_apply,
+        ),
+    )
+
+
+def _apply_incremental_intent_fragment_locked(
     project_path: str,
     fragment: dict[str, Any],
     *,
@@ -352,11 +379,12 @@ def _resolve_symbol_for_tool(
 def _normalize_resolve_symbol_requests(
     lib_ids: Sequence[str] | None = None,
     symbols: Sequence[Any] | None = None,
+    items: Sequence[Any] | None = None,
 ) -> list[dict[str, Any]]:
     requests: list[dict[str, Any]] = []
     for lib_id in lib_ids or []:
         requests.append({"lib_id": str(lib_id)})
-    for item in symbols or []:
+    for item in [*(symbols or []), *(items or [])]:
         if isinstance(item, str):
             requests.append({"lib_id": item})
             continue
@@ -367,6 +395,33 @@ def _normalize_resolve_symbol_requests(
         requests.append(
             {
                 "lib_id": str(resolved_lib_id or ""),
+                "ref": item.get("ref") or item.get("reference"),
+            }
+        )
+    return requests
+
+
+def _normalize_resolve_footprint_requests(
+    footprint_ids: Sequence[str] | None = None,
+    footprints: Sequence[Any] | None = None,
+    items: Sequence[Any] | None = None,
+) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+    for footprint_id in footprint_ids or []:
+        requests.append({"footprint_id": str(footprint_id)})
+    for item in [*(footprints or []), *(items or [])]:
+        if isinstance(item, str):
+            requests.append({"footprint_id": item})
+            continue
+        if not isinstance(item, dict):
+            requests.append(
+                {"footprint_id": "", "error": "footprint entry must be a string or object"}
+            )
+            continue
+        resolved = item.get("footprint_id") or item.get("footprint")
+        requests.append(
+            {
+                "footprint_id": str(resolved or ""),
                 "ref": item.get("ref") or item.get("reference"),
             }
         )
@@ -390,6 +445,24 @@ def _find_symbols_for_tool(
     }
 
 
+def _find_symbols_batch_for_tool(
+    queries: Sequence[str],
+    max_results: int,
+    library: str | None,
+) -> dict[str, Any]:
+    requested = [str(item) for item in queries if str(item).strip()]
+    results = [_find_symbols_for_tool(item, max_results, library) for item in requested]
+    return {
+        "success": bool(results),
+        "queries": requested,
+        "library": library,
+        "result_count": len(results),
+        "total_match_count": sum(int(item.get("count", 0)) for item in results),
+        "results": results,
+        "recommended_next_tool": "resolve_symbols",
+    }
+
+
 def _find_footprints_for_tool(
     query: str,
     max_results: int,
@@ -404,6 +477,24 @@ def _find_footprints_for_tool(
         "matches": matches,
         "suggested_queries": _suggested_library_queries(query, "footprint") if not matches else [],
         "recommended_next_tool": "resolve_footprint",
+    }
+
+
+def _find_footprints_batch_for_tool(
+    queries: Sequence[str],
+    max_results: int,
+    library: str | None,
+) -> dict[str, Any]:
+    requested = [str(item) for item in queries if str(item).strip()]
+    results = [_find_footprints_for_tool(item, max_results, library) for item in requested]
+    return {
+        "success": bool(results),
+        "queries": requested,
+        "library": library,
+        "result_count": len(results),
+        "total_match_count": sum(int(item.get("count", 0)) for item in results),
+        "results": results,
+        "recommended_next_tool": "resolve_footprints",
     }
 
 
@@ -453,17 +544,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
         paper: str = "A4",
         directory: str | None = None,
         path: str | None = None,
+        name: str | None = None,
     ) -> dict[str, Any]:
         """Create a new KiCad project and optional schematic/PCB files."""
         resolved_dir = project_dir or directory or path
+        resolved_name = project_name or name or ""
         if not resolved_dir:
             return {
                 "success": False,
-                "project_name": project_name,
+                "project_name": resolved_name,
                 "error": "project_dir is required",
             }
         return _create_kicad_project(
-            resolved_dir, project_name, create_schematic, create_pcb, paper
+            resolved_dir, resolved_name, create_schematic, create_pcb, paper
         )
 
     @mcp.tool()
@@ -581,6 +674,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         run_native_validation: bool = True,
         run_cli_validation: bool = True,
         unsafe_fast_apply: bool = False,
+        allow_partial_write: bool = False,
         path: str | None = None,
     ) -> dict[str, Any]:
         """Compile and apply generic bulk schematic design intent.
@@ -589,24 +683,51 @@ def register_creation_tools(mcp: FastMCP) -> None:
         parts, rails, pin_rules, interfaces, support_circuits, bulk_connections, and
         no_connect_rules; the compiler expands those into the v2 build spec.
         """
-        return _schematic_design_intent_response(
-            _resolve_project_alias(project_path, schematic_path, path),
-            intent or spec or {},
-            mode=mode,
-            dry_run=dry_run,
-            strict=strict,
-            detail=detail,
-            include_expanded_spec=include_expanded_spec,
-            tool_name="schematic_apply_design_intent",
-            visual_layout=visual_layout,
-            visual_style=visual_style,
-            dry_run_validation=dry_run_validation,
-            quick_apply=quick_apply,
-            include_preview=include_preview,
-            run_quality_report=run_quality_report,
-            run_native_validation=run_native_validation,
-            run_cli_validation=run_cli_validation,
-            unsafe_fast_apply=unsafe_fast_apply,
+        resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+        if dry_run:
+            return _schematic_design_intent_response(
+                resolved_project,
+                intent or spec or {},
+                mode=mode,
+                dry_run=True,
+                strict=strict,
+                detail=detail,
+                include_expanded_spec=include_expanded_spec,
+                tool_name="schematic_apply_design_intent",
+                visual_layout=visual_layout,
+                visual_style=visual_style,
+                dry_run_validation=dry_run_validation,
+                quick_apply=quick_apply,
+                include_preview=include_preview,
+                run_quality_report=run_quality_report,
+                run_native_validation=run_native_validation,
+                run_cli_validation=run_cli_validation,
+                unsafe_fast_apply=unsafe_fast_apply,
+                allow_partial_write=allow_partial_write,
+            )
+        return _run_with_project_mutation_lock(
+            resolved_project,
+            "schematic_apply_design_intent",
+            lambda: _schematic_design_intent_response(
+                resolved_project,
+                intent or spec or {},
+                mode=mode,
+                dry_run=False,
+                strict=strict,
+                detail=detail,
+                include_expanded_spec=include_expanded_spec,
+                tool_name="schematic_apply_design_intent",
+                visual_layout=visual_layout,
+                visual_style=visual_style,
+                dry_run_validation=dry_run_validation,
+                quick_apply=quick_apply,
+                include_preview=include_preview,
+                run_quality_report=run_quality_report,
+                run_native_validation=run_native_validation,
+                run_cli_validation=run_cli_validation,
+                unsafe_fast_apply=unsafe_fast_apply,
+                allow_partial_write=allow_partial_write,
+            ),
         )
 
     @mcp.tool()
@@ -625,23 +746,30 @@ def register_creation_tools(mcp: FastMCP) -> None:
         unsafe_fast_apply: bool = False,
         schematic_path: str | None = None,
         visual_layout: bool = True,
+        allow_partial_write: bool = False,
         path: str | None = None,
     ) -> dict[str, Any]:
         """Apply a previously compiled design-intent expanded v2 spec without recompiling."""
-        return _schematic_apply_expanded_spec_response(
-            _resolve_project_alias(project_path, schematic_path, path),
-            expanded_spec_path=expanded_spec_path,
-            spec=spec,
-            mode=mode,
-            strict=strict,
-            detail=detail,
-            quick_apply=quick_apply,
-            include_preview=include_preview,
-            run_quality_report=run_quality_report,
-            run_native_validation=run_native_validation,
-            run_cli_validation=run_cli_validation,
-            unsafe_fast_apply=unsafe_fast_apply,
-            visual_layout=visual_layout,
+        resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+        return _run_with_project_mutation_lock(
+            resolved_project,
+            "schematic_apply_expanded_spec",
+            lambda: _schematic_apply_expanded_spec_response(
+                resolved_project,
+                expanded_spec_path=expanded_spec_path,
+                spec=spec,
+                mode=mode,
+                strict=strict,
+                detail=detail,
+                quick_apply=quick_apply,
+                include_preview=include_preview,
+                run_quality_report=run_quality_report,
+                run_native_validation=run_native_validation,
+                run_cli_validation=run_cli_validation,
+                unsafe_fast_apply=unsafe_fast_apply,
+                visual_layout=visual_layout,
+                allow_partial_write=allow_partial_write,
+            ),
         )
 
     @mcp.tool()
@@ -662,6 +790,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         run_native_validation: bool = False,
         run_cli_validation: bool = True,
         unsafe_fast_apply: bool = False,
+        allow_partial_write: bool = False,
         path: str | None = None,
     ) -> dict[str, Any]:
         """Start a background design-intent apply job and return immediately for polling."""
@@ -681,7 +810,78 @@ def register_creation_tools(mcp: FastMCP) -> None:
             run_native_validation=run_native_validation,
             run_cli_validation=run_cli_validation,
             unsafe_fast_apply=unsafe_fast_apply,
+            allow_partial_write=allow_partial_write,
         )
+
+    @mcp.tool()
+    def schematic_apply_design_intent_safe(
+        project_path: str | None = None,
+        intent: dict[str, Any] | None = None,
+        mode: str = "update",
+        max_wait_seconds: float = 300.0,
+        strict: bool = False,
+        detail: str = "compact",
+        visual_layout: bool = True,
+        visual_style: str = "readable",
+        allow_background: bool = True,
+        allow_partial_write: bool = False,
+        schematic_path: str | None = None,
+        spec: dict[str, Any] | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Safely compile, stage/background-apply, and validate a large design intent."""
+        resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+
+        def start_safe_apply() -> dict[str, Any]:
+            return _schematic_design_intent_response(
+                resolved_project,
+                intent or spec or {},
+                mode=mode,
+                dry_run=False,
+                strict=strict,
+                detail=detail,
+                include_expanded_spec=False,
+                tool_name="schematic_apply_design_intent_safe",
+                visual_layout=visual_layout,
+                visual_style=visual_style,
+                quick_apply=False,
+                include_preview=False,
+                run_quality_report=True,
+                run_native_validation=True,
+                run_cli_validation=True,
+                unsafe_fast_apply=False,
+                allow_partial_write=allow_partial_write,
+                allow_background_redirect=allow_background,
+            )
+
+        project_lock, busy = _try_acquire_project_mutation_lock(
+            resolved_project,
+            "schematic_apply_design_intent_safe",
+        )
+        if busy is not None:
+            return busy
+        try:
+            result = start_safe_apply()
+        finally:
+            cast(Any, project_lock).release()
+        job_id = result.get("job_id")
+        if not job_id or max_wait_seconds <= 0:
+            return result
+        with _DESIGN_INTENT_JOBS_LOCK:
+            job = _DESIGN_INTENT_JOBS.get(str(job_id))
+            future = cast(Future[Any] | None, job.get("future") if job else None)
+        if future is not None:
+            try:
+                future.result(timeout=max_wait_seconds)
+            except FutureTimeoutError:
+                status = _get_design_intent_job_status(str(job_id))
+                status["success"] = True
+                status["stage"] = "background_job_running"
+                status["tool"] = "schematic_apply_design_intent_safe"
+                return status
+        final = _get_design_intent_job_result(str(job_id))
+        final["tool"] = "schematic_apply_design_intent_safe"
+        return final
 
     @mcp.tool()
     def schematic_get_job_status(job_id: str) -> dict[str, Any]:
@@ -770,20 +970,24 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 "tool": "schematic_build_from_spec_v2",
                 "changed": False,
             }
-        result = build_schematic_from_spec_v2(
+        result = _run_with_project_mutation_lock(
             resolved_project,
-            expanded,
-            mode=mode,
-            run_erc=run_erc,
-            allow_destructive_replace=allow_destructive_replace,
-            detail=detail,
-            include_diff=include_diff,
-            include_preview=include_preview,
-            include_full_native_netlist=include_full_native_netlist,
-            run_quality_report=run_quality_report,
-            run_native_validation=run_native_validation,
-            apply_default_visual_layout=apply_default_visual_layout,
-            run_cli_validation=run_cli_validation,
+            "schematic_build_from_spec_v2",
+            lambda: build_schematic_from_spec_v2(
+                resolved_project,
+                expanded,
+                mode=mode,
+                run_erc=run_erc,
+                allow_destructive_replace=allow_destructive_replace,
+                detail=detail,
+                include_diff=include_diff,
+                include_preview=include_preview,
+                include_full_native_netlist=include_full_native_netlist,
+                run_quality_report=run_quality_report,
+                run_native_validation=run_native_validation,
+                apply_default_visual_layout=apply_default_visual_layout,
+                run_cli_validation=run_cli_validation,
+            ),
         )
         if isinstance(compile_result, dict):
             result["compiled_from_intent"] = True
@@ -823,7 +1027,11 @@ def register_creation_tools(mcp: FastMCP) -> None:
         verify: bool = True,
     ) -> dict[str, Any]:
         """Bulk-assign schematic Footprint properties by reference."""
-        return _schematic_assign_footprints(project_path, assignments, verify=verify)
+        return _run_with_project_mutation_lock(
+            project_path,
+            "schematic_assign_footprints",
+            lambda: _schematic_assign_footprints(project_path, assignments, verify=verify),
+        )
 
     @mcp.tool()
     def schematic_assign_default_footprints(
@@ -833,7 +1041,13 @@ def register_creation_tools(mcp: FastMCP) -> None:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Assign missing footprints from symbol defaults, then footprint filters."""
-        return _schematic_assign_default_footprints(project_path, refs, strategy, dry_run)
+        if dry_run:
+            return _schematic_assign_default_footprints(project_path, refs, strategy, dry_run)
+        return _run_with_project_mutation_lock(
+            project_path,
+            "schematic_assign_default_footprints",
+            lambda: _schematic_assign_default_footprints(project_path, refs, strategy, dry_run),
+        )
 
     @mcp.tool()
     def schematic_footprint_report(
@@ -1016,14 +1230,18 @@ def register_creation_tools(mcp: FastMCP) -> None:
         except Exception as exc:
             return {"success": False, "project_path": project_path, "error": str(exc)}
 
-        result = _apply_transactional_schematic_authoring(
+        result = _run_with_project_mutation_lock(
             schematic_path,
-            lambda schematic: _apply_schematic_functional_layout(
-                schematic,
+            "schematic_apply_functional_layout",
+            lambda: _apply_transactional_schematic_authoring(
                 schematic_path,
-                preserve_connectivity,
-                arrange_properties,
-                placement_rules,
+                lambda schematic: _apply_schematic_functional_layout(
+                    schematic,
+                    schematic_path,
+                    preserve_connectivity,
+                    arrange_properties,
+                    placement_rules,
+                ),
             ),
         )
         if result.get("success") and run_quality_report:
@@ -1138,18 +1356,21 @@ def register_creation_tools(mcp: FastMCP) -> None:
         detail: str = "compact",
         include_source: bool = False,
         include_pins: bool = True,
+        items: list[Any] | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Resolve multiple KiCad symbols with per-item success and failure results."""
 
         def operation() -> dict[str, Any]:
-            requests = _normalize_resolve_symbol_requests(lib_ids, symbols)
+            resolved_detail = "pins" if str(mode or "").lower() == "pin_map" else detail
+            requests = _normalize_resolve_symbol_requests(lib_ids, symbols, items)
             if not requests:
                 return {
                     "success": False,
                     "results": [],
                     "resolved_count": 0,
                     "failed_count": 0,
-                    "error": "lib_ids or symbols is required",
+                    "error": "lib_ids, symbols, or items is required",
                 }
             results = []
             resolved_count = 0
@@ -1182,7 +1403,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 try:
                     result = _resolve_symbol_for_tool(
                         requested_lib_id,
-                        detail=detail,
+                        detail=resolved_detail,
                         include_source=include_source,
                         include_pins=include_pins,
                     )
@@ -1212,16 +1433,27 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def find_symbols(
-        query: str,
+        query: str | None = None,
         max_results: int = 10,
         library: str | None = None,
         limit: int | None = None,
         filter: str | None = None,
+        queries: list[str] | None = None,
     ) -> dict[str, Any]:
         """Fuzzy-search KiCad symbols before resolving an exact lib_id."""
         try:
             resolved_library = library or filter
             resolved_limit = limit if limit is not None else max_results
+            if queries is not None:
+                return _run_heavy_library_tool(
+                    lambda: _find_symbols_batch_for_tool(
+                        queries,
+                        resolved_limit,
+                        resolved_library,
+                    )
+                )
+            if not query:
+                return {"success": False, "query": query, "error": "query or queries is required"}
             return _run_heavy_library_tool(
                 lambda: _find_symbols_for_tool(query, resolved_limit, resolved_library)
             )
@@ -1230,21 +1462,103 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def find_footprints(
-        query: str,
+        query: str | None = None,
         max_results: int = 10,
         library: str | None = None,
         limit: int | None = None,
         filter: str | None = None,
+        queries: list[str] | None = None,
     ) -> dict[str, Any]:
         """Fuzzy-search KiCad footprints before resolving an exact footprint_id."""
         try:
             resolved_library = library or filter
             resolved_limit = limit if limit is not None else max_results
+            if queries is not None:
+                return _run_heavy_library_tool(
+                    lambda: _find_footprints_batch_for_tool(
+                        queries,
+                        resolved_limit,
+                        resolved_library,
+                    )
+                )
+            if not query:
+                return {"success": False, "query": query, "error": "query or queries is required"}
             return _run_heavy_library_tool(
                 lambda: _find_footprints_for_tool(query, resolved_limit, resolved_library)
             )
         except Exception as exc:
             return {"success": False, "query": query, "error": str(exc)}
+
+    @mcp.tool()
+    def resolve_footprints(
+        footprint_ids: list[str] | None = None,
+        footprints: list[Any] | None = None,
+        items: list[Any] | None = None,
+        detail: str = "compact",
+        include_source: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve multiple KiCad footprints with per-item success and failure results."""
+
+        def operation() -> dict[str, Any]:
+            requests = _normalize_resolve_footprint_requests(
+                footprint_ids,
+                footprints,
+                items,
+            )
+            if not requests:
+                return {
+                    "success": False,
+                    "results": [],
+                    "resolved_count": 0,
+                    "failed_count": 0,
+                    "error": "footprint_ids, footprints, or items is required",
+                }
+            results = []
+            resolved_count = 0
+            failed_count = 0
+            for request in requests:
+                requested_footprint_id = request.get("footprint_id", "")
+                ref = request.get("ref")
+                if not requested_footprint_id:
+                    failed_count += 1
+                    results.append(
+                        {
+                            "success": False,
+                            "footprint_id": requested_footprint_id,
+                            "ref": ref,
+                            "error": request.get("error") or "footprint_id is required",
+                        }
+                    )
+                    continue
+                try:
+                    result = _resolve_footprint_for_tool(
+                        requested_footprint_id,
+                        detail=detail,
+                        include_source=include_source,
+                    )
+                    if ref:
+                        result["ref"] = ref
+                    results.append(result)
+                    resolved_count += 1
+                except (KiCadLibraryError, ValueError) as exc:
+                    failed_count += 1
+                    results.append(
+                        {
+                            "success": False,
+                            "footprint_id": requested_footprint_id,
+                            "ref": ref,
+                            "error": str(exc),
+                        }
+                    )
+            return {
+                "success": resolved_count > 0,
+                "partial_success": resolved_count > 0 and failed_count > 0,
+                "resolved_count": resolved_count,
+                "failed_count": failed_count,
+                "results": results,
+            }
+
+        return _run_heavy_library_tool(operation)
 
     @mcp.tool()
     def resolve_footprint(
@@ -1476,23 +1790,27 @@ def register_creation_tools(mcp: FastMCP) -> None:
         """Connect one schematic symbol pin to a named net by electrical intent."""
         if ctx:
             await ctx.info(f"Connecting {reference}.{pin} to {net_name}")
-        result = apply_connection_plan_v2(
+        result = _run_with_project_mutation_lock(
             schematic_path,
-            [
-                {
-                    "type": "pin_to_net",
-                    "ref": reference,
-                    "pin": pin,
-                    "net": net_name,
-                    "label_type": label_type,
-                    "stub_length_mm": stub_length_mm,
-                }
-            ],
-            verify_native_netlist=verify,
-            run_erc=verify,
-            auto_snap=auto_snap,
-            fail_on_erc_violations=fail_on_erc_violations,
-            replace_existing=replace_existing,
+            "schematic_connect_pin_to_net",
+            lambda: apply_connection_plan_v2(
+                schematic_path,
+                [
+                    {
+                        "type": "pin_to_net",
+                        "ref": reference,
+                        "pin": pin,
+                        "net": net_name,
+                        "label_type": label_type,
+                        "stub_length_mm": stub_length_mm,
+                    }
+                ],
+                verify_native_netlist=verify,
+                run_erc=verify,
+                auto_snap=auto_snap,
+                fail_on_erc_violations=fail_on_erc_violations,
+                replace_existing=replace_existing,
+            ),
         )
         result["tool"] = "schematic_connect_pin_to_net"
         return result
@@ -1515,22 +1833,26 @@ def register_creation_tools(mcp: FastMCP) -> None:
         """Connect two pins by assigning both to the same named net."""
         if ctx:
             await ctx.info(f"Connecting {ref_a}.{pin_a} to {ref_b}.{pin_b}")
-        result = apply_connection_plan_v2(
+        result = _run_with_project_mutation_lock(
             schematic_path,
-            [
-                {
-                    "type": "pin_to_pin",
-                    "from": {"ref": ref_a, "pin": pin_a},
-                    "to": {"ref": ref_b, "pin": pin_b},
-                    "net": net_name,
-                    "style": style,
-                }
-            ],
-            verify_native_netlist=verify,
-            run_erc=verify,
-            auto_snap=auto_snap,
-            fail_on_erc_violations=fail_on_erc_violations,
-            replace_existing=replace_existing,
+            "schematic_connect_pins",
+            lambda: apply_connection_plan_v2(
+                schematic_path,
+                [
+                    {
+                        "type": "pin_to_pin",
+                        "from": {"ref": ref_a, "pin": pin_a},
+                        "to": {"ref": ref_b, "pin": pin_b},
+                        "net": net_name,
+                        "style": style,
+                    }
+                ],
+                verify_native_netlist=verify,
+                run_erc=verify,
+                auto_snap=auto_snap,
+                fail_on_erc_violations=fail_on_erc_violations,
+                replace_existing=replace_existing,
+            ),
         )
         result["tool"] = "schematic_connect_pins"
         return result
@@ -1549,14 +1871,18 @@ def register_creation_tools(mcp: FastMCP) -> None:
         """Connect one schematic symbol pin to a ground net by electrical intent."""
         if ctx:
             await ctx.info(f"Connecting {reference}.{pin} to {ground_net}")
-        result = apply_connection_plan_v2(
+        result = _run_with_project_mutation_lock(
             schematic_path,
-            [{"type": "pin_to_ground", "ref": reference, "pin": pin, "net": ground_net}],
-            verify_native_netlist=verify,
-            run_erc=verify,
-            auto_snap=True,
-            fail_on_erc_violations=fail_on_erc_violations,
-            replace_existing=replace_existing,
+            "schematic_connect_pin_to_ground",
+            lambda: apply_connection_plan_v2(
+                schematic_path,
+                [{"type": "pin_to_ground", "ref": reference, "pin": pin, "net": ground_net}],
+                verify_native_netlist=verify,
+                run_erc=verify,
+                auto_snap=True,
+                fail_on_erc_violations=fail_on_erc_violations,
+                replace_existing=replace_existing,
+            ),
         )
         result["tool"] = "schematic_connect_pin_to_ground"
         return result
@@ -1575,14 +1901,18 @@ def register_creation_tools(mcp: FastMCP) -> None:
         """Connect one schematic symbol pin to a power net by electrical intent."""
         if ctx:
             await ctx.info(f"Connecting {reference}.{pin} to {power_net}")
-        result = apply_connection_plan_v2(
+        result = _run_with_project_mutation_lock(
             schematic_path,
-            [{"type": "pin_to_power", "ref": reference, "pin": pin, "net": power_net}],
-            verify_native_netlist=verify,
-            run_erc=verify,
-            auto_snap=True,
-            fail_on_erc_violations=fail_on_erc_violations,
-            replace_existing=replace_existing,
+            "schematic_connect_pin_to_power",
+            lambda: apply_connection_plan_v2(
+                schematic_path,
+                [{"type": "pin_to_power", "ref": reference, "pin": pin, "net": power_net}],
+                verify_native_netlist=verify,
+                run_erc=verify,
+                auto_snap=True,
+                fail_on_erc_violations=fail_on_erc_violations,
+                replace_existing=replace_existing,
+            ),
         )
         result["tool"] = "schematic_connect_pin_to_power"
         return result
@@ -1618,15 +1948,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
             if rollback_on_failure is None
             else bool(rollback_on_failure)
         )
-        result = apply_connection_plan(
+        result = _run_with_project_mutation_lock(
             schematic_path,
-            connections,
-            no_connects,
-            effective_verify_native,
-            effective_rollback,
-            fail_on_erc_violations,
-            replace_existing=replace_existing,
-            run_erc=effective_run_erc,
+            "schematic_apply_connection_plan",
+            lambda: apply_connection_plan(
+                schematic_path,
+                connections,
+                no_connects,
+                effective_verify_native,
+                effective_rollback,
+                fail_on_erc_violations,
+                replace_existing=replace_existing,
+                run_erc=effective_run_erc,
+            ),
         )
         if ctx and effective_verify_native:
             await ctx.info("Applied schematic edits; checked native netlist membership")
@@ -2472,18 +2806,46 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _project_file_for_lock(project_path: str) -> str:
+    candidate = Path(os.path.realpath(os.path.expanduser(project_path)))
+    try:
+        if candidate.suffix == ".kicad_sch":
+            project_candidate = candidate.with_suffix(".kicad_pro")
+            if project_candidate.exists():
+                return str(project_candidate)
+        if candidate.is_dir():
+            projects = sorted(candidate.glob("*.kicad_pro"))
+            if len(projects) == 1:
+                return str(projects[0])
+    except OSError:
+        pass
+    return str(candidate)
+
+
+def _project_file_for_backup(project_path: str) -> str:
+    return _project_file_for_lock(project_path)
+
+
 def _design_intent_job_public(
     job: dict[str, Any], *, include_result: bool = False
 ) -> dict[str, Any]:
+    progress = dict(job.get("progress") or {})
+    started_monotonic = job.get("started_monotonic")
+    if isinstance(started_monotonic, float):
+        progress["elapsed_seconds"] = round(max(time.monotonic() - started_monotonic, 0.0), 1)
+    if progress and "last_heartbeat" not in progress:
+        progress["last_heartbeat"] = job.get("started_at") or job.get("created_at")
     public = {
         "success": True,
         "job_id": job["job_id"],
         "status": job["status"],
+        "stage": job.get("stage"),
         "project_path": job["project_path"],
         "created_at": job["created_at"],
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
         "cancel_requested": bool(job.get("cancel_requested", False)),
+        "progress": progress,
         "error": job.get("error"),
         "recommended_next_tool": (
             "schematic_get_job_result"
@@ -2511,16 +2873,161 @@ def _trim_design_intent_jobs_locked() -> None:
 
 
 def _design_intent_project_key(project_path: str) -> str:
-    return os.path.realpath(os.path.expanduser(project_path))
+    return os.path.normcase(os.path.realpath(os.path.expanduser(_project_file_for_lock(project_path))))
 
 
-def _design_intent_project_lock(project_key: str) -> threading.Lock:
+def _design_intent_project_lock(project_key: str) -> Any:
     with _DESIGN_INTENT_JOBS_LOCK:
         lock = _DESIGN_INTENT_PROJECT_LOCKS.get(project_key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _DESIGN_INTENT_PROJECT_LOCKS[project_key] = lock
         return lock
+
+
+def _active_design_intent_job_for_project_locked(
+    project_key: str, *, exclude_job_id: str | None = None
+) -> dict[str, Any] | None:
+    for job in _DESIGN_INTENT_JOBS.values():
+        if exclude_job_id is not None and job.get("job_id") == exclude_job_id:
+            continue
+        if job.get("project_key") != project_key:
+            continue
+        if job.get("status") in _DESIGN_INTENT_ACTIVE_JOB_STATUSES:
+            return job
+    return None
+
+
+def _project_busy_response(
+    project_path: str,
+    tool_name: str,
+    active_job: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    active_job_id = active_job.get("job_id") if active_job else None
+    response: dict[str, Any] = {
+        "success": False,
+        "tool": tool_name,
+        "stage": "project_busy",
+        "project_path": project_path,
+        "active_job_id": active_job_id,
+        "status": active_job.get("status") if active_job else None,
+        "changed": False,
+        "recoverable": True,
+        "error": "project is already being modified",
+        "recommended_next_tool": "schematic_get_job_status"
+        if active_job_id
+        else "project_design_state",
+        "recommended_next_arguments": {"job_id": active_job_id}
+        if active_job_id
+        else {"project_path": project_path},
+    }
+    if active_job and active_job.get("progress"):
+        response["progress"] = dict(active_job["progress"])
+    return response
+
+
+def _try_acquire_project_mutation_lock(
+    project_path: str,
+    tool_name: str,
+    *,
+    exclude_job_id: str | None = None,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    project_key = _design_intent_project_key(project_path)
+    with _DESIGN_INTENT_JOBS_LOCK:
+        active_job = _active_design_intent_job_for_project_locked(
+            project_key,
+            exclude_job_id=exclude_job_id,
+        )
+    if active_job is not None:
+        return None, _project_busy_response(project_path, tool_name, active_job)
+
+    project_lock = _design_intent_project_lock(project_key)
+    acquired = project_lock.acquire(blocking=False)
+    if not acquired:
+        with _DESIGN_INTENT_JOBS_LOCK:
+            active_job = _active_design_intent_job_for_project_locked(
+                project_key,
+                exclude_job_id=exclude_job_id,
+            )
+        return None, _project_busy_response(project_path, tool_name, active_job)
+
+    with _DESIGN_INTENT_JOBS_LOCK:
+        active_job = _active_design_intent_job_for_project_locked(
+            project_key,
+            exclude_job_id=exclude_job_id,
+        )
+    if active_job is not None:
+        project_lock.release()
+        return None, _project_busy_response(project_path, tool_name, active_job)
+    return project_lock, None
+
+
+def _run_with_project_mutation_lock(
+    project_path: str,
+    tool_name: str,
+    operation: Callable[[], dict[str, Any]],
+    *,
+    exclude_job_id: str | None = None,
+) -> dict[str, Any]:
+    project_lock, busy = _try_acquire_project_mutation_lock(
+        project_path,
+        tool_name,
+        exclude_job_id=exclude_job_id,
+    )
+    if busy is not None:
+        return busy
+    try:
+        return operation()
+    finally:
+        cast(Any, project_lock).release()
+
+
+def _update_design_intent_job_progress(
+    job_id: str | None,
+    *,
+    stage: str | None = None,
+    current_step: str | None = None,
+    **progress: Any,
+) -> None:
+    if not job_id:
+        return
+    with _DESIGN_INTENT_JOBS_LOCK:
+        job = _DESIGN_INTENT_JOBS.get(job_id)
+        if job is None:
+            return
+        if stage is not None:
+            job["stage"] = stage
+        current = dict(job.get("progress") or {})
+        if current_step is not None:
+            current["current_step"] = current_step
+        current.update(progress)
+        started_monotonic = job.get("started_monotonic")
+        if isinstance(started_monotonic, float):
+            current["elapsed_seconds"] = round(max(time.monotonic() - started_monotonic, 0.0), 1)
+        current["last_heartbeat"] = _utc_now()
+        job["progress"] = current
+
+
+def _design_intent_job_cancel_requested(job_id: str | None) -> bool:
+    if not job_id:
+        return False
+    with _DESIGN_INTENT_JOBS_LOCK:
+        job = _DESIGN_INTENT_JOBS.get(job_id)
+        return bool(job and job.get("cancel_requested"))
+
+
+def _cancelled_before_write_response(project_path: str, stage: str) -> dict[str, Any]:
+    return {
+        "success": False,
+        "status": "cancelled",
+        "stage": "cancelled",
+        "cancel_stage": stage,
+        "project_path": project_path,
+        "changed": False,
+        "rolled_back": False,
+        "recoverable": True,
+        "error": "job cancelled before schematic write",
+    }
 
 
 def _run_design_intent_job(
@@ -2540,10 +3047,26 @@ def _run_design_intent_job(
                 if job is None or job.get("status") == "cancelled" or job.get("cancel_requested"):
                     if job is not None:
                         job["status"] = "cancelled"
+                        job["stage"] = "cancelled"
+                        job["result"] = {
+                            "success": False,
+                            "status": "cancelled",
+                            "stage": "cancelled",
+                            "project_path": project_path,
+                            "changed": False,
+                            "rolled_back": False,
+                        }
                         job.setdefault("finished_at", _utc_now())
                     return
                 job["status"] = "running"
+                job["stage"] = "compiling"
                 job["started_at"] = _utc_now()
+                job["started_monotonic"] = time.monotonic()
+                job["progress"] = {
+                    "current_step": "compile_design_intent",
+                    "elapsed_seconds": 0.0,
+                    "last_heartbeat": job["started_at"],
+                }
             result = _schematic_design_intent_response(
                 project_path,
                 intent,
@@ -2561,22 +3084,36 @@ def _run_design_intent_job(
                 run_native_validation=options["run_native_validation"],
                 run_cli_validation=options["run_cli_validation"],
                 unsafe_fast_apply=options["unsafe_fast_apply"],
+                allow_partial_write=options["allow_partial_write"],
                 allow_background_redirect=False,
+                job_id=job_id,
             )
-        status = "completed" if result.get("success") else "failed"
+        status = (
+            "cancelled"
+            if result.get("status") == "cancelled" or result.get("stage") == "cancelled"
+            else "completed"
+            if result.get("success")
+            else "failed"
+        )
         with _DESIGN_INTENT_JOBS_LOCK:
             job = _DESIGN_INTENT_JOBS.get(job_id)
             if job is not None:
                 job["status"] = status
+                job["stage"] = result.get("stage")
                 job["result"] = result
                 job["error"] = result.get("error")
                 job["finished_at"] = _utc_now()
+                progress = dict(job.get("progress") or {})
+                progress["current_step"] = status
+                progress["last_heartbeat"] = job["finished_at"]
+                job["progress"] = progress
                 _trim_design_intent_jobs_locked()
     except Exception as exc:
         with _DESIGN_INTENT_JOBS_LOCK:
             job = _DESIGN_INTENT_JOBS.get(job_id)
             if job is not None:
                 job["status"] = "failed"
+                job["stage"] = "failed"
                 job["error"] = str(exc)
                 job["result"] = {"success": False, "job_id": job_id, "error": str(exc)}
                 job["finished_at"] = _utc_now()
@@ -2599,8 +3136,16 @@ def _start_design_intent_job(
     run_native_validation: bool,
     run_cli_validation: bool,
     unsafe_fast_apply: bool,
+    allow_partial_write: bool = False,
 ) -> dict[str, Any]:
     job_id = f"design_intent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    project_key = _design_intent_project_key(project_path)
+    project_lock = _design_intent_project_lock(project_key)
+    acquired = project_lock.acquire(blocking=False)
+    if not acquired:
+        with _DESIGN_INTENT_JOBS_LOCK:
+            active_job = _active_design_intent_job_for_project_locked(project_key)
+        return _project_busy_response(project_path, "schematic_start_design_intent_job", active_job)
     options = {
         "mode": mode,
         "strict": strict,
@@ -2614,31 +3159,49 @@ def _start_design_intent_job(
         "run_native_validation": run_native_validation,
         "run_cli_validation": run_cli_validation,
         "unsafe_fast_apply": unsafe_fast_apply,
+        "allow_partial_write": allow_partial_write,
     }
-    job: dict[str, Any] = {
-        "job_id": job_id,
-        "status": "pending",
-        "project_path": project_path,
-        "project_key": _design_intent_project_key(project_path),
-        "created_at": _utc_now(),
-        "options": options,
-        "cancel_requested": False,
-    }
-    with _DESIGN_INTENT_JOBS_LOCK:
-        _DESIGN_INTENT_JOBS[job_id] = job
-    future = _DESIGN_INTENT_JOB_EXECUTOR.submit(
-        _run_design_intent_job,
-        job_id,
-        project_path,
-        intent,
-        options,
-    )
-    with _DESIGN_INTENT_JOBS_LOCK:
-        if job_id in _DESIGN_INTENT_JOBS:
-            _DESIGN_INTENT_JOBS[job_id]["future"] = future
-    response = _design_intent_job_public(job)
-    response["recommended_next_tool"] = "schematic_get_job_status"
-    return response
+    try:
+        created_at = _utc_now()
+        job: dict[str, Any] = {
+            "job_id": job_id,
+            "status": "pending",
+            "stage": "queued",
+            "project_path": project_path,
+            "project_key": project_key,
+            "created_at": created_at,
+            "options": options,
+            "cancel_requested": False,
+            "progress": {
+                "current_step": "queued",
+                "elapsed_seconds": 0.0,
+                "last_heartbeat": created_at,
+            },
+        }
+        with _DESIGN_INTENT_JOBS_LOCK:
+            active_job = _active_design_intent_job_for_project_locked(project_key)
+            if active_job is not None:
+                return _project_busy_response(
+                    project_path,
+                    "schematic_start_design_intent_job",
+                    active_job,
+                )
+            _DESIGN_INTENT_JOBS[job_id] = job
+        future = _DESIGN_INTENT_JOB_EXECUTOR.submit(
+            _run_design_intent_job,
+            job_id,
+            project_path,
+            intent,
+            options,
+        )
+        with _DESIGN_INTENT_JOBS_LOCK:
+            if job_id in _DESIGN_INTENT_JOBS:
+                _DESIGN_INTENT_JOBS[job_id]["future"] = future
+        response = _design_intent_job_public(job)
+        response["recommended_next_tool"] = "schematic_get_job_status"
+        return response
+    finally:
+        project_lock.release()
 
 
 def _get_design_intent_job_status(job_id: str) -> dict[str, Any]:
@@ -2676,11 +3239,18 @@ def _cancel_design_intent_job(job_id: str) -> dict[str, Any]:
         job["cancel_requested"] = True
         if cancelled or job.get("status") == "pending":
             job["status"] = "cancelled"
+            job["stage"] = "cancelled"
             job["finished_at"] = _utc_now()
+        else:
+            job["stage"] = "cancelling"
+            progress = dict(job.get("progress") or {})
+            progress["current_step"] = "cancel_requested"
+            progress["last_heartbeat"] = _utc_now()
+            job["progress"] = progress
         response = _design_intent_job_public(job)
         response["cancelled"] = cancelled
         if not cancelled and job.get("status") == "running":
-            response["warning"] = "job is already running and cannot be interrupted safely"
+            response["warning"] = "job is running; cancellation will be applied at the next safe checkpoint"
         return response
 
 
@@ -2750,6 +3320,40 @@ def _with_large_design_recommendation(base: dict[str, Any], expanded_spec: dict[
     )
 
 
+def _attach_expanded_spec_preflight(
+    base: dict[str, Any],
+    project_path: str,
+    expanded_spec: dict[str, Any],
+) -> None:
+    try:
+        normalized = normalize_build_spec_v2(expanded_spec)
+        preflight = preflight_build_spec(project_path, normalized)
+    except Exception as exc:
+        base["preflight"] = {"success": False, "error": str(exc)}
+        return
+    footprint_errors = list(preflight.get("footprint_errors", []))
+    symbol_errors = list(preflight.get("symbol_errors", []))
+    base["preflight"] = {
+        "success": preflight.get("success"),
+        "symbol_error_count": len(symbol_errors),
+        "footprint_error_count": len(footprint_errors),
+        "normalization_error_count": len(preflight.get("normalization_errors", [])),
+    }
+    if footprint_errors:
+        base["missing_footprint_count"] = len(footprint_errors)
+        base["missing_footprints"] = [
+            {
+                "ref": item.get("reference"),
+                "requested": item.get("footprint"),
+                "error": item.get("error"),
+                "suggestions": item.get("suggestions", []),
+            }
+            for item in footprint_errors
+        ]
+    if symbol_errors:
+        base["symbol_errors"] = symbol_errors
+
+
 def _apply_expanded_spec_staged(
     project_path: str,
     expanded_spec: dict[str, Any],
@@ -2760,7 +3364,15 @@ def _apply_expanded_spec_staged(
     run_quality_report: bool,
     run_native_validation: bool,
     run_cli_validation: bool,
+    batch_size: int = 40,
+    atomic: bool = True,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
+    _update_design_intent_job_progress(
+        job_id,
+        stage="staged_preflight",
+        current_step="preflight_build_spec",
+    )
     normalized = normalize_build_spec_v2(expanded_spec)
     preflight = preflight_build_spec(project_path, normalized)
     if not preflight.get("success"):
@@ -2772,6 +3384,38 @@ def _apply_expanded_spec_staged(
             **preflight,
             "recoverable": True,
         }
+    if _design_intent_job_cancel_requested(job_id):
+        return _cancelled_before_write_response(project_path, "before_staged_backup")
+
+    backup: dict[str, Any] | None = None
+    if atomic:
+        _update_design_intent_job_progress(
+            job_id,
+            stage="staged_backup",
+            current_step="backup_project",
+        )
+        backup = backup_project_files(_project_file_for_backup(project_path))
+        if not backup.get("success"):
+            return {
+                "success": False,
+                "stage": "staged_backup_failed",
+                "changed": False,
+                "rolled_back": False,
+                "error": backup.get("error", "project backup failed before staged apply"),
+                "backup_result": backup,
+                "recoverable": True,
+            }
+    if _design_intent_job_cancel_requested(job_id):
+        return _staged_failure_response(
+            project_path,
+            "cancelled",
+            "job cancelled before staged part placement",
+            backup,
+            status="cancelled",
+            cancel_stage="before_part_placement",
+            write_started=False,
+        )
+
     parts_only = {
         key: json.loads(json.dumps(value))
         for key, value in expanded_spec.items()
@@ -2779,6 +3423,11 @@ def _apply_expanded_spec_staged(
     }
     parts_only["nets"] = {}
     parts_only["no_connects"] = []
+    _update_design_intent_job_progress(
+        job_id,
+        stage="staged_part_placement",
+        current_step="build_parts_only_schematic",
+    )
     placed = build_schematic_from_spec_v2(
         project_path,
         parts_only,
@@ -2795,30 +3444,66 @@ def _apply_expanded_spec_staged(
         run_cli_validation=run_cli_validation,
     )
     if not placed.get("success"):
-        return {
-            "success": False,
-            "stage": "staged_part_placement_failed",
-            "changed": False,
-            "error": placed.get("error", "staged part placement failed"),
-            "build_result": placed,
-            "recoverable": True,
-        }
+        return _staged_failure_response(
+            project_path,
+            "staged_part_placement_failed",
+            placed.get("error", "staged part placement failed"),
+            backup,
+            build_result=placed,
+            write_started=True,
+        )
+    if _design_intent_job_cancel_requested(job_id):
+        return _staged_failure_response(
+            project_path,
+            "cancelled",
+            "job cancelled after staged part placement",
+            backup,
+            status="cancelled",
+            cancel_stage="after_part_placement",
+            write_started=True,
+        )
 
     schematic_path = get_project_files(project_path).get("schematic")
     if not schematic_path:
-        return {
-            "success": False,
-            "stage": "staged_wiring_failed",
-            "changed": True,
-            "error": "Schematic file not found after staged part placement",
-            "recoverable": True,
-        }
+        return _staged_failure_response(
+            project_path,
+            "staged_wiring_failed",
+            "Schematic file not found after staged part placement",
+            backup,
+            write_started=True,
+        )
 
     connections = list(normalized.get("connections", []))
     no_connects = list(normalized.get("no_connects", []))
-    batches = [connections[index : index + 40] for index in range(0, len(connections), 40)]
+    resolved_batch_size = max(1, int(batch_size or 40))
+    batches = [
+        connections[index : index + resolved_batch_size]
+        for index in range(0, len(connections), resolved_batch_size)
+    ]
     wiring_results = []
+    applied_connections = 0
     for index, batch in enumerate(batches):
+        if _design_intent_job_cancel_requested(job_id):
+            return _staged_failure_response(
+                project_path,
+                "cancelled",
+                "job cancelled before staged wiring batch",
+                backup,
+                status="cancelled",
+                cancel_stage="before_wiring_batch",
+                failed_batch_index=index,
+                wiring_results=wiring_results,
+                write_started=True,
+            )
+        _update_design_intent_job_progress(
+            job_id,
+            stage="staged_wiring",
+            current_step="apply_connection_batch",
+            batch_index=index + 1,
+            batch_count=len(batches),
+            applied_connections=applied_connections,
+            total_connections=len(connections),
+        )
         result = apply_connection_plan(
             schematic_path,
             batch,
@@ -2831,17 +3516,51 @@ def _apply_expanded_spec_staged(
         )
         wiring_results.append(_compact_staged_result(result, index, len(batch)))
         if not result.get("success"):
-            return {
-                "success": False,
-                "stage": "staged_wiring_failed",
-                "changed": True,
-                "error": result.get("error", "staged wiring batch failed"),
-                "failed_batch_index": index,
-                "wiring_results": wiring_results,
-                "failed_connections": result.get("failed_connections", []),
-                "recoverable": True,
-            }
+            return _staged_failure_response(
+                project_path,
+                "staged_wiring_failed",
+                result.get("error", "staged wiring batch failed"),
+                backup,
+                failed_batch_index=index,
+                wiring_results=wiring_results,
+                failed_connections=result.get("failed_connections", []),
+                write_started=True,
+            )
+        applied_connections += len(batch)
+        if _design_intent_job_cancel_requested(job_id):
+            return _staged_failure_response(
+                project_path,
+                "cancelled",
+                "job cancelled after staged wiring batch",
+                backup,
+                status="cancelled",
+                cancel_stage="after_wiring_batch",
+                failed_batch_index=index,
+                wiring_results=wiring_results,
+                write_started=True,
+            )
     if no_connects:
+        if _design_intent_job_cancel_requested(job_id):
+            return _staged_failure_response(
+                project_path,
+                "cancelled",
+                "job cancelled before staged no-connect batch",
+                backup,
+                status="cancelled",
+                cancel_stage="before_no_connects",
+                wiring_results=wiring_results,
+                write_started=True,
+            )
+        _update_design_intent_job_progress(
+            job_id,
+            stage="staged_no_connects",
+            current_step="apply_no_connect_batch",
+            batch_index=len(batches) + 1,
+            batch_count=len(batches) + 1,
+            applied_connections=applied_connections,
+            total_connections=len(connections),
+            no_connect_count=len(no_connects),
+        )
         result = apply_connection_plan(
             schematic_path,
             [],
@@ -2854,27 +3573,69 @@ def _apply_expanded_spec_staged(
         )
         wiring_results.append(_compact_staged_result(result, len(batches), 0))
         if not result.get("success"):
-            return {
-                "success": False,
-                "stage": "staged_no_connect_failed",
-                "changed": True,
-                "error": result.get("error", "staged no-connect batch failed"),
-                "wiring_results": wiring_results,
-                "recoverable": True,
-            }
+            return _staged_failure_response(
+                project_path,
+                "staged_no_connect_failed",
+                result.get("error", "staged no-connect batch failed"),
+                backup,
+                wiring_results=wiring_results,
+                write_started=True,
+            )
 
+    if _design_intent_job_cancel_requested(job_id):
+        return _staged_failure_response(
+            project_path,
+            "cancelled",
+            "job cancelled before staged verification",
+            backup,
+            status="cancelled",
+            cancel_stage="before_validation",
+            wiring_results=wiring_results,
+            write_started=True,
+        )
+    _update_design_intent_job_progress(
+        job_id,
+        stage="staged_verification",
+        current_step="validate_connection_membership",
+        applied_connections=applied_connections,
+        total_connections=len(connections),
+    )
     validation = (
         validate_connection_plan_membership(schematic_path, connections)
         if run_native_validation
         else {"success": None, "skipped": True, "missing": []}
     )
-    quality = build_quality_report(project_path, run_erc=False) if run_quality_report else None
+    if validation.get("success") is False:
+        return _staged_failure_response(
+            project_path,
+            "staged_verification_failed",
+            validation.get("reason", "staged native netlist verification failed"),
+            backup,
+            wiring_results=wiring_results,
+            validation={"post_write": validation},
+            write_started=True,
+        )
+    try:
+        quality = build_quality_report(project_path, run_erc=False) if run_quality_report else None
+    except Exception as exc:
+        return _staged_failure_response(
+            project_path,
+            "staged_quality_report_failed",
+            str(exc),
+            backup,
+            wiring_results=wiring_results,
+            validation={"post_write": validation},
+            write_started=True,
+        )
     response: dict[str, Any] = {
         "success": bool(validation.get("success") is not False),
         "stage": "schematic_built",
         "changed": True,
+        "rolled_back": False,
+        "backup_path": backup.get("backup_path") if backup else None,
         "mode": mode,
         "staged_apply": True,
+        "atomic": atomic,
         "symbol_count": placed.get("symbol_count"),
         "connection_count": len(connections),
         "no_connect_count": len(no_connects),
@@ -2886,6 +3647,24 @@ def _apply_expanded_spec_staged(
     if quality is not None and detail == "full":
         response["quality_report"] = quality
     if include_preview:
+        if _design_intent_job_cancel_requested(job_id):
+            return _staged_failure_response(
+                project_path,
+                "cancelled",
+                "job cancelled before preview export",
+                backup,
+                status="cancelled",
+                cancel_stage="before_preview_export",
+                wiring_results=wiring_results,
+                write_started=True,
+            )
+        _update_design_intent_job_progress(
+            job_id,
+            stage="preview_export",
+            current_step="export_schematic_svg",
+            applied_connections=applied_connections,
+            total_connections=len(connections),
+        )
         try:
             svg_result = export_schematic_svg_file(schematic_path, None)
             if svg_result.get("success"):
@@ -2894,12 +3673,42 @@ def _apply_expanded_spec_staged(
                 response["schematic_preview_error"] = svg_result.get("error")
         except Exception as exc:
             response["schematic_preview_error"] = str(exc)
-    if validation.get("success") is False:
-        response["stage"] = "staged_verification_failed"
-        response["error"] = validation.get("reason", "staged native netlist verification failed")
-        response["recoverable"] = True
     if quality is not None:
         response["verification"] = _verification_from_build_and_quality(response, quality)
+    return response
+
+
+def _staged_failure_response(
+    project_path: str,
+    stage: str,
+    error: str,
+    backup: dict[str, Any] | None,
+    *,
+    status: str | None = None,
+    cancel_stage: str | None = None,
+    write_started: bool = False,
+    **details: Any,
+) -> dict[str, Any]:
+    restore_result: dict[str, Any] | None = None
+    if backup and backup.get("success") and backup.get("backup_path"):
+        restore_result = restore_backup_manifest(str(backup["backup_path"]))
+    rolled_back = bool(restore_result and restore_result.get("success"))
+    response: dict[str, Any] = {
+        "success": False,
+        "stage": stage,
+        "project_path": project_path,
+        "changed": bool(write_started and not rolled_back),
+        "rolled_back": rolled_back,
+        "backup_path": backup.get("backup_path") if backup else None,
+        "restore_result": restore_result,
+        "error": error,
+        "recoverable": status != "cancelled",
+    }
+    if status is not None:
+        response["status"] = status
+    if cancel_stage is not None:
+        response["cancel_stage"] = cancel_stage
+    response.update(details)
     return response
 
 
@@ -2959,6 +3768,7 @@ def _schematic_apply_expanded_spec_response(
     run_cli_validation: bool,
     unsafe_fast_apply: bool,
     visual_layout: bool,
+    allow_partial_write: bool = False,
 ) -> dict[str, Any]:
     expanded_spec, resolved_path, load_error = _load_expanded_spec(
         project_path, expanded_spec_path, spec
@@ -2975,13 +3785,14 @@ def _schematic_apply_expanded_spec_response(
         include_preview = False
         run_quality_report = False
         run_native_validation = False
+        run_cli_validation = False
     if strict:
         run_quality_report = True
         run_native_validation = True
         run_cli_validation = True
     elif unsafe_fast_apply:
         run_cli_validation = False
-    elif not run_cli_validation:
+    elif not run_cli_validation and not quick_apply:
         return {
             "success": False,
             "tool": "schematic_apply_expanded_spec",
@@ -3006,6 +3817,7 @@ def _schematic_apply_expanded_spec_response(
             run_quality_report=run_quality_report,
             run_native_validation=run_native_validation,
             run_cli_validation=run_cli_validation,
+            atomic=not allow_partial_write,
         )
         return {
             **staged,
@@ -3163,13 +3975,27 @@ def _schematic_design_intent_response(
     run_native_validation: bool = True,
     run_cli_validation: bool = True,
     unsafe_fast_apply: bool = False,
+    allow_partial_write: bool = False,
     allow_background_redirect: bool = True,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
+    _update_design_intent_job_progress(
+        job_id,
+        stage="compiling",
+        current_step="compile_design_intent",
+    )
     compiled = compile_design_intent(project_path, intent, strict=strict)
     expanded_spec = compiled.get("expanded_spec")
+    if not dry_run and _design_intent_job_cancel_requested(job_id):
+        return _cancelled_before_write_response(project_path, "after_compile")
     visual_summary = {"enabled": False}
     visual_expanded_spec_path: str | None = None
     if compiled.get("success") and isinstance(expanded_spec, dict) and visual_layout:
+        _update_design_intent_job_progress(
+            job_id,
+            stage="visual_layout",
+            current_step="apply_visual_layout",
+        )
         expanded_spec = apply_visual_layout_to_v2_spec(
             expanded_spec,
             page=str(expanded_spec.get("paper") or "A3"),
@@ -3269,6 +4095,7 @@ def _schematic_design_intent_response(
             )
             base["success"] = bool(base["dry_run_validation"].get("success"))
         if isinstance(expanded_spec, dict):
+            _attach_expanded_spec_preflight(base, project_path, expanded_spec)
             _with_large_design_recommendation(base, expanded_spec)
         return base
 
@@ -3276,13 +4103,14 @@ def _schematic_design_intent_response(
         include_preview = False
         run_quality_report = False
         run_native_validation = False
+        run_cli_validation = False
     if strict:
         run_quality_report = True
         run_native_validation = True
         run_cli_validation = True
     elif unsafe_fast_apply:
         run_cli_validation = False
-    elif not run_cli_validation:
+    elif not run_cli_validation and not quick_apply:
         base["success"] = False
         base["stage"] = "unsafe_fast_apply_required"
         base["recoverable"] = True
@@ -3304,17 +4132,12 @@ def _schematic_design_intent_response(
     if isinstance(expanded_spec, dict):
         estimate = _preview_size_estimate(expanded_spec, compiled.get("summary", {}))
         base["preview_size_estimate"] = estimate
-        too_large_for_direct = (
-            estimate["total_part_count"] > estimate["thresholds"]["background_job"]["max_parts"]
-            or estimate["connection_count"]
-            > estimate["thresholds"]["background_job"]["max_connections"]
-        )
         staged_candidate = (
             estimate["total_part_count"] > estimate["thresholds"]["quick_apply"]["max_parts"]
             or estimate["connection_count"]
             > estimate["thresholds"]["quick_apply"]["max_connections"]
         )
-        if too_large_for_direct and allow_background_redirect and not strict:
+        if staged_candidate and allow_background_redirect and not strict:
             job = _start_design_intent_job(
                 project_path,
                 intent,
@@ -3330,7 +4153,10 @@ def _schematic_design_intent_response(
                 run_native_validation=run_native_validation,
                 run_cli_validation=run_cli_validation,
                 unsafe_fast_apply=unsafe_fast_apply,
+                allow_partial_write=allow_partial_write,
             )
+            if not job.get("success"):
+                return {**base, **job}
             return {
                 **base,
                 "success": True,
@@ -3352,6 +4178,8 @@ def _schematic_design_intent_response(
                 run_quality_report=run_quality_report,
                 run_native_validation=run_native_validation,
                 run_cli_validation=run_cli_validation,
+                atomic=not allow_partial_write,
+                job_id=job_id,
             )
             base.update(staged)
             base.setdefault(
@@ -3359,6 +4187,13 @@ def _schematic_design_intent_response(
                 _verification_from_build_and_quality(staged, staged.get("quality_report")),
             )
             return base
+    if _design_intent_job_cancel_requested(job_id):
+        return _cancelled_before_write_response(project_path, "before_direct_build")
+    _update_design_intent_job_progress(
+        job_id,
+        stage="direct_build",
+        current_step="build_schematic_from_spec_v2",
+    )
     built = build_schematic_from_spec_v2(
         project_path,
         expanded_spec,

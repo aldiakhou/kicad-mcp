@@ -11,8 +11,8 @@ from typing import Any
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.path_validator import PathValidationError, get_configured_validator
-from kicad_mcp.utils.transactional_edit import atomic_write_text
 from kicad_mcp.utils.schematic_pins import PinVisibility, _resolve_symbol_pins, classify_pin
+from kicad_mcp.utils.transactional_edit import atomic_write_text
 
 DEFAULT_FOOTPRINTS = {
     "capacitor": "Capacitor_SMD:C_0603_1608Metric",
@@ -970,14 +970,14 @@ class _DesignIntentCompiler:
             if not detected_ground_pins and "GND2" in lib_id.upper() and {"3", "4"}.issubset(pin_numbers):
                 detected_ground_pins = ["3", "4"]
             if grounded_requested and not detected_ground_pins:
-                self.errors.append(
+                self.warnings.append(
                     {
                         "path": f"{path}.ground",
-                        "error": "grounded crystal requested but symbol has no ground pins",
+                        "warning": "crystal case ground requested but no ground/case pin found; generated 2-pin crystal",
                         "lib_id": lib_id,
                     }
                 )
-                return None
+                return []
             return detected_ground_pins if grounded_requested else []
 
         if grounded_requested:
@@ -1202,6 +1202,14 @@ class _DesignIntentCompiler:
         if not str(part.get("lib_id") or "").startswith("power:") and not part.get("footprint"):
             self.errors.append({"path": "generated_parts", "error": "missing footprint for generated part", "ref": ref})
             return
+        if part.get("generated_by"):
+            properties = dict(part.get("properties") or {})
+            properties.setdefault("ki_mcp_generated_by", "kicad_mcp")
+            properties.setdefault("ki_mcp_role", str(part.get("generated_by")))
+            for key in ("target", "rail", "net"):
+                if part.get(key) is not None:
+                    properties.setdefault(f"ki_mcp_{key}", str(part[key]))
+            part["properties"] = properties
         self.parts.append(part)
         self.allocator.used.add(ref)
 
@@ -1428,7 +1436,7 @@ def _power_ground_mismatch(pin: dict[str, Any], net: str) -> dict[str, Any] | No
     name = str(pin.get("name") or pin.get("number") or "").upper()
     net_upper = net.upper()
     ground_pin = bool(re.search(r"(^|[^A-Z])(GND|VSS|VSSA|AGND|DGND)([^A-Z]|$)", name))
-    power_pin = bool(re.search(r"(^|[^A-Z])(VDD|VDDA|VCC|VBAT|VIN|VOUT|3V3|5V)([^A-Z]|$)", name))
+    power_pin = bool(re.search(r"(^|[^A-Z])(VDD|VDDA|VCC|VBAT|VBUS|VIN|VOUT|3V3|5V)([^A-Z]|$)", name))
     ground_net = net_upper in {"GND", "AGND", "DGND", "VSS"} or net_upper.endswith("_GND")
     if ground_pin and not ground_net:
         return {"error": "ground-looking pin connected to non-ground net"}

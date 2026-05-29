@@ -38,6 +38,7 @@ AGENT_PROFILE_TOOLS = {
     "discover_projects",
     "get_project_structure",
     "schematic_apply_design_intent",
+    "schematic_apply_design_intent_safe",
     "schematic_preview_design_intent",
     "schematic_apply_expanded_spec",
     "schematic_start_design_intent_job",
@@ -76,6 +77,7 @@ AGENT_PROFILE_TOOLS = {
     "resolve_symbol",
     "resolve_symbols",
     "resolve_footprint",
+    "resolve_footprints",
 }
 
 ADVANCED_PROFILE_TOOLS = {
