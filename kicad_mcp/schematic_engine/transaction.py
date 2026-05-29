@@ -6,6 +6,7 @@ modified until verification passes. Any exception rolls back.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -120,8 +121,13 @@ class SchematicBuildTransaction:
     def commit(self) -> dict[str, Any]:
         """Commit generated schematic files to the live project.
 
-        Copies all .kicad_sch files from the worktree to the live project
-        using atomic writes (write to temp then rename).
+        Copies all .kicad_sch and .kicad_pro files from the worktree to the
+        live project using a two-phase atomic approach:
+        1. Write ALL files to temp locations (phase 1 - preparatory)
+        2. Rename ALL temp files to final locations (phase 2 - atomic)
+
+        If any file fails in phase 1, no files are committed.
+        If any rename fails in phase 2, attempt to rollback already-renamed files.
 
         Returns:
             Dict with commit details.
@@ -134,8 +140,11 @@ class SchematicBuildTransaction:
             return {"success": False, "error": "No worktree created"}
 
         committed_files: list[str] = []
+        pending_renames: list[tuple[str, str]] = []  # (tmp_path, final_path)
+        backup_originals: list[tuple[str, str | None]] = []  # (final_path, backup_path | None)
+
         try:
-            # Find all .kicad_sch files in worktree
+            # Phase 1: Copy all files to temp locations
             for root, _dirs, files in os.walk(self._worktree_path):
                 for filename in files:
                     if filename.endswith((".kicad_sch", ".kicad_pro")):
@@ -143,20 +152,30 @@ class SchematicBuildTransaction:
                         rel_path = os.path.relpath(src, self._worktree_path)
                         dst = os.path.join(self.project_dir, rel_path)
 
-                        # Atomic write: write to temp file then rename
                         dst_dir = os.path.dirname(dst)
                         os.makedirs(dst_dir, exist_ok=True)
 
                         tmp_dst = dst + ".tmp_commit"
-                        try:
-                            shutil.copy2(src, tmp_dst)
-                            os.replace(tmp_dst, dst)
-                            committed_files.append(rel_path)
-                        except Exception:
-                            # Clean up partial temp file
-                            if os.path.exists(tmp_dst):
-                                os.unlink(tmp_dst)
-                            raise
+                        shutil.copy2(src, tmp_dst)
+                        pending_renames.append((tmp_dst, dst))
+
+            # Phase 2: Atomically rename all temp files to final destinations
+            for tmp_path, final_path in pending_renames:
+                # Backup existing file if present (for rollback)
+                backup_path = None
+                if os.path.exists(final_path):
+                    backup_path = final_path + ".bak_commit"
+                    shutil.copy2(final_path, backup_path)
+                backup_originals.append((final_path, backup_path))
+
+                os.replace(tmp_path, final_path)
+                rel_path = os.path.relpath(final_path, self.project_dir)
+                committed_files.append(rel_path)
+
+            # Phase 3: Clean up backups on success
+            for _final_path, backup_path in backup_originals:
+                if backup_path and os.path.exists(backup_path):
+                    os.unlink(backup_path)
 
             self._committed = True
             elapsed = time.monotonic() - self._started_at
@@ -172,11 +191,27 @@ class SchematicBuildTransaction:
             }
         except Exception as e:
             logger.error("Transaction commit failed: %s", e)
-            # Attempt rollback of partially committed files
+
+            # Rollback: restore backups for any files that were already renamed
+            for final_path, backup_path in backup_originals:
+                if backup_path and os.path.exists(backup_path):
+                    try:
+                        os.replace(backup_path, final_path)
+                    except Exception as rb_err:
+                        logger.error(
+                            "Failed to rollback %s: %s", final_path, rb_err
+                        )
+
+            # Clean up any remaining temp files
+            for tmp_path, _final_path in pending_renames:
+                if os.path.exists(tmp_path):
+                    with contextlib.suppress(Exception):
+                        os.unlink(tmp_path)
+
             self._rolled_back = True
             return {
                 "success": False,
-                "error": f"Commit failed: {e}",
+                "error": f"Commit failed (rolled back): {e}",
                 "committed_files": committed_files,
             }
 

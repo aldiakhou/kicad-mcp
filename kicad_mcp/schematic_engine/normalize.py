@@ -83,9 +83,23 @@ def normalize_design_intent(
                 ))
 
     # --- Extract interfaces ---
-    for iface_spec in intent.get("interfaces", []):
-        iface_endpoints = _normalize_interface(iface_spec)
-        endpoints.extend(iface_endpoints)
+    interfaces_raw = intent.get("interfaces", [])
+    if isinstance(interfaces_raw, dict):
+        # Dict format: {"i2c": [...connections...], "spi": [...]}
+        for iface_name, iface_connections in interfaces_raw.items():
+            if isinstance(iface_connections, list):
+                iface_spec = {"type": iface_name, "connections": iface_connections}
+                iface_endpoints = _normalize_interface(iface_spec)
+                endpoints.extend(iface_endpoints)
+            elif isinstance(iface_connections, dict):
+                # Single interface dict with type implicit from key
+                iface_connections["type"] = iface_connections.get("type", iface_name)
+                iface_endpoints = _normalize_interface(iface_connections)
+                endpoints.extend(iface_endpoints)
+    elif isinstance(interfaces_raw, list):
+        for iface_spec in interfaces_raw:
+            iface_endpoints = _normalize_interface(iface_spec)
+            endpoints.extend(iface_endpoints)
 
     # --- Extract bulk_connections ---
     for bulk in intent.get("bulk_connections", []):
@@ -672,12 +686,21 @@ def _normalize_ferrite(
 
 
 def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
-    """Convert a pin rule into explicit endpoints."""
+    """Convert a pin rule into explicit endpoints.
+
+    Supports two formats:
+    1. Direct: {"ref": "U1", "pins": ["PA0", "PA1"], "net": "+3V3"}
+    2. Match: {"ref": "U1", "match": {"name_regex": "^(VDD|VDDA)$"}, "net": "+3V3"}
+
+    For match format, the regex pattern is stored and will be resolved
+    against actual symbol pins at compilation time.
+    """
     endpoints: list[CircuitEndpoint] = []
     ref = rule.get("ref", "")
     net = rule.get("net", "")
-    pins = rule.get("pins", [])
 
+    # Direct pin list format
+    pins = rule.get("pins", [])
     if isinstance(pins, str):
         pins = [pins]
 
@@ -690,6 +713,22 @@ def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
                 required=rule.get("required", True),
                 allow_hidden=rule.get("allow_hidden", False),
                 source="pin_rules",
+            ))
+
+    # Match format: resolve regex patterns to pin names
+    match_spec = rule.get("match")
+    if match_spec and isinstance(match_spec, dict) and ref and net:
+        name_regex = match_spec.get("name_regex", "")
+        if name_regex:
+            # Store as a special endpoint with the regex pattern
+            # The pin field contains the regex for later resolution
+            endpoints.append(CircuitEndpoint(
+                ref=ref,
+                pin=f"__regex__:{name_regex}",
+                net=net,
+                required=rule.get("required", True),
+                allow_hidden=rule.get("allow_hidden", True),
+                source="pin_rules:match",
             ))
 
     return endpoints

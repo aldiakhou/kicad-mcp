@@ -30,6 +30,8 @@ class SkidlCompileResult:
     expected_netlist: NormalizedNetlist | None = None
     expected_netlist_path: str | None = None
     skidl_netlist_path: str | None = None
+    skidl_resolved_netlist: NormalizedNetlist | None = None
+    verification_quality: str = "canonical_only"
     part_count: int = 0
     net_count: int = 0
     endpoint_count: int = 0
@@ -195,14 +197,33 @@ class SkidlCompiler:
             except Exception as e:
                 erc_warnings.append(f"SKiDL ERC exception: {e}")
 
-            # Generate expected netlist from canonical (not from SKiDL internals)
-            # This ensures our canonical is the source of truth
+            # Generate expected netlist from canonical (source of truth for comparison)
             nets_dict: dict[str, set[NetlistEntry]] = defaultdict(set)
             for endpoint in canonical.endpoints:
                 entry = NetlistEntry(ref=endpoint.ref, pin=endpoint.pin)
                 nets_dict[endpoint.net].add(entry)
 
             expected = NormalizedNetlist(nets=dict(nets_dict))
+
+            # Generate SKiDL-resolved netlist from the actual SKiDL circuit
+            # This reflects what SKiDL actually connected (may differ from canonical)
+            skidl_resolved: NormalizedNetlist | None = None
+            verification_quality = "canonical_only"
+            try:
+                skidl_nets_dict: dict[str, set[NetlistEntry]] = defaultdict(set)
+                for net_name, net_obj in nets_by_name.items():
+                    for pin in net_obj.pins:
+                        ref_str = pin.part.ref if hasattr(pin, "part") else ""
+                        pin_name = pin.name if hasattr(pin, "name") else ""
+                        if ref_str and pin_name:
+                            skidl_nets_dict[net_name].add(
+                                NetlistEntry(ref=ref_str, pin=pin_name)
+                            )
+                if skidl_nets_dict:
+                    skidl_resolved = NormalizedNetlist(nets=dict(skidl_nets_dict))
+                    verification_quality = "skidl_verified"
+            except Exception as e:
+                erc_warnings.append(f"SKiDL resolved netlist extraction failed: {e}")
 
             # Save SKiDL netlist
             skidl_netlist_path: str | None = None
@@ -222,6 +243,8 @@ class SkidlCompiler:
                 expected_netlist=expected,
                 expected_netlist_path=netlist_path,
                 skidl_netlist_path=skidl_netlist_path,
+                skidl_resolved_netlist=skidl_resolved,
+                verification_quality=verification_quality,
                 part_count=len(canonical.parts),
                 net_count=len(expected.nets),
                 endpoint_count=len(canonical.endpoints),

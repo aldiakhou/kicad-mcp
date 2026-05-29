@@ -7,11 +7,15 @@ Uses:
 - KiUtils for structured reading/writing and format safety (preferred)
 - kicad-skip where its ergonomic helpers are better
 - Falls back to S-expression text generation when libraries unavailable
+
+Key design: Every CircuitEndpoint becomes a real KiCad connection via a wire
+stub from the estimated pin coordinate to a net label placed at the stub end.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any
 import uuid
@@ -40,6 +44,71 @@ try:
     _KICAD_SKIP_AVAILABLE = True
 except ImportError:
     pass
+
+# ─── Pin coordinate estimation ──────────────────────────────────────────────
+# KiCad symbols have pins at known offsets from the symbol origin.
+# Without full symbol library data available at write time, we estimate pin
+# positions based on the pin index for the given component. Pins are placed
+# along the left and right edges of an estimated bounding box.
+
+_PIN_GRID_MM = 2.54  # KiCad standard pin grid (100mil)
+_WIRE_STUB_LENGTH_MM = 10.0  # Length of wire from pin to label
+_SYMBOL_HALF_WIDTH_MM = 7.62  # Estimated half-width of symbol body
+
+
+def _estimate_pin_position(
+    placement: PlacementInfo,
+    pin_index: int,
+    total_pins_on_ref: int,
+) -> tuple[float, float]:
+    """Estimate a pin's absolute coordinate based on symbol placement.
+
+    Pins are distributed along the left and right edges of the symbol.
+    Even-indexed pins go on the left, odd-indexed on the right.
+
+    Returns (x, y) of the estimated pin connection point.
+    """
+    # Determine side: even pins left, odd pins right
+    is_right = pin_index % 2 == 1
+    side_index = pin_index // 2
+
+    # Vertical distribution
+    pins_per_side = max(1, (total_pins_on_ref + 1) // 2)
+    y_offset = (side_index - (pins_per_side - 1) / 2.0) * _PIN_GRID_MM
+
+    # Horizontal offset from symbol center
+    x_offset = _SYMBOL_HALF_WIDTH_MM if is_right else -_SYMBOL_HALF_WIDTH_MM
+
+    # Apply rotation
+    angle_rad = math.radians(placement.angle)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+
+    rotated_x = x_offset * cos_a - y_offset * sin_a
+    rotated_y = x_offset * sin_a + y_offset * cos_a
+
+    return (placement.x + rotated_x, placement.y + rotated_y)
+
+
+def _compute_label_position(
+    pin_x: float, pin_y: float, placement: PlacementInfo
+) -> tuple[float, float]:
+    """Compute the label position at the end of a wire stub from a pin.
+
+    The wire extends outward from the symbol.
+    """
+    # Direction away from symbol center
+    dx = pin_x - placement.x
+    dy = pin_y - placement.y
+    length = math.sqrt(dx * dx + dy * dy)
+    if length < 0.01:
+        # Pin at center, extend to the right
+        return (pin_x + _WIRE_STUB_LENGTH_MM, pin_y)
+
+    # Normalize and extend
+    nx = dx / length
+    ny = dy / length
+    return (pin_x + nx * _WIRE_STUB_LENGTH_MM, pin_y + ny * _WIRE_STUB_LENGTH_MM)
 
 
 class SchematicWriter:
@@ -205,29 +274,53 @@ class SchematicWriter:
         sheet_plan: SheetPlan,
         sheet_name: str,
     ) -> None:
-        """Add net labels to a KiUtils schematic."""
+        """Add net labels with wire stubs connecting to estimated pin positions.
+
+        For every endpoint on this sheet, we:
+        1. Estimate the pin coordinate on the symbol.
+        2. Place a wire stub from the pin to a label position.
+        3. Place the net label at the wire stub end.
+
+        This ensures KiCad recognizes electrical connectivity between pins and nets.
+        """
         try:
             from kiutils.items.common import Position
             from kiutils.items.schitems import GlobalLabel, NetLabel
 
             ref_set = set(refs)
-            placed_labels: set[str] = set()
 
+            # Pre-compute pin indices per ref for position estimation
+            ref_pin_counts: dict[str, int] = {}
+            ref_pin_indices: dict[tuple[str, str], int] = {}
             for ep in canonical.endpoints:
                 if ep.ref not in ref_set:
                     continue
-                if ep.net in placed_labels:
+                if ep.ref not in ref_pin_counts:
+                    ref_pin_counts[ep.ref] = 0
+                ref_pin_indices[(ep.ref, ep.pin)] = ref_pin_counts[ep.ref]
+                ref_pin_counts[ep.ref] += 1
+
+            for ep in canonical.endpoints:
+                if ep.ref not in ref_set:
                     continue
 
                 placement = sheet_plan.placements.get(ep.ref)
                 if not placement:
                     continue
 
+                # Estimate pin position
+                pin_idx = ref_pin_indices.get((ep.ref, ep.pin), 0)
+                total_pins = ref_pin_counts.get(ep.ref, 1)
+                pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
+
+                # Compute label position at end of wire stub
+                label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
+
+                # Add wire from pin to label
+                self._add_wire_kiutils(sch, pin_x, pin_y, label_x, label_y)
+
                 # Use global labels for cross-sheet nets, local otherwise
                 is_global = ep.net in sheet_plan.cross_sheet_nets
-
-                label_x = placement.x + 15.0  # Offset from symbol
-                label_y = placement.y
 
                 if is_global:
                     label = GlobalLabel()
@@ -241,10 +334,30 @@ class SchematicWriter:
                     label.position = Position(X=label_x, Y=label_y)
                     label.uuid = str(uuid.uuid4())
                     sch.netLabels.append(label)
-
-                placed_labels.add(ep.net)
         except Exception as e:
             logger.warning("Failed to add labels via KiUtils: %s", e)
+
+    def _add_wire_kiutils(
+        self,
+        sch: Any,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+    ) -> None:
+        """Add a wire segment between two points in a KiUtils schematic."""
+        try:
+            from kiutils.items.common import Position
+            from kiutils.items.schitems import Connection
+
+            wire = Connection()
+            wire.type = "wire"
+            wire.startPoint = Position(X=x1, Y=y1)
+            wire.endPoint = Position(X=x2, Y=y2)
+            wire.uuid = str(uuid.uuid4())
+            sch.connections.append(wire)
+        except Exception as e:
+            logger.warning("Failed to add wire via KiUtils: %s", e)
 
     def _add_no_connects_kiutils(
         self,
@@ -367,20 +480,36 @@ class SchematicWriter:
             if part and placement:
                 lines.append(self._symbol_sexpr(part, placement))
 
-        # Add net labels
-        placed_labels: set[str] = set()
+        # Pre-compute pin indices per ref for position estimation
+        ref_pin_counts: dict[str, int] = {}
+        ref_pin_indices: dict[tuple[str, str], int] = {}
         for ep in canonical.endpoints:
             if ep.ref not in ref_set:
                 continue
-            if ep.net in placed_labels:
+            if ep.ref not in ref_pin_counts:
+                ref_pin_counts[ep.ref] = 0
+            ref_pin_indices[(ep.ref, ep.pin)] = ref_pin_counts[ep.ref]
+            ref_pin_counts[ep.ref] += 1
+
+        # Add wires and net labels per endpoint
+        for ep in canonical.endpoints:
+            if ep.ref not in ref_set:
                 continue
             placement = sheet_plan.placements.get(ep.ref)
-            if placement:
-                is_global = ep.net in sheet_plan.cross_sheet_nets
-                lines.append(self._label_sexpr(
-                    ep.net, placement.x + 15.0, placement.y, is_global
-                ))
-                placed_labels.add(ep.net)
+            if not placement:
+                continue
+
+            pin_idx = ref_pin_indices.get((ep.ref, ep.pin), 0)
+            total_pins = ref_pin_counts.get(ep.ref, 1)
+            pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
+            label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
+
+            # Wire stub
+            lines.append(self._wire_sexpr(pin_x, pin_y, label_x, label_y))
+
+            # Label at wire end
+            is_global = ep.net in sheet_plan.cross_sheet_nets
+            lines.append(self._label_sexpr(ep.net, label_x, label_y, is_global))
 
         # Add no-connect markers
         for nc_ref, _nc_pin in canonical.no_connects:
@@ -485,6 +614,16 @@ class SchematicWriter:
             f'  (label "{net}" (at {x:.2f} {y:.2f} 0)\n'
             f'    (effects (font (size 1.27 1.27)))\n'
             f'    (uuid "{label_uuid}")\n'
+            f"  )"
+        )
+
+    def _wire_sexpr(self, x1: float, y1: float, x2: float, y2: float) -> str:
+        """Generate S-expression for a wire segment."""
+        wire_uuid = uuid.uuid4()
+        return (
+            f"  (wire (pts (xy {x1:.2f} {y1:.2f}) (xy {x2:.2f} {y2:.2f}))\n"
+            f'    (stroke (width 0) (type default))\n'
+            f'    (uuid "{wire_uuid}")\n'
             f"  )"
         )
 

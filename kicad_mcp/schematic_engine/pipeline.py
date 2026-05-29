@@ -50,6 +50,8 @@ def apply_design_intent_netlist_first(
     max_inline_bytes: int = 50_000,
     allow_partial_write: bool = False,
     strict: bool = False,
+    require_netlist_match: bool = False,
+    require_kicad_cli_verification: bool = False,
     job_id: str | None = None,
     cancel_check: Any | None = None,
 ) -> dict[str, Any]:
@@ -69,6 +71,10 @@ def apply_design_intent_netlist_first(
         max_inline_bytes: Max bytes for inline SVG in response.
         allow_partial_write: If True, allow commit even with warnings.
         strict: If True, any ERC error or netlist mismatch blocks commit.
+        require_netlist_match: If True, netlist mismatch always blocks commit
+            regardless of strict setting. Used by the safe tool.
+        require_kicad_cli_verification: If True, KiCad CLI netlist export must
+            succeed for commit to proceed. Used by the safe tool.
         job_id: Optional job ID for progress tracking.
         cancel_check: Optional callable that returns True if job is cancelled.
 
@@ -216,7 +222,8 @@ def apply_design_intent_netlist_first(
             root_schematic = tx.get_worktree_schematic()
 
             cli_verification_success = True
-            if run_erc or export_svg:
+            kicad_cli_available = True
+            if run_erc or export_svg or require_kicad_cli_verification:
                 result.stage = "kicad_cli_verification"
                 result.progress = {
                     "step": 8,
@@ -250,7 +257,15 @@ def apply_design_intent_netlist_first(
                 except Exception as e:
                     # KiCad CLI may not be available in all environments
                     logger.warning("KiCad CLI verification failed: %s", e)
+                    kicad_cli_available = False
                     result.erc = {"errors": 0, "warnings": 0, "note": str(e)}
+
+                    # If safe mode requires CLI verification, block commit
+                    if require_kicad_cli_verification:
+                        cli_verification_success = False
+                        result.error = (
+                            f"KiCad CLI verification required but failed: {e}"
+                        )
 
             if _is_cancelled():
                 tx.rollback()
@@ -283,11 +298,22 @@ def apply_design_intent_netlist_first(
                 result.expected_netlist_match = compare_result.success
                 netlist_match = compare_result.success
 
-                if not compare_result.success and strict:
+                if not compare_result.success and (strict or require_netlist_match):
                     result.error = (
                         f"Netlist mismatch: {len(compare_result.missing_endpoints)} "
                         f"missing endpoints"
                     )
+            elif require_kicad_cli_verification and not result.kicad_netlist_path:
+                # Safe mode requires netlist export to have succeeded
+                if kicad_cli_available:
+                    netlist_match = False
+                    result.expected_netlist_match = False
+                    result.error = (
+                        "KiCad CLI netlist export did not produce output; "
+                        "cannot verify connectivity"
+                    )
+                else:
+                    result.expected_netlist_match = None  # CLI not available
             else:
                 result.expected_netlist_match = None  # Could not compare
 
@@ -300,10 +326,10 @@ def apply_design_intent_netlist_first(
             }
 
             should_commit = True
-            if not netlist_match and strict:
+            if not netlist_match and (strict or require_netlist_match):
                 should_commit = False
                 result.stage = "netlist_mismatch"
-            if not cli_verification_success and strict:
+            if not cli_verification_success and (strict or require_kicad_cli_verification):
                 should_commit = False
                 result.stage = "erc_failed"
             if lint_result.blocking_count > 0 and strict:
