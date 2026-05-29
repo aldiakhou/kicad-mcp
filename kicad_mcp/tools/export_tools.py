@@ -5,13 +5,16 @@ Export tools for KiCad projects.
 import asyncio
 import logging
 import os
-import subprocess
 
 from fastmcp import Context, FastMCP
 
+from kicad_mcp.config import TIMEOUT_CONSTANTS
 from kicad_mcp.utils.file_utils import get_project_files
-from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
+from kicad_mcp.utils.kicad_cli import KiCadCLIError
+from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
 from kicad_mcp.utils.preview_metadata import SVG_MIME_TYPE, svg_preview_metadata
+from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
+from kicad_mcp.utils.transactional_edit import validate_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +28,24 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
 
         logger.info(f"Generating thumbnail via CLI for project: {project_path}")
 
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Project not found: {project_path}")
             if ctx:
                 await ctx.info(f"Project not found: {project_path}")
-            return {"success": False, "project_path": project_path, "error": "Project not found"}
+            return {"success": False, "project_path": project_path, "error": str(exc)}
 
-        files = get_project_files(project_path)
+        files = get_project_files(validated_project)
         if "pcb" not in files:
             logger.info("PCB file not found in project")
             if ctx:
                 await ctx.info("PCB file not found in project")
-            return {"success": False, "project_path": project_path, "error": "PCB file not found in project"}
+            return {
+                "success": False,
+                "project_path": validated_project,
+                "error": "PCB file not found in project",
+            }
 
         pcb_file = files["pcb"]
         logger.info(f"Found PCB file: {pcb_file}")
@@ -55,7 +64,7 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
         try:
             thumbnail = await generate_thumbnail_with_cli(pcb_file, ctx)
             if thumbnail and thumbnail.get("success"):
-                thumbnail["project_path"] = project_path
+                thumbnail["project_path"] = validated_project
                 if app_context and hasattr(app_context, "cache"):
                     app_context.cache[cache_key] = thumbnail
                 logger.info("Thumbnail generated successfully via CLI.")
@@ -65,7 +74,7 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
                 await ctx.info("Failed to generate thumbnail using kicad-cli.")
             return {
                 "success": False,
-                "project_path": project_path,
+                "project_path": validated_project,
                 "pcb_path": pcb_file,
                 "error": "Failed to generate thumbnail using kicad-cli",
             }
@@ -73,7 +82,12 @@ async def _generate_pcb_thumbnail_impl(project_path: str, ctx: Context | None):
             logger.exception("Error calling generate_thumbnail_with_cli: %s", e)
             if ctx:
                 await ctx.info(f"Error generating thumbnail with kicad-cli: {e}")
-            return {"success": False, "project_path": project_path, "pcb_path": pcb_file, "error": str(e)}
+            return {
+                "success": False,
+                "project_path": validated_project,
+                "pcb_path": pcb_file,
+                "error": str(e),
+            }
 
     except asyncio.CancelledError:
         logger.info("Thumbnail generation cancelled")
@@ -137,19 +151,11 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
         output_file = os.path.join(project_dir, f"{project_name}_thumbnail.svg")
         # ---------------------------
 
-        try:
-            kicad_cli = get_kicad_cli_path()
-        except KiCadCLIError as exc:
-            logger.warning("KiCad CLI unavailable for thumbnail generation: %s", exc)
-            if ctx:
-                await ctx.info(str(exc))
-            return None
-
         if ctx:
             await ctx.report_progress(30, 100)
             await ctx.info("Using KiCad command line tools for thumbnail generation")
-        cmd = [
-            kicad_cli,
+
+        command_args = [
             "pcb",
             "export",
             "svg",
@@ -160,13 +166,27 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
             pcb_file,
         ]
 
-        logger.info(f"Running command: {' '.join(cmd)}")
+        logger.info("Running KiCad CLI PCB thumbnail export for: %s", pcb_file)
         if ctx:
             await ctx.report_progress(50, 100)
 
-        # Run the command
+        validator = PathValidator(trusted_roots={project_dir})
+        runner = SecureSubprocessRunner(path_validator=validator)
         try:
-            process = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+            process = await runner.run_kicad_command_async(
+                command_args,
+                input_files=[pcb_file],
+                output_files=[output_file],
+                working_dir=project_dir,
+                timeout=TIMEOUT_CONSTANTS["kicad_cli_export"],
+            )
+            if process.returncode != 0:
+                logger.error("KiCad CLI thumbnail command failed with code %s", process.returncode)
+                logger.error("Stderr: %s", process.stderr)
+                logger.error("Stdout: %s", process.stdout)
+                if ctx:
+                    await ctx.info(f"KiCad CLI command failed: {process.stderr or process.stdout}")
+                return None
             logger.info(f"Command successful: {process.stdout}")
 
             if ctx:
@@ -195,17 +215,10 @@ async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
                 "preview": preview,
             }
 
-        except subprocess.CalledProcessError as e:
-            logger.error("Command '%s' failed with code %s", " ".join(e.cmd), e.returncode)
-            logger.error("Stderr: %s", e.stderr)
-            logger.error("Stdout: %s", e.stdout)
+        except (KiCadCLIError, PathValidationError, SecureSubprocessError) as e:
+            logger.info("KiCad CLI thumbnail export failed: %s", e)
             if ctx:
-                await ctx.info(f"KiCad CLI command failed: {e.stderr or e.stdout}")
-            return None
-        except subprocess.TimeoutExpired:
-            logger.info(f"Command timed out after 30 seconds: {' '.join(cmd)}")
-            if ctx:
-                await ctx.info("KiCad CLI command timed out")
+                await ctx.info(f"KiCad CLI thumbnail export failed: {e}")
             return None
         except Exception as e:
             logger.exception("Error running CLI command: %s", e)

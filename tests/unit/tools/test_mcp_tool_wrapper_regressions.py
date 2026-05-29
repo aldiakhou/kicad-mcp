@@ -119,3 +119,39 @@ async def test_generate_project_thumbnail_uses_undecorated_helper(
     assert result["success"] is True
     assert result["project_path"] == str(project_path)
     assert result["pcb_path"] == str(pcb_path)
+
+
+@pytest.mark.asyncio
+async def test_validation_tools_are_registered_and_parse_schematic_symbols(tmp_path: Path):
+    project_path = tmp_path / "demo.kicad_pro"
+    schematic_path = tmp_path / "demo.kicad_sch"
+    project_path.write_text("{}", encoding="utf-8")
+    schematic_path.write_text(
+        """
+(kicad_sch
+  (version 20231120)
+  (generator "pytest")
+  (paper "A4")
+  (symbol
+    (uuid 11111111-1111-1111-1111-111111111111)
+    (property "Value" "10k" (at 500 24 0))
+    (at 500 20 0)
+    (lib_id "Device:R")
+    (property "Reference" "R1" (at 500 16 0))
+  )
+)
+""",
+        encoding="utf-8",
+    )
+
+    server = create_server()
+    tools = await server.get_tools()
+
+    result = await tools["validate_project_boundaries"].fn(str(project_path), None)
+
+    assert result["success"] is False
+    assert result["project_path"] == str(project_path.resolve())
+    assert result["schematic_path"] == str(schematic_path)
+    assert result["total_components"] == 1
+    assert result["out_of_bounds_count"] == 1
+    assert result["issues"][0]["component_ref"] == "R1"

@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
 from typing import Any, cast
@@ -18,6 +17,7 @@ import uuid
 
 from fastmcp import Context, FastMCP
 
+from kicad_mcp.config import TIMEOUT_CONSTANTS
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
 from kicad_mcp.utils.design_intent_compiler import compile_design_intent, design_intent_schema
@@ -56,6 +56,7 @@ from kicad_mcp.utils.library_resolver import (
     symbol_footprint_suggestions as resolve_symbol_footprint_suggestions,
 )
 from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
+from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
 from kicad_mcp.utils.preview_metadata import svg_preview_metadata
 from kicad_mcp.utils.schematic_builder import (
     add_no_connect_marker,
@@ -84,6 +85,7 @@ from kicad_mcp.utils.schematic_pins import (
     verify_native_net_membership,
 )
 from kicad_mcp.utils.schematic_visual_layout import apply_visual_layout_to_v2_spec
+from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import (
     create_file_backup,
     export_schematic_svg_file,
@@ -5103,9 +5105,12 @@ def _validate_pcb_with_cli_export(pcb_path: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix=".kicad_mcp_pcb_validate_", dir=pcb_dir) as temp_dir:
         output_path = os.path.join(temp_dir, "pcb_validation.svg")
         try:
-            process = subprocess.run(
+            _ = cli_path
+            runner = SecureSubprocessRunner(
+                path_validator=PathValidator(trusted_roots={pcb_dir, temp_dir})
+            )
+            process = runner.run_kicad_command(
                 [
-                    cli_path,
                     "pcb",
                     "export",
                     "svg",
@@ -5115,12 +5120,16 @@ def _validate_pcb_with_cli_export(pcb_path: str) -> dict[str, Any]:
                     "F.Cu,B.Cu,Edge.Cuts",
                     pcb_path,
                 ],
-                capture_output=True,
-                text=True,
-                timeout=30,
+                input_files=[pcb_path],
+                output_files=[output_path],
+                working_dir=pcb_dir,
+                timeout=TIMEOUT_CONSTANTS["kicad_cli_export"],
             )
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "KiCad CLI PCB SVG export timed out"}
+        except (PathValidationError, SecureSubprocessError) as exc:
+            error = str(exc)
+            if "timed out" in error.lower():
+                error = "KiCad CLI PCB SVG export timed out"
+            return {"success": False, "error": error}
         return {
             "success": process.returncode == 0,
             "skipped": False,
@@ -5137,14 +5146,23 @@ def _run_pcb_drc_sync(pcb_path: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as temp_dir:
         output_path = os.path.join(temp_dir, "drc_report.json")
         try:
-            process = subprocess.run(
-                [cli_path, "pcb", "drc", "--format", "json", "--output", output_path, pcb_path],
-                capture_output=True,
-                text=True,
-                timeout=60,
+            _ = cli_path
+            pcb_dir = os.path.dirname(os.path.realpath(os.path.expanduser(pcb_path))) or os.getcwd()
+            runner = SecureSubprocessRunner(
+                path_validator=PathValidator(trusted_roots={pcb_dir, temp_dir})
             )
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "KiCad CLI PCB DRC timed out"}
+            process = runner.run_kicad_command(
+                ["pcb", "drc", "--format", "json", "--output", output_path, pcb_path],
+                input_files=[pcb_path],
+                output_files=[output_path],
+                working_dir=pcb_dir,
+                timeout=TIMEOUT_CONSTANTS["kicad_cli_drc"],
+            )
+        except (PathValidationError, SecureSubprocessError) as exc:
+            error = str(exc)
+            if "timed out" in error.lower():
+                error = "KiCad CLI PCB DRC timed out"
+            return {"success": False, "error": error}
         if process.returncode != 0:
             return {
                 "success": False,

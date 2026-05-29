@@ -2,6 +2,7 @@
 Lifespan context management for KiCad MCP Server.
 """
 
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -13,6 +14,34 @@ from fastmcp import FastMCP
 # Get PID for logging
 # _PID = os.getpid()
 
+DEFAULT_CACHE_MAX_ENTRIES = 128
+
+
+class BoundedCache(OrderedDict[str, Any]):
+    """Small LRU cache for lifespan-scoped expensive operation results."""
+
+    def __init__(self, max_entries: int = DEFAULT_CACHE_MAX_ENTRIES):
+        super().__init__()
+        self.max_entries = max_entries
+
+    def __getitem__(self, key: str) -> Any:
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key not in self:
+            return default
+        return self[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        while len(self) > self.max_entries:
+            oldest_key = next(iter(self))
+            super().__delitem__(oldest_key)
+
 
 @dataclass
 class KiCadAppContext:
@@ -21,7 +50,7 @@ class KiCadAppContext:
     kicad_modules_available: bool
 
     # Optional cache for expensive operations
-    cache: dict[str, Any]
+    cache: BoundedCache
 
 
 @asynccontextmanager
@@ -52,7 +81,7 @@ async def kicad_lifespan(
     )
 
     # Create in-memory cache for expensive operations
-    cache: dict[str, Any] = {}
+    cache = BoundedCache()
 
     # Initialize any other resources that need cleanup later
     created_temp_dirs = []  # Assuming this is managed elsewhere or not needed for now

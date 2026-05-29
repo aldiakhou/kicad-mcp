@@ -47,9 +47,7 @@ logging.info(f"os.environ['KICAD_SEARCH_PATHS'] after load_dotenv: {effective_se
 # Re-log the values imported from config.py to see if they reflect os.environ changes
 # (This depends on config.py using os.getenv internally AFTER load_dotenv runs)
 try:
-    from kicad_mcp import config
-
-    importlib.reload(config)
+    config = importlib.reload(config)
     logging.info(f"Effective KICAD_USER_DIR from config.py after reload: {config.KICAD_USER_DIR}")
     logging.info(
         f"Effective ADDITIONAL_SEARCH_PATHS from config.py after reload: {config.ADDITIONAL_SEARCH_PATHS}"

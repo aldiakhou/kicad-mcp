@@ -7,13 +7,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 from typing import Any
 
 from kicad_mcp.config import TIMEOUT_CONSTANTS
-from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
+from kicad_mcp.utils.kicad_cli import KiCadCLIError
 from kicad_mcp.utils.kicad_s_expr import SExprAtom, SExprList, parse_s_expression
+from kicad_mcp.utils.path_validator import PathValidationError, get_configured_validator
+from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
 
 
 def native_node_matches_endpoint(
@@ -59,18 +60,17 @@ def export_native_netlist(
         result["error"] = f"Schematic file not found: {schematic_path}"
         return result
     try:
-        kicad_cli = get_kicad_cli_path()
-    except KiCadCLIError as exc:
+        schematic_path = get_configured_validator().validate_kicad_file(
+            schematic_path, "schematic", must_exist=True
+        )
+        result["schematic_path"] = schematic_path
+    except PathValidationError as exc:
         result["error"] = str(exc)
-        return result
-    if kicad_cli is None:
-        result["error"] = "KiCad CLI is not available"
         return result
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output_file = os.path.join(temp_dir, "netlist.kicad_net")
-        cmd = [
-            kicad_cli,
+        command_args = [
             "sch",
             "export",
             "netlist",
@@ -81,13 +81,23 @@ def export_native_netlist(
             schematic_path,
         ]
         try:
-            process = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=resolved_timeout
+            runner = SecureSubprocessRunner(
+                path_validator=get_configured_validator(extra_roots={temp_dir})
             )
-        except subprocess.TimeoutExpired:
-            result["error"] = (
-                f"KiCad CLI netlist export timed out after {resolved_timeout:g} seconds."
+            process = runner.run_kicad_command(
+                command_args,
+                input_files=[schematic_path],
+                output_files=[output_file],
+                working_dir=os.path.dirname(schematic_path) or os.getcwd(),
+                timeout=resolved_timeout,
             )
+        except (KiCadCLIError, PathValidationError, SecureSubprocessError) as exc:
+            if "timed out" in str(exc).lower():
+                result["error"] = (
+                    f"KiCad CLI netlist export timed out after {resolved_timeout:g} seconds."
+                )
+            else:
+                result["error"] = str(exc)
             return result
         if process.returncode != 0:
             result["error"] = process.stderr.strip() or "KiCad CLI netlist export failed"
@@ -126,18 +136,17 @@ def run_erc_via_cli(
         result["error"] = f"Schematic file not found: {schematic_path}"
         return result
     try:
-        kicad_cli = get_kicad_cli_path()
-    except KiCadCLIError as exc:
+        schematic_path = get_configured_validator().validate_kicad_file(
+            schematic_path, "schematic", must_exist=True
+        )
+        result["schematic_path"] = schematic_path
+    except PathValidationError as exc:
         result["error"] = str(exc)
-        return result
-    if kicad_cli is None:
-        result["error"] = "KiCad CLI is not available"
         return result
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output_file = os.path.join(temp_dir, "erc_report.json")
-        cmd = [
-            kicad_cli,
+        command_args = [
             "sch",
             "erc",
             "--format",
@@ -147,13 +156,21 @@ def run_erc_via_cli(
             schematic_path,
         ]
         try:
-            process = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=resolved_timeout
+            runner = SecureSubprocessRunner(
+                path_validator=get_configured_validator(extra_roots={temp_dir})
             )
-        except subprocess.TimeoutExpired:
-            result["error"] = (
-                f"KiCad CLI ERC timed out after {resolved_timeout:g} seconds."
+            process = runner.run_kicad_command(
+                command_args,
+                input_files=[schematic_path],
+                output_files=[output_file],
+                working_dir=os.path.dirname(schematic_path) or os.getcwd(),
+                timeout=resolved_timeout,
             )
+        except (KiCadCLIError, PathValidationError, SecureSubprocessError) as exc:
+            if "timed out" in str(exc).lower():
+                result["error"] = f"KiCad CLI ERC timed out after {resolved_timeout:g} seconds."
+            else:
+                result["error"] = str(exc)
             return result
         if process.returncode != 0 and not os.path.exists(output_file):
             result["error"] = process.stderr.strip() or "KiCad CLI ERC failed"

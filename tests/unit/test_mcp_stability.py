@@ -102,6 +102,8 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "schematic_connect_pins" in tools
     assert "schematic_connect_pin_to_ground" in tools
     assert "schematic_connect_pin_to_power" in tools
+    assert "validate_project_boundaries" in tools
+    assert "generate_validation_report" in tools
     assert "run_erc_check" in tools
     assert "resolve_symbol" in tools
     assert "resolve_footprint" in tools
@@ -340,8 +342,8 @@ async def test_run_drc_via_cli_returns_structured_error_without_stdout(
 ):
     """Missing KiCad CLI should return a structured error and keep stdout clean."""
     monkeypatch.setattr(
-        "kicad_mcp.tools.drc_impl.cli_drc.get_kicad_cli_path",
-        lambda: (_ for _ in ()).throw(KiCadCLIError("KiCad CLI not found for tests")),
+        "kicad_mcp.utils.secure_subprocess.get_kicad_cli_path",
+        lambda required=True: (_ for _ in ()).throw(KiCadCLIError("KiCad CLI not found for tests")),
     )
 
     result = await run_drc_via_cli("/tmp/test.kicad_pcb", FakeContext())
@@ -355,17 +357,19 @@ async def test_run_drc_via_cli_returns_structured_error_without_stdout(
 @pytest.mark.asyncio
 async def test_run_drc_via_cli_uses_explicit_timeout(monkeypatch, tmp_path: Path):
     captured: dict[str, float] = {}
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("(kicad_pcb)", encoding="utf-8")
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         captured["timeout"] = timeout
         output_path = Path(cmd[cmd.index("--output") + 1])
         output_path.write_text(json.dumps({"violations": []}), encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.get_kicad_cli_path", lambda: "kicad-cli")
-    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.subprocess.run", fake_run)
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_run)
 
-    result = await run_drc_via_cli(str(tmp_path / "board.kicad_pcb"), None, timeout_seconds=12.5)
+    result = await run_drc_via_cli(str(board), None, timeout_seconds=12.5)
 
     assert result["success"] is True
     assert result["timeout_seconds"] == 12.5
@@ -375,18 +379,20 @@ async def test_run_drc_via_cli_uses_explicit_timeout(monkeypatch, tmp_path: Path
 @pytest.mark.asyncio
 async def test_run_drc_via_cli_uses_env_timeout(monkeypatch, tmp_path: Path):
     captured: dict[str, float] = {}
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("(kicad_pcb)", encoding="utf-8")
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         captured["timeout"] = timeout
         output_path = Path(cmd[cmd.index("--output") + 1])
         output_path.write_text(json.dumps({"violations": []}), encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setenv("KICAD_DRC_TIMEOUT", "88")
-    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.get_kicad_cli_path", lambda: "kicad-cli")
-    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.subprocess.run", fake_run)
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_run)
 
-    result = await run_drc_via_cli(str(tmp_path / "board.kicad_pcb"), None)
+    result = await run_drc_via_cli(str(board), None)
 
     assert result["success"] is True
     assert result["timeout_seconds"] == 88
@@ -395,13 +401,16 @@ async def test_run_drc_via_cli_uses_env_timeout(monkeypatch, tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_drc_via_cli_reports_timeout(monkeypatch, tmp_path: Path):
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("(kicad_pcb)", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         raise subprocess.TimeoutExpired(cmd, timeout)
 
-    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.get_kicad_cli_path", lambda: "kicad-cli")
-    monkeypatch.setattr("kicad_mcp.tools.drc_impl.cli_drc.subprocess.run", fake_run)
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_run)
 
-    result = await run_drc_via_cli(str(tmp_path / "board.kicad_pcb"), None, timeout_seconds=1)
+    result = await run_drc_via_cli(str(board), None, timeout_seconds=1)
 
     assert result["success"] is False
     assert result["method"] == "cli"

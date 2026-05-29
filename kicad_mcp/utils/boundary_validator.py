@@ -10,9 +10,6 @@ from enum import Enum
 import json
 from typing import Any
 
-from kicad_mcp.utils.component_layout import ComponentLayoutManager, SchematicBounds
-from kicad_mcp.utils.coordinate_converter import CoordinateConverter, validate_position
-
 
 class ValidationSeverity(Enum):
     """Severity levels for validation issues."""
@@ -20,6 +17,68 @@ class ValidationSeverity(Enum):
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
+
+
+@dataclass(frozen=True)
+class SchematicBounds:
+    """Schematic page bounds in millimeters."""
+
+    width: float = 297.0
+    height: float = 210.0
+    margin: float = 10.0
+
+    def contains(self, x: float, y: float, *, use_margins: bool = True) -> bool:
+        """Return whether a point is inside the page or its usable margin area."""
+        min_x = self.margin if use_margins else 0.0
+        min_y = self.margin if use_margins else 0.0
+        max_x = self.width - self.margin if use_margins else self.width
+        max_y = self.height - self.margin if use_margins else self.height
+        return min_x <= x <= max_x and min_y <= y <= max_y
+
+    def clamp(self, x: float, y: float, *, use_margins: bool = True) -> tuple[float, float]:
+        """Clamp a point into the page or usable margin area."""
+        min_x = self.margin if use_margins else 0.0
+        min_y = self.margin if use_margins else 0.0
+        max_x = self.width - self.margin if use_margins else self.width
+        max_y = self.height - self.margin if use_margins else self.height
+        return (min(max(x, min_x), max_x), min(max(y, min_y), max_y))
+
+
+class CoordinateConverter:
+    """Compatibility placeholder for callers expecting a converter object."""
+
+    @staticmethod
+    def to_mm(x: float, y: float) -> tuple[float, float]:
+        """KiCad schematic coordinates are already represented in millimeters here."""
+        return (float(x), float(y))
+
+
+class ComponentLayoutManager:
+    """Minimal layout helper used to suggest valid fallback positions."""
+
+    def __init__(self, bounds: SchematicBounds):
+        self.bounds = bounds
+
+    def clear_layout(self) -> None:
+        """Reset placement state for a validation run."""
+
+    def find_valid_position(
+        self, component_ref: str, component_type: str, x: float, y: float
+    ) -> tuple[float, float]:
+        """Return the nearest point inside the usable schematic area."""
+        _ = (component_ref, component_type)
+        return self.bounds.clamp(x, y, use_margins=True)
+
+
+def validate_position(
+    x: float,
+    y: float,
+    *,
+    use_margins: bool = True,
+    bounds: SchematicBounds | None = None,
+) -> bool:
+    """Validate a position against schematic bounds."""
+    return (bounds or SchematicBounds()).contains(float(x), float(y), use_margins=use_margins)
 
 
 @dataclass
@@ -95,8 +154,8 @@ class BoundaryValidator:
         Returns:
             ValidationIssue describing the validation result
         """
-        # Check if position is within A4 bounds
-        if not validate_position(x, y, use_margins=True):
+        # Outside the physical sheet is an error.
+        if not validate_position(x, y, use_margins=False, bounds=self.bounds):
             # Find a corrected position
             corrected_x, corrected_y = self.layout_manager.find_valid_position(
                 component_ref, component_type, x, y
@@ -111,8 +170,8 @@ class BoundaryValidator:
                 component_type=component_type,
             )
 
-        # Check if position is within usable area (with margins)
-        if not validate_position(x, y, use_margins=False):
+        # Inside the sheet but outside the usable margin area is a warning.
+        if not validate_position(x, y, use_margins=True, bounds=self.bounds):
             # Position is within absolute bounds but outside usable area
             return ValidationIssue(
                 severity=ValidationSeverity.WARNING,
@@ -222,7 +281,7 @@ class BoundaryValidator:
         issues = []
 
         # Validate start point
-        if not validate_position(start_x, start_y, use_margins=True):
+        if not validate_position(start_x, start_y, use_margins=False, bounds=self.bounds):
             issues.append(
                 ValidationIssue(
                     severity=ValidationSeverity.ERROR,
@@ -233,7 +292,7 @@ class BoundaryValidator:
             )
 
         # Validate end point
-        if not validate_position(end_x, end_y, use_margins=True):
+        if not validate_position(end_x, end_y, use_margins=False, bounds=self.bounds):
             issues.append(
                 ValidationIssue(
                     severity=ValidationSeverity.ERROR,

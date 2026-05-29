@@ -22,7 +22,12 @@ from kicad_mcp.utils.kicad_s_expr import (
     compare_block_connectivity_snapshots,
     validate_schematic_text,
 )
-from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
+from kicad_mcp.utils.path_validator import (
+    PathValidationError,
+    PathValidator,
+    validate_configured_directory,
+    validate_configured_kicad_file,
+)
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessRunner
 
 BACKUP_DIR_NAME = ".kicad_mcp_backups"
@@ -34,18 +39,15 @@ class TransactionalEditError(RuntimeError):
 
 
 def validate_local_path(file_path: str, file_type: str, must_exist: bool = True) -> str:
-    """Validate a KiCad file path using the file's own directory as the trusted root."""
+    """Validate a KiCad file path against configured trusted filesystem roots."""
     expanded = os.path.realpath(os.path.expanduser(file_path))
-    trusted_root = expanded if os.path.isdir(expanded) else os.path.dirname(expanded)
-    validator = PathValidator(trusted_roots={trusted_root})
-    return validator.validate_kicad_file(expanded, file_type, must_exist=must_exist)
+    return validate_configured_kicad_file(expanded, file_type, must_exist=must_exist)
 
 
 def validate_local_directory(dir_path: str, must_exist: bool = True) -> str:
-    """Validate a directory path using itself as a trusted root."""
+    """Validate a directory path against configured trusted filesystem roots."""
     expanded = os.path.realpath(os.path.expanduser(dir_path))
-    validator = PathValidator(trusted_roots={expanded})
-    return validator.validate_directory(expanded, must_exist=must_exist)
+    return validate_configured_directory(expanded, must_exist=must_exist)
 
 
 def validate_schematic_file_safely(schematic_path: str) -> dict[str, Any]:

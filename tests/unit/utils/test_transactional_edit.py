@@ -4,11 +4,13 @@ import shutil
 import pytest
 
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
+from kicad_mcp.utils.path_validator import PathValidationError
 from kicad_mcp.utils.transactional_edit import (
     apply_transactional_schematic_edit,
     backup_project_files,
     get_file_diff_against_backup,
     restore_backup_manifest,
+    validate_local_path,
     validate_schematic_file_safely,
 )
 
@@ -112,3 +114,30 @@ def test_backup_project_files_and_restore_backup_manifest(tmp_path: Path):
     assert restore_result["success"] is True
     restored = schematic_path.read_text(encoding="utf-8")
     assert "kicad_mcp_test" in restored
+
+
+def test_validate_local_path_rejects_file_outside_configured_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_schematic = outside / "demo.kicad_sch"
+    outside_schematic.write_text("(kicad_sch)", encoding="utf-8")
+
+    import kicad_mcp.utils.path_validator as path_validator
+
+    monkeypatch.setattr(path_validator.os, "getcwd", lambda: str(trusted))
+    monkeypatch.setattr(path_validator.tempfile, "gettempdir", lambda: str(trusted / "tmp"))
+    monkeypatch.setattr(path_validator.config, "KICAD_USER_DIR", str(trusted / "user"))
+    monkeypatch.setattr(path_validator.config, "ADDITIONAL_SEARCH_PATHS", [])
+    monkeypatch.delenv(path_validator.TRUSTED_ROOTS_ENV_VAR, raising=False)
+
+    with pytest.raises(PathValidationError, match="outside trusted directories"):
+        validate_local_path(str(outside_schematic), "schematic", must_exist=True)
+
+    monkeypatch.setenv(path_validator.TRUSTED_ROOTS_ENV_VAR, str(outside))
+    assert validate_local_path(str(outside_schematic), "schematic", must_exist=True) == str(
+        outside_schematic.resolve()
+    )

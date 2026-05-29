@@ -40,6 +40,7 @@ from kicad_mcp.tools.pattern_tools import register_pattern_tools
 # Import tool handlers
 from kicad_mcp.tools.project_tools import register_project_tools
 from kicad_mcp.tools.schematic_edit_tools import register_schematic_edit_tools
+from kicad_mcp.tools.validation_tools import register_validation_tools
 
 # Track cleanup handlers
 cleanup_handlers = []
@@ -88,6 +89,8 @@ AGENT_PROFILE_TOOLS = {
     "schematic_snap_to_grid",
     "schematic_delete_item",
     "schematic_quality_report",
+    "validate_project_boundaries",
+    "generate_validation_report",
     "schematic_footprint_report",
     "schematic_assign_footprints",
     "schematic_assign_default_footprints",
@@ -131,8 +134,6 @@ def add_cleanup_handler(handler: Callable) -> None:
 
 def run_cleanup_handlers() -> None:
     """Run all registered cleanup handlers."""
-    logging.info("Running cleanup handlers...")
-
     global _shutting_down
 
     # Prevent running cleanup handlers multiple times
@@ -237,6 +238,7 @@ def create_server() -> FastMCP:
     register_bom_tools(mcp)
     register_netlist_tools(mcp)
     register_pattern_tools(mcp)
+    register_validation_tools(mcp)
     register_schematic_edit_tools(mcp)
     register_creation_tools(mcp)
     _apply_tool_profile(mcp, get_tool_profile())

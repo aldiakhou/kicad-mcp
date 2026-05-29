@@ -6,13 +6,18 @@ import csv
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import Context, FastMCP
 import pandas as pd
 
+from kicad_mcp.config import TIMEOUT_CONSTANTS
 from kicad_mcp.utils.file_utils import get_project_files
-from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
+from kicad_mcp.utils.kicad_cli import KiCadCLIError
+from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
+from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
+from kicad_mcp.utils.transactional_edit import validate_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +45,23 @@ def register_bom_tools(mcp: FastMCP) -> None:
         """
         logger.info(f"Analyzing BOM for project: {project_path}")
 
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Project not found: {project_path}")
             if ctx:
                 await ctx.info(f"Project not found: {project_path}")
-            return {"success": False, "error": f"Project not found: {project_path}"}
+            return {"success": False, "project_path": project_path, "error": str(exc)}
 
         # Report progress
         if ctx:
             await ctx.report_progress(10, 100)
-            await ctx.info(f"Looking for BOM files related to {os.path.basename(project_path)}")
+            await ctx.info(
+                f"Looking for BOM files related to {os.path.basename(validated_project)}"
+            )
 
         # Get all project files
-        files = get_project_files(project_path)
+        files = get_project_files(validated_project)
 
         # Look for BOM files
         bom_files = {}
@@ -68,7 +77,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
             return {
                 "success": False,
                 "error": "No BOM files found. Export a BOM from KiCad first.",
-                "project_path": project_path,
+                "project_path": validated_project,
             }
 
         if ctx:
@@ -77,7 +86,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
         # Analyze each BOM file
         results = {
             "success": True,
-            "project_path": project_path,
+            "project_path": validated_project,
             "bom_files": {},
             "component_summary": {},
         }
@@ -184,11 +193,13 @@ def register_bom_tools(mcp: FastMCP) -> None:
         """
         logger.info(f"Exporting BOM for project: {project_path}")
 
-        if not os.path.exists(project_path):
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except PathValidationError as exc:
             logger.info(f"Project not found: {project_path}")
             if ctx:
                 await ctx.info(f"Project not found: {project_path}")
-            return {"success": False, "error": f"Project not found: {project_path}"}
+            return {"success": False, "project_path": project_path, "error": str(exc)}
 
         # Get access to the app context
         app_context = ctx.request_context.lifespan_context if ctx else None
@@ -199,7 +210,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
             await ctx.report_progress(10, 100)
 
         # Get all project files
-        files = get_project_files(project_path)
+        files = get_project_files(validated_project)
 
         # We need the schematic file to generate a BOM
         if "schematic" not in files:
@@ -209,8 +220,8 @@ def register_bom_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": "Schematic file not found"}
 
         schematic_file = files["schematic"]
-        project_dir = os.path.dirname(project_path)
-        project_name = os.path.basename(project_path)[:-10]  # Remove .kicad_pro extension
+        project_dir = os.path.dirname(validated_project)
+        project_name = Path(validated_project).stem
 
         if ctx:
             await ctx.report_progress(20, 100)
@@ -668,8 +679,6 @@ async def export_bom_with_cli(
     Returns:
         Dictionary with export results
     """
-    import subprocess
-
     logger.info("Exporting BOM using CLI tools")
     if ctx:
         await ctx.report_progress(40, 100)
@@ -677,17 +686,7 @@ async def export_bom_with_cli(
     # Output file path
     output_file = os.path.join(output_dir, f"{project_name}_bom.csv")
 
-    try:
-        kicad_cli = get_kicad_cli_path()
-    except KiCadCLIError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "schematic_file": schematic_file,
-        }
-
-    cmd = [
-        kicad_cli,
+    command_args = [
         "sch",
         "export",
         "bom",
@@ -697,12 +696,19 @@ async def export_bom_with_cli(
     ]
 
     try:
-        logger.info(f"Running command: {' '.join(cmd)}")
+        logger.info("Running KiCad CLI BOM export for: %s", schematic_file)
         if ctx:
             await ctx.report_progress(60, 100)
 
-        # Run the command
-        process = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        validator = PathValidator(trusted_roots={output_dir, os.path.dirname(schematic_file)})
+        runner = SecureSubprocessRunner(path_validator=validator)
+        process = await runner.run_kicad_command_async(
+            command_args,
+            input_files=[schematic_file],
+            output_files=[output_file],
+            working_dir=output_dir,
+            timeout=TIMEOUT_CONSTANTS["kicad_cli_export"],
+        )
 
         # Check if the command was successful
         if process.returncode != 0:
@@ -712,7 +718,7 @@ async def export_bom_with_cli(
                 "success": False,
                 "error": f"BOM export command failed: {process.stderr}",
                 "schematic_file": schematic_file,
-                "command": " ".join(cmd),
+                "command": "kicad-cli " + " ".join(command_args),
             }
 
         # Check if the output file was created
@@ -747,14 +753,9 @@ async def export_bom_with_cli(
             "message": "BOM exported successfully",
         }
 
-    except subprocess.TimeoutExpired:
-        logger.info("BOM export command timed out after 30 seconds")
-        return {
-            "success": False,
-            "error": "BOM export command timed out after 30 seconds",
-            "schematic_file": schematic_file,
-        }
-
+    except (KiCadCLIError, PathValidationError, SecureSubprocessError) as e:
+        logger.info("BOM export command failed: %s", e)
+        return {"success": False, "error": str(e), "schematic_file": schematic_file}
     except Exception as e:
         logger.exception("Error exporting BOM: %s", e)
         return {

@@ -5,17 +5,24 @@ Provides tools for validating circuit positioning, generating reports,
 and checking component boundaries in existing projects.
 """
 
+from datetime import datetime
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import Context, FastMCP
 
-from kicad_mcp.utils.boundary_validator import BoundaryValidator
+from kicad_mcp.utils.boundary_validator import BoundaryValidator, SchematicBounds
 from kicad_mcp.utils.file_utils import get_project_files
+from kicad_mcp.utils.kicad_s_expr import KiCadSchematic, SExpressionError
+from kicad_mcp.utils.path_validator import get_configured_validator
+from kicad_mcp.utils.transactional_edit import validate_local_path
 
 
-async def validate_project_boundaries(project_path: str, ctx: Context = None) -> dict[str, Any]:
+async def validate_project_boundaries(
+    project_path: str, ctx: Context | None = None
+) -> dict[str, Any]:
     """
     Validate component boundaries for an entire KiCad project.
 
@@ -31,10 +38,16 @@ async def validate_project_boundaries(project_path: str, ctx: Context = None) ->
             await ctx.info("Starting boundary validation for project")
             await ctx.report_progress(10, 100)
 
+        validated_project = validate_local_path(project_path, "project", must_exist=True)
+
         # Get project files
-        files = get_project_files(project_path)
+        files = get_project_files(validated_project)
         if "schematic" not in files:
-            return {"success": False, "error": "No schematic file found in project"}
+            return {
+                "success": False,
+                "project_path": validated_project,
+                "error": "No schematic file found in project",
+            }
 
         schematic_file = files["schematic"]
 
@@ -43,15 +56,27 @@ async def validate_project_boundaries(project_path: str, ctx: Context = None) ->
             await ctx.info(f"Reading schematic file: {schematic_file}")
 
         # Read schematic file
-        with open(schematic_file) as f:
-            content = f.read().strip()
+        content = Path(schematic_file).read_text(encoding="utf-8").strip()
 
         # Parse components based on format
         components = []
 
         if content.startswith("(kicad_sch"):
-            # S-expression format - extract components
+            try:
+                schematic = KiCadSchematic.from_text(content)
+            except SExpressionError as exc:
+                return {
+                    "success": False,
+                    "project_path": validated_project,
+                    "schematic_path": schematic_file,
+                    "error": f"Invalid KiCad schematic S-expression: {exc}",
+                }
             components = _extract_components_from_sexpr(content)
+            sheet_bounds = schematic.get_sheet_bounds()
+            bounds = SchematicBounds(
+                width=float(sheet_bounds["width"]),
+                height=float(sheet_bounds["height"]),
+            )
         else:
             # JSON format
             try:
@@ -60,15 +85,18 @@ async def validate_project_boundaries(project_path: str, ctx: Context = None) ->
             except json.JSONDecodeError:
                 return {
                     "success": False,
+                    "project_path": validated_project,
+                    "schematic_path": schematic_file,
                     "error": "Schematic file is neither valid S-expression nor JSON format",
                 }
+            bounds = SchematicBounds()
 
         if ctx:
             await ctx.report_progress(60, 100)
             await ctx.info(f"Found {len(components)} components to validate")
 
         # Run boundary validation
-        validator = BoundaryValidator()
+        validator = BoundaryValidator(bounds=bounds)
         validation_report = validator.validate_circuit_components(components)
 
         if ctx:
@@ -87,6 +115,8 @@ async def validate_project_boundaries(project_path: str, ctx: Context = None) ->
         # Create result
         result = {
             "success": validation_report.success,
+            "project_path": validated_project,
+            "schematic_path": schematic_file,
             "total_components": validation_report.total_components,
             "out_of_bounds_count": validation_report.out_of_bounds_count,
             "corrected_positions": validation_report.corrected_positions,
@@ -115,7 +145,7 @@ async def validate_project_boundaries(project_path: str, ctx: Context = None) ->
 
 
 async def generate_validation_report(
-    project_path: str, output_path: str = None, ctx: Context = None
+    project_path: str, output_path: str | None = None, ctx: Context | None = None
 ) -> dict[str, Any]:
     """
     Generate a comprehensive validation report for a KiCad project.
@@ -133,17 +163,26 @@ async def generate_validation_report(
             await ctx.info("Generating validation report")
             await ctx.report_progress(10, 100)
 
+        validated_project = validate_local_path(project_path, "project", must_exist=True)
+
         # Run validation
-        validation_result = await validate_project_boundaries(project_path, ctx)
+        validation_result = await validate_project_boundaries(validated_project, ctx)
 
         if not validation_result["success"]:
             return validation_result
 
         # Determine output path
         if output_path is None:
-            project_dir = os.path.dirname(project_path)
-            project_name = os.path.splitext(os.path.basename(project_path))[0]
+            project_dir = os.path.dirname(validated_project)
+            project_name = Path(validated_project).stem
             output_path = os.path.join(project_dir, f"{project_name}_validation_report.json")
+        else:
+            output_path = os.path.realpath(os.path.expanduser(output_path))
+
+        validator = get_configured_validator()
+        output_dir = os.path.dirname(output_path) or os.getcwd()
+        validator.validate_directory(output_dir, must_exist=True)
+        output_path = validator.validate_path(output_path, must_exist=False)
 
         if ctx:
             await ctx.report_progress(80, 100)
@@ -151,8 +190,9 @@ async def generate_validation_report(
 
         # Save detailed report
         report_data = {
-            "project_path": project_path,
-            "validation_timestamp": __import__("datetime").datetime.now().isoformat(),
+            "project_path": validated_project,
+            "schematic_path": validation_result.get("schematic_path"),
+            "validation_timestamp": datetime.now().isoformat(),
             "summary": {
                 "total_components": validation_result["total_components"],
                 "out_of_bounds_count": validation_result["out_of_bounds_count"],
@@ -164,7 +204,7 @@ async def generate_validation_report(
             "report_text": validation_result["report_text"],
         }
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report_data, f, indent=2)
 
         if ctx:
@@ -182,22 +222,14 @@ async def generate_validation_report(
 
 def _extract_components_from_sexpr(content: str) -> list[dict[str, Any]]:
     """Extract component information from S-expression format."""
-    import re
-
     components = []
-
-    # Find all symbol instances
-    symbol_pattern = r'\(symbol\s+\(lib_id\s+"([^"]+)"\)\s+\(at\s+([\d.-]+)\s+([\d.-]+)\s+[\d.-]+\)\s+\(uuid\s+[^)]+\)(.*?)\n\s*\)'
-
-    for match in re.finditer(symbol_pattern, content, re.DOTALL):
-        lib_id = match.group(1)
-        x_pos = float(match.group(2))
-        y_pos = float(match.group(3))
-        properties_text = match.group(4)
-
-        # Extract reference from properties
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', properties_text)
-        reference = ref_match.group(1) if ref_match else "Unknown"
+    schematic = KiCadSchematic.from_text(content)
+    for symbol in schematic.list_symbols():
+        lib_id = str(symbol.get("lib_id") or "")
+        position = symbol.get("position", {})
+        x_pos = float(position.get("x", 0.0))
+        y_pos = float(position.get("y", 0.0))
+        reference = str(symbol.get("reference") or "Unknown")
 
         # Determine component type from lib_id
         component_type = _get_component_type_from_lib_id(lib_id)
@@ -285,14 +317,14 @@ def register_validation_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(name="validate_project_boundaries")
     async def validate_project_boundaries_tool(
-        project_path: str, ctx: Context = None
+        project_path: str, ctx: Context | None = None
     ) -> dict[str, Any]:
         """Validate component boundaries for an entire KiCad project."""
         return await validate_project_boundaries(project_path, ctx)
 
     @mcp.tool(name="generate_validation_report")
     async def generate_validation_report_tool(
-        project_path: str, output_path: str = None, ctx: Context = None
+        project_path: str, output_path: str | None = None, ctx: Context | None = None
     ) -> dict[str, Any]:
         """Generate a comprehensive validation report for a KiCad project."""
         return await generate_validation_report(project_path, output_path, ctx)

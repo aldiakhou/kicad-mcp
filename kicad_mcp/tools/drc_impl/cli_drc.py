@@ -5,14 +5,15 @@ Design Rule Check (DRC) implementation using KiCad command-line interface.
 import json
 import logging
 import os
-import subprocess
 import tempfile
 from typing import Any
 
 from fastmcp import Context
 
 from kicad_mcp.config import TIMEOUT_CONSTANTS
-from kicad_mcp.utils.kicad_cli import KiCadCLIError, get_kicad_cli_path
+from kicad_mcp.utils.kicad_cli import KiCadCLIError
+from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
+from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
 
 logger = logging.getLogger(__name__)
 
@@ -58,24 +59,25 @@ async def run_drc_via_cli(
             # Output file for DRC report
             output_file = os.path.join(temp_dir, "drc_report.json")
 
-            try:
-                kicad_cli = get_kicad_cli_path()
-            except KiCadCLIError as exc:
-                logger.warning("KiCad CLI unavailable for DRC: %s", exc)
-                results["error"] = str(exc)
-                return results
-
             # Report progress
             if ctx:
                 await ctx.report_progress(50, 100)
                 await ctx.info("Running DRC using KiCad CLI...")
 
             # Build the DRC command
-            cmd = [kicad_cli, "pcb", "drc", "--format", "json", "--output", output_file, pcb_file]
+            command_args = ["pcb", "drc", "--format", "json", "--output", output_file, pcb_file]
 
-            logger.info("Running command: %s", " ".join(cmd))
-            process = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=resolved_timeout
+            logger.info("Running KiCad CLI DRC for: %s", pcb_file)
+            pcb_dir = os.path.dirname(os.path.realpath(os.path.expanduser(pcb_file))) or os.getcwd()
+            runner = SecureSubprocessRunner(
+                path_validator=PathValidator(trusted_roots={pcb_dir, temp_dir})
+            )
+            process = await runner.run_kicad_command_async(
+                command_args,
+                input_files=[pcb_file],
+                output_files=[output_file],
+                working_dir=pcb_dir,
+                timeout=resolved_timeout,
             )
 
             # Check if the command was successful
@@ -131,12 +133,16 @@ async def run_drc_via_cli(
                 await ctx.report_progress(90, 100)
             return results
 
-    except subprocess.TimeoutExpired as e:
-        logger.warning("CLI DRC timed out after %s seconds: %s", resolved_timeout, e)
-        results["error"] = (
-            f"KiCad CLI DRC timed out after {resolved_timeout:g} seconds. "
-            "Increase timeout_seconds or KICAD_DRC_TIMEOUT for larger boards."
-        )
+    except (KiCadCLIError, PathValidationError, SecureSubprocessError) as e:
+        logger.warning("CLI DRC failed: %s", e)
+        error_text = str(e)
+        if "timed out" in error_text.lower():
+            results["error"] = (
+                f"KiCad CLI DRC timed out after {resolved_timeout:g} seconds. "
+                "Increase timeout_seconds or KICAD_DRC_TIMEOUT for larger boards."
+            )
+        else:
+            results["error"] = error_text
         return results
     except Exception as e:
         logger.exception("Error in CLI DRC: %s", e)

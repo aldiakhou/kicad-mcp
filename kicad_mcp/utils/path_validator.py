@@ -5,10 +5,14 @@ Provides secure path validation to prevent path traversal attacks
 and ensure file operations are restricted to safe directories.
 """
 
+from collections.abc import Iterable
 import os
 import pathlib
+import tempfile
 
-from kicad_mcp.config import KICAD_EXTENSIONS
+from kicad_mcp import config
+
+TRUSTED_ROOTS_ENV_VAR = "KICAD_MCP_TRUSTED_ROOTS"
 
 
 class PathValidationError(Exception):
@@ -101,10 +105,10 @@ class PathValidator:
         normalized_path = self.validate_path(file_path, must_exist)
 
         # Check file extension
-        if file_type not in KICAD_EXTENSIONS:
+        if file_type not in config.KICAD_EXTENSIONS:
             raise PathValidationError(f"Unknown KiCad file type: {file_type}")
 
-        expected_extension = KICAD_EXTENSIONS[file_type]
+        expected_extension = config.KICAD_EXTENSIONS[file_type]
         if not normalized_path.endswith(expected_extension):
             raise PathValidationError(
                 f"File must have {expected_extension} extension, got: {file_path}"
@@ -224,3 +228,46 @@ def validate_kicad_file(file_path: str, file_type: str, must_exist: bool = True)
 def validate_directory(dir_path: str, must_exist: bool = True) -> str:
     """Convenience function using default validator."""
     return get_default_validator().validate_directory(dir_path, must_exist)
+
+
+def get_configured_trusted_roots(extra_roots: Iterable[str] | None = None) -> set[str]:
+    """Return the configured local filesystem roots KiCad MCP may operate within."""
+    roots = {
+        os.getcwd(),
+        config.KICAD_USER_DIR,
+        tempfile.gettempdir(),
+        *config.ADDITIONAL_SEARCH_PATHS,
+    }
+    roots.update(_split_configured_roots(os.getenv(TRUSTED_ROOTS_ENV_VAR, "")))
+    if extra_roots:
+        roots.update(extra_roots)
+    return {
+        os.path.realpath(os.path.expanduser(root))
+        for root in roots
+        if isinstance(root, str) and root.strip()
+    }
+
+
+def get_configured_validator(extra_roots: Iterable[str] | None = None) -> PathValidator:
+    """Create a validator restricted to configured trusted roots."""
+    return PathValidator(trusted_roots=get_configured_trusted_roots(extra_roots))
+
+
+def validate_configured_kicad_file(
+    file_path: str, file_type: str, must_exist: bool = True
+) -> str:
+    """Validate a KiCad file against configured trusted roots."""
+    return get_configured_validator().validate_kicad_file(file_path, file_type, must_exist)
+
+
+def validate_configured_directory(dir_path: str, must_exist: bool = True) -> str:
+    """Validate a directory against configured trusted roots."""
+    return get_configured_validator().validate_directory(dir_path, must_exist)
+
+
+def _split_configured_roots(raw_value: str) -> list[str]:
+    """Split configured roots from either comma-separated or platform path-list syntax."""
+    if not raw_value:
+        return []
+    normalized = raw_value.replace(",", os.pathsep)
+    return [part.strip() for part in normalized.split(os.pathsep) if part.strip()]

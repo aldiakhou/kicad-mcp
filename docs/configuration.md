@@ -20,6 +20,9 @@ These settings control where the server looks for KiCad projects:
 |---------------------|-------------|---------------|---------|
 | `KICAD_USER_DIR` | The main KiCad user directory | `~/Documents/KiCad` (macOS/Windows)<br>`~/kicad` (Linux) | `~/Documents/KiCadProjects` |
 | `KICAD_SEARCH_PATHS` | Additional directories to search for KiCad projects (comma-separated) | None | `~/pcb,~/Electronics,~/Projects/KiCad` |
+| `KICAD_MCP_TRUSTED_ROOTS` | Additional filesystem roots where tools may read/write KiCad files (comma-separated or platform path-list separated) | None | `D:\Projects\KiCad,C:\Users\me\PCB` |
+
+File-editing and CLI tools are restricted to trusted roots. By default, the trusted roots are the server working directory, `KICAD_USER_DIR`, detected `KICAD_SEARCH_PATHS`, and the system temporary directory used by tests and transient CLI output. Add external project locations to `KICAD_SEARCH_PATHS` or `KICAD_MCP_TRUSTED_ROOTS` before opening or editing them.
 
 ### Application Paths
 
@@ -35,10 +38,10 @@ These settings control how the server locates KiCad:
 
 | Value | Description |
 |-------|-------------|
-| `agent` | Default. Intent-first schematic/project tools only. |
+| `agent` | Default. Intent-first schematic/project tools plus project validation. |
 | `advanced` | Adds manual schematic editing and library listing tools. |
 | `debug` | Adds raw schematic geometry, v1 builders, compatibility aliases, and pin-map diagnostics. |
-| `all` | Exposes every registered tool, including PCB, export, BOM, netlist, and validation tools. |
+| `all` | Exposes every registered tool, including PCB, export, BOM, netlist, and compatibility/debug tools. |
 
 ## Using a .env File (Recommended)
 
@@ -63,6 +66,9 @@ The recommended way to configure the server is by creating a `.env` file in the 
    
    # Additional directories to search for KiCad projects (comma-separated)
    KICAD_SEARCH_PATHS=~/pcb,~/Electronics,~/Projects/KiCad
+
+   # Additional trusted roots for direct file operations (comma-separated)
+   KICAD_MCP_TRUSTED_ROOTS=~/ExternalKiCadProjects
    
    # KiCad application path (needed for opening projects and command-line tools)
    # macOS:

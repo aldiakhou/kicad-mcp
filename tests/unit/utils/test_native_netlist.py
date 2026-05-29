@@ -49,9 +49,9 @@ def test_run_erc_via_cli_parses_report_and_timeout(monkeypatch, tmp_path: Path):
     schematic = tmp_path / "demo.kicad_sch"
     schematic.write_text("(kicad_sch)", encoding="utf-8")
 
-    monkeypatch.setattr("kicad_mcp.utils.native_netlist.get_kicad_cli_path", lambda: "kicad-cli")
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.get_kicad_cli_path", lambda required=True: "kicad-cli")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
         output = Path(cmd[cmd.index("--output") + 1])
         output.write_text(
             """
@@ -69,17 +69,17 @@ def test_run_erc_via_cli_parses_report_and_timeout(monkeypatch, tmp_path: Path):
         )
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr("kicad_mcp.utils.native_netlist.subprocess.run", fake_run)
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_run)
     result = run_erc_via_cli(str(schematic), timeout_seconds=7)
     assert result["success"] is True
     assert result["timeout_seconds"] == 7
     assert result["total_violations"] == 1
     assert result["violation_categories"] == {"pin_not_connected": 1}
 
-    def fake_timeout(cmd, capture_output, text, timeout):
+    def fake_timeout(cmd, capture_output, text, timeout, **kwargs):
         raise subprocess.TimeoutExpired(cmd, timeout)
 
-    monkeypatch.setattr("kicad_mcp.utils.native_netlist.subprocess.run", fake_timeout)
+    monkeypatch.setattr("kicad_mcp.utils.secure_subprocess.subprocess.run", fake_timeout)
     timeout_result = run_erc_via_cli(str(schematic), timeout_seconds=3)
     assert timeout_result["success"] is False
     assert "timed out after 3 seconds" in timeout_result["error"]

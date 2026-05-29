@@ -4,6 +4,7 @@ Netlist extraction and analysis tools for KiCad schematics.
 
 import logging
 import os
+import re
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -270,8 +271,6 @@ def register_netlist_tools(mcp: FastMCP) -> None:
             components = netlist_data.get("components", {})
             for ref, _component in components.items():
                 # Extract component type from reference (e.g., R1 -> R)
-                import re
-
                 comp_type_match = re.match(r"^([A-Za-z_]+)", ref)
                 if comp_type_match:
                     comp_type = comp_type_match.group(1)
