@@ -52,7 +52,8 @@ def _tool_intent() -> dict:
 
 
 @pytest.mark.asyncio
-async def test_schematic_preview_design_intent_returns_compact_expanded_summary(tmp_path: Path):
+async def test_schematic_preview_design_intent_returns_compact_expanded_summary(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("KICAD_MCP_SCHEMATIC_ENGINE", "legacy")
     server = create_server()
     tools = await server.get_tools()
 
@@ -96,7 +97,8 @@ async def test_schematic_apply_design_intent_dry_run_can_include_expanded_spec(t
 
 
 @pytest.mark.asyncio
-async def test_schematic_apply_design_intent_reports_compile_errors_before_build(tmp_path: Path):
+async def test_schematic_apply_design_intent_reports_compile_errors_before_build(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("KICAD_MCP_SCHEMATIC_ENGINE", "legacy")
     server = create_server()
     tools = await server.get_tools()
 
@@ -117,7 +119,8 @@ async def test_schematic_apply_design_intent_reports_compile_errors_before_build
 
 
 @pytest.mark.asyncio
-async def test_schematic_design_intent_schema_returns_executable_examples(tmp_path: Path):
+async def test_schematic_design_intent_schema_returns_executable_examples(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("KICAD_MCP_SCHEMATIC_ENGINE", "legacy")
     server = create_server()
     tools = await server.get_tools()
 

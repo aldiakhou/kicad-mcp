@@ -254,30 +254,36 @@ DESIGN_INTENT_SCHEMA = {
 def design_intent_schema(section: str = "all") -> dict[str, Any]:
     """Return compact design-intent examples and field metadata for agents."""
     normalized = str(section or "all").strip().lower()
+    base: dict[str, Any]
     if normalized == "all":
         schemas = {"intent": deepcopy(DESIGN_INTENT_TOP_LEVEL_SCHEMA)}
         schemas.update(deepcopy(DESIGN_INTENT_SCHEMA))
-        return {"success": True, "section": "all", "schemas": schemas}
-    if normalized in {"intent", "top_level", "top-level"}:
-        return {
+        base = {"success": True, "section": "all", "schemas": schemas}
+    elif normalized in {"intent", "top_level", "top-level"}:
+        base = {
             "success": True,
             "section": "intent",
             "schema": deepcopy(DESIGN_INTENT_TOP_LEVEL_SCHEMA),
         }
-    if normalized in DESIGN_INTENT_SCHEMA:
-        return {"success": True, "section": normalized, "schema": deepcopy(DESIGN_INTENT_SCHEMA[normalized])}
-    prefix = f"{normalized}."
-    matches = {
-        key: value for key, value in DESIGN_INTENT_SCHEMA.items() if key.startswith(prefix)
-    }
-    if matches:
-        return {"success": True, "section": normalized, "schemas": deepcopy(matches)}
-    return {
-        "success": False,
-        "section": normalized,
-        "error": "unknown design-intent schema section",
-        "available_sections": sorted(DESIGN_INTENT_SCHEMA),
-    }
+    elif normalized in DESIGN_INTENT_SCHEMA:
+        base = {"success": True, "section": normalized, "schema": deepcopy(DESIGN_INTENT_SCHEMA[normalized])}
+    else:
+        prefix = f"{normalized}."
+        matches = {
+            key: value for key, value in DESIGN_INTENT_SCHEMA.items() if key.startswith(prefix)
+        }
+        if matches:
+            base = {"success": True, "section": normalized, "schemas": deepcopy(matches)}
+        else:
+            return {
+                "success": False,
+                "section": normalized,
+                "error": "unknown design-intent schema section",
+                "available_sections": sorted(DESIGN_INTENT_SCHEMA),
+            }
+
+    base["recommended_apply_tool"] = "schematic_apply_design_intent_safe"
+    return base
 
 
 def compile_design_intent(

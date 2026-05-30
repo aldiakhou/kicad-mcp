@@ -86,23 +86,18 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "schematic_apply_design_intent" in tools
     assert "schematic_apply_design_intent_safe" in tools
     assert "schematic_preview_design_intent" in tools
-    assert "schematic_apply_expanded_spec" in tools
     assert "schematic_start_design_intent_job" in tools
     assert "schematic_get_job_status" in tools
     assert "schematic_get_job_result" in tools
     assert "schematic_cancel_job" in tools
     assert "schematic_add_support_circuits" in tools
     assert "schematic_apply_no_connect_rules" in tools
-    assert "schematic_build_from_spec_v2" in tools
+    assert "schematic_engine_status" in tools
+    assert "schematic_validate_generated_schematic" in tools
     assert "export_schematic_preview" in tools
     assert "export_schematic_svg" in tools
-    assert "schematic_apply_functional_layout" in tools
     assert "schematic_delete_item" in tools
     assert "schematic_snap_to_grid" in tools
-    assert "schematic_connect_pin_to_net" in tools
-    assert "schematic_connect_pins" in tools
-    assert "schematic_connect_pin_to_ground" in tools
-    assert "schematic_connect_pin_to_power" in tools
     assert "validate_project_boundaries" in tools
     assert "generate_validation_report" in tools
     assert "run_erc_check" in tools
@@ -110,6 +105,16 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "resolve_symbols" in tools
     assert "resolve_footprint" in tools
     assert "resolve_footprints" in tools
+    # Legacy build/connection tools moved to advanced profile
+    assert "schematic_apply_expanded_spec" not in tools
+    assert "schematic_build_from_spec_v2" not in tools
+    assert "schematic_apply_connection_plan" not in tools
+    assert "schematic_connect_pin_to_net" not in tools
+    assert "schematic_connect_pins" not in tools
+    assert "schematic_connect_pin_to_ground" not in tools
+    assert "schematic_connect_pin_to_power" not in tools
+    assert "schematic_apply_functional_layout" not in tools
+    # Debug tools still excluded
     assert "schematic_add_wire" not in tools
     assert "schematic_get_pin_map" not in tools
     assert "schematic_build_from_spec" not in tools
@@ -147,6 +152,11 @@ async def test_create_server_advanced_profile_exposes_manual_schematic_tools(mon
     assert "schematic_add_symbol" in tools
     assert "schematic_snap_to_grid" in tools
     assert "list_symbol_libraries" in tools
+    assert "schematic_apply_expanded_spec" in tools
+    assert "schematic_build_from_spec_v2" in tools
+    assert "schematic_apply_connection_plan" in tools
+    assert "schematic_connect_pin_to_net" in tools
+    assert "schematic_connect_pins" in tools
     assert "schematic_add_wire" not in tools
     assert "schematic_get_pin_map" not in tools
     assert "schematic_build_from_spec" not in tools

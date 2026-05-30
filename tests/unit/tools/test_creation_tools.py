@@ -1728,7 +1728,7 @@ async def test_agent_search_tools_and_compact_v2_build_defaults(
     _skip_cli_validation(monkeypatch)
     monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_symbol_roots", lambda: [])
     monkeypatch.setattr("kicad_mcp.utils.library_resolver._common_footprint_roots", lambda: [])
-    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "agent")
+    monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
     monkeypatch.setattr(
         "kicad_mcp.utils.schematic_builder.validate_connection_plan_membership",
         lambda path, connections: {"success": True, "checked_count": len(connections)},
@@ -1748,7 +1748,7 @@ async def test_agent_search_tools_and_compact_v2_build_defaults(
 
     assert "find_symbols" in tools
     assert "find_footprints" in tools
-    assert "list_symbol_libraries" not in tools
+    assert "list_symbol_libraries" in tools
 
     symbols = tools["find_symbols"].fn("Device", 5)
     footprints = tools["find_footprints"].fn("0603", 5)

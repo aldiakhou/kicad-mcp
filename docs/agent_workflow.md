@@ -2,25 +2,40 @@
 
 This server is intended to be agent-first: declare electrical intent, let the MCP layer resolve KiCad geometry, then verify with KiCad-native checks.
 
-Recommended order:
+## Schematic Generation (Default: Netlist-First Safe Engine)
+
+For schematic generation, use `schematic_apply_design_intent` or `schematic_apply_design_intent_safe`.
+
+Do not use `schematic_apply_expanded_spec`, `schematic_build_from_spec_v2`, or low-level connection tools unless repairing/debugging an existing schematic.
+
+The default engine is the **netlist-first safe pipeline** which guarantees:
+- No partial writes on failure
+- Netlist verification before commit (SKiDL expected vs KiCad CLI exported)
+- Visual lint before commit
+- Atomic commit or full rollback
+
+To use the legacy engine (for debugging), set `KICAD_MCP_SCHEMATIC_ENGINE=legacy`.
+
+## Recommended order
 
 1. `project_design_state`
 2. `find_symbols` / `find_footprints` for unknown library IDs
 3. `schematic_preview_design_intent`, when you want to inspect expansion first
-4. `schematic_apply_expanded_spec`, when a preview already produced an expanded spec artifact
-5. `schematic_apply_design_intent`
-6. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
-7. `schematic_quality_report`
-8. `project_design_state`
-9. `schematic_build_from_spec_v2`, when you have explicit parts/nets or a full design-intent payload
-10. `schematic_apply_functional_layout`, when an existing schematic needs readable placement
-11. `schematic_apply_connection_plan` or the simple `schematic_connect_*` wrappers, only for incremental edits
+4. `schematic_apply_design_intent` or `schematic_apply_design_intent_safe`
+5. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
+6. `schematic_quality_report`
+7. `project_design_state`
 
-For large schematics, `schematic_apply_design_intent` now chooses a staged internal apply when the expanded design is above the direct-apply threshold. It places parts first, applies connection batches, then runs requested validation. Very large direct requests can return a background `job_id`; poll with `schematic_get_job_status` and finish with `schematic_get_job_result`.
+For background execution, use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result`.
 
-For a direct but faster apply, use `schematic_apply_design_intent` with `quick_apply=true`, or set `include_preview=false`, `run_quality_report=false`, and `run_native_validation=false`. `quick_apply=true` also skips KiCad CLI export validation; run `export_schematic_preview` and `schematic_quality_report` as follow-up tools when needed. Use `schematic_apply_design_intent_safe` or `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result` when a single long operation may exceed the client timeout.
+## Advanced/Debug Tools
 
-For normal design tasks, do not use `schematic_add_wire`, `schematic_connect_points`, or raw coordinate-based PCB routing unless the intent-based tools cannot represent the edit.
+The following tools are available in the advanced profile for repair/debug workflows only:
+
+- `schematic_apply_expanded_spec` — apply a pre-compiled spec without recompiling
+- `schematic_build_from_spec_v2` — explicit parts/nets build
+- `schematic_apply_connection_plan` — incremental connection edits
+- `schematic_connect_pin_to_net`, `schematic_connect_pins` — single-connection wrappers
 
 Use this schematic connection shape for incremental work:
 
@@ -142,7 +157,7 @@ The MCP layer resolves symbols, resolves pins, snaps generated geometry to the s
 
 ## Tool Profiles
 
-By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes the design-intent workflow tools, schematic preview/export, functional layout, safe delete/grid helpers, simple pin connection wrappers, footprint assignment/report tools, ERC explanation/fix planning tools, symbol/footprint search and resolve tools, and `project_design_state`. Raw coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, broad export helpers, and analysis tools are hidden from the normal LLM tool list.
+By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes the design-intent workflow tools (safe apply, preview, background jobs, engine status, validation), schematic preview/export, functional layout, safe delete/grid helpers, footprint assignment/report tools, ERC explanation/fix planning tools, symbol/footprint search and resolve tools, and `project_design_state`. Legacy build tools, raw coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, broad export helpers, and analysis tools are hidden from the normal LLM tool list.
 
 Use this for manual schematic edits or library exploration:
 

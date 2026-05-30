@@ -640,8 +640,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
         path: str | None = None,
     ) -> dict[str, Any]:
         """Compile generic bulk design intent into a v2 schematic spec without writing."""
+        resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+
+        engine_mode = os.getenv("KICAD_MCP_SCHEMATIC_ENGINE", "safe").strip().lower()
+
+        if engine_mode != "legacy":
+            return _preview_design_intent_netlist_first(
+                resolved_project,
+                intent or spec or {},
+                visual_style=visual_style,
+            )
+
         return _schematic_design_intent_response(
-            _resolve_project_alias(project_path, schematic_path, path),
+            resolved_project,
             intent or spec or {},
             mode="update",
             dry_run=True,
@@ -663,7 +674,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         detail: str = "compact",
         include_expanded_spec: bool = False,
         visual_layout: bool = True,
-        visual_style: str = "readable",
+        visual_style: str = "professional_blocks",
         dry_run_validation: str = "none",
         schematic_path: str | None = None,
         spec: dict[str, Any] | None = None,
@@ -684,8 +695,18 @@ def register_creation_tools(mcp: FastMCP) -> None:
         """
         resolved_project = _resolve_project_alias(project_path, schematic_path, path)
 
-        # Route through safe engine if configured (non-dry-run only)
-        if not dry_run and os.getenv("KICAD_MCP_SCHEMATIC_ENGINE", "legacy") == "safe":
+        engine_mode = os.getenv("KICAD_MCP_SCHEMATIC_ENGINE", "safe").strip().lower()
+
+        # Reject partial writes unless explicitly allowed via environment
+        if allow_partial_write and os.getenv("KICAD_MCP_ALLOW_PARTIAL_WRITE") != "1":
+            return {
+                "success": False,
+                "error": "allow_partial_write requires KICAD_MCP_ALLOW_PARTIAL_WRITE=1",
+                "recoverable": True,
+            }
+
+        # Route through the netlist-first safe engine by default (non-dry-run)
+        if not dry_run and engine_mode != "legacy":
             return _apply_via_netlist_first_engine(
                 resolved_project,
                 intent or spec or {},
@@ -694,6 +715,8 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 visual_style=visual_style,
                 allow_partial_write=allow_partial_write,
                 atomic=True,
+                require_netlist_match=True,
+                require_kicad_cli_verification=True,
             )
 
         if dry_run:
@@ -717,29 +740,24 @@ def register_creation_tools(mcp: FastMCP) -> None:
                 unsafe_fast_apply=unsafe_fast_apply,
                 allow_partial_write=allow_partial_write,
             )
-        return _run_with_project_mutation_lock(
+        # Legacy path (only when KICAD_MCP_SCHEMATIC_ENGINE=legacy)
+        return _apply_design_intent_legacy(
             resolved_project,
-            "schematic_apply_design_intent",
-            lambda: _schematic_design_intent_response(
-                resolved_project,
-                intent or spec or {},
-                mode=mode,
-                dry_run=False,
-                strict=strict,
-                detail=detail,
-                include_expanded_spec=include_expanded_spec,
-                tool_name="schematic_apply_design_intent",
-                visual_layout=visual_layout,
-                visual_style=visual_style,
-                dry_run_validation=dry_run_validation,
-                quick_apply=quick_apply,
-                include_preview=include_preview,
-                run_quality_report=run_quality_report,
-                run_native_validation=run_native_validation,
-                run_cli_validation=run_cli_validation,
-                unsafe_fast_apply=unsafe_fast_apply,
-                allow_partial_write=allow_partial_write,
-            ),
+            intent or spec or {},
+            mode=mode,
+            strict=strict,
+            detail=detail,
+            include_expanded_spec=include_expanded_spec,
+            visual_layout=visual_layout,
+            visual_style=visual_style,
+            dry_run_validation=dry_run_validation,
+            quick_apply=quick_apply,
+            include_preview=include_preview,
+            run_quality_report=run_quality_report,
+            run_native_validation=run_native_validation,
+            run_cli_validation=run_cli_validation,
+            unsafe_fast_apply=unsafe_fast_apply,
+            allow_partial_write=allow_partial_write,
         )
 
     @mcp.tool()
@@ -807,6 +825,27 @@ def register_creation_tools(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Start a background design-intent apply job and return immediately for polling."""
         resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+
+        engine_mode = os.getenv("KICAD_MCP_SCHEMATIC_ENGINE", "safe").strip().lower()
+
+        # Reject partial writes unless explicitly allowed via environment
+        if allow_partial_write and os.getenv("KICAD_MCP_ALLOW_PARTIAL_WRITE") != "1":
+            return {
+                "success": False,
+                "error": "allow_partial_write requires KICAD_MCP_ALLOW_PARTIAL_WRITE=1",
+                "recoverable": True,
+            }
+
+        if engine_mode != "legacy":
+            return _start_netlist_first_design_job(
+                resolved_project,
+                intent or spec or {},
+                mode=mode,
+                strict=strict,
+                visual_style=visual_style,
+                allow_partial_write=allow_partial_write,
+            )
+
         return _start_design_intent_job(
             resolved_project,
             intent or spec or {},
@@ -831,10 +870,10 @@ def register_creation_tools(mcp: FastMCP) -> None:
         intent: dict[str, Any] | None = None,
         mode: str = "update",
         max_wait_seconds: float = 300.0,
-        strict: bool = False,
+        strict: bool = True,
         detail: str = "compact",
         visual_layout: bool = True,
-        visual_style: str = "readable",
+        visual_style: str = "professional_blocks",
         allow_background: bool = True,
         allow_partial_write: bool = False,
         schematic_path: str | None = None,
@@ -854,6 +893,14 @@ def register_creation_tools(mcp: FastMCP) -> None:
         Netlist mismatch always blocks commit regardless of strict setting.
         """
         resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+
+        # Reject partial writes unless explicitly allowed via environment
+        if allow_partial_write and os.getenv("KICAD_MCP_ALLOW_PARTIAL_WRITE") != "1":
+            return {
+                "success": False,
+                "error": "allow_partial_write requires KICAD_MCP_ALLOW_PARTIAL_WRITE=1",
+                "recoverable": True,
+            }
 
         # Always use the netlist-first engine for the safe tool
         return _apply_via_netlist_first_engine(
@@ -882,6 +929,46 @@ def register_creation_tools(mcp: FastMCP) -> None:
     def schematic_cancel_job(job_id: str) -> dict[str, Any]:
         """Cancel a pending background schematic job or mark a running one as cancel-requested."""
         return _cancel_design_intent_job(job_id)
+
+    @mcp.tool()
+    def schematic_engine_status() -> dict[str, Any]:
+        """Report readiness of the netlist-first schematic engine.
+
+        Returns availability of KiCad CLI, SKiDL, kiutils, and overall safe-apply
+        readiness. Use this to verify environment before schematic generation.
+        """
+        engine_mode = os.getenv("KICAD_MCP_SCHEMATIC_ENGINE", "safe").strip().lower()
+
+        kicad_cli_available = False
+        try:
+            cli_path = get_kicad_cli_path(required=False)
+            kicad_cli_available = cli_path is not None
+        except Exception:
+            pass
+
+        skidl_available = False
+        try:
+            from kicad_mcp.schematic_engine.skidl_compiler import _SKIDL_AVAILABLE
+            skidl_available = _SKIDL_AVAILABLE
+        except Exception:
+            pass
+
+        kiutils_available = False
+        try:
+            from kicad_mcp.schematic_engine.schematic_writer import _KIUTILS_AVAILABLE
+            kiutils_available = _KIUTILS_AVAILABLE
+        except Exception:
+            pass
+
+        safe_apply_ready = kicad_cli_available and skidl_available and kiutils_available
+
+        return {
+            "engine": engine_mode,
+            "kicad_cli_available": kicad_cli_available,
+            "skidl_available": skidl_available,
+            "kiutils_available": kiutils_available,
+            "safe_apply_ready": safe_apply_ready,
+        }
 
     @mcp.tool()
     def schematic_validate_generated_schematic(
@@ -4065,6 +4152,288 @@ def _build_failure_diagnostics(built: dict[str, Any], detail: str) -> dict[str, 
             "recoverable": built.get("recoverable"),
         }
     return diagnostics
+
+
+def _apply_design_intent_legacy(
+    project_path: str,
+    intent: dict[str, Any],
+    *,
+    mode: str,
+    strict: bool,
+    detail: str,
+    include_expanded_spec: bool,
+    visual_layout: bool,
+    visual_style: str,
+    dry_run_validation: str,
+    quick_apply: bool,
+    include_preview: bool,
+    run_quality_report: bool,
+    run_native_validation: bool,
+    run_cli_validation: bool,
+    unsafe_fast_apply: bool,
+    allow_partial_write: bool,
+) -> dict[str, Any]:
+    """Legacy schematic apply path — only used when KICAD_MCP_SCHEMATIC_ENGINE=legacy."""
+    return _run_with_project_mutation_lock(
+        project_path,
+        "schematic_apply_design_intent",
+        lambda: _schematic_design_intent_response(
+            project_path,
+            intent,
+            mode=mode,
+            dry_run=False,
+            strict=strict,
+            detail=detail,
+            include_expanded_spec=include_expanded_spec,
+            tool_name="schematic_apply_design_intent",
+            visual_layout=visual_layout,
+            visual_style=visual_style,
+            dry_run_validation=dry_run_validation,
+            quick_apply=quick_apply,
+            include_preview=include_preview,
+            run_quality_report=run_quality_report,
+            run_native_validation=run_native_validation,
+            run_cli_validation=run_cli_validation,
+            unsafe_fast_apply=unsafe_fast_apply,
+            allow_partial_write=allow_partial_write,
+        ),
+    )
+
+
+def _start_netlist_first_design_job(
+    project_path: str,
+    intent: dict[str, Any],
+    *,
+    mode: str = "update",
+    strict: bool = False,
+    visual_style: str = "professional_blocks",
+    allow_partial_write: bool = False,
+) -> dict[str, Any]:
+    """Start a background job that uses the netlist-first engine."""
+    job_id = f"design_intent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    project_key = _design_intent_project_key(project_path)
+    project_lock = _design_intent_project_lock(project_key)
+    acquired = project_lock.acquire(blocking=False)
+    if not acquired:
+        with _DESIGN_INTENT_JOBS_LOCK:
+            active_job = _active_design_intent_job_for_project_locked(project_key)
+        return _project_busy_response(project_path, "schematic_start_design_intent_job", active_job)
+
+    try:
+        created_at = _utc_now()
+        job: dict[str, Any] = {
+            "job_id": job_id,
+            "status": "pending",
+            "stage": "queued",
+            "project_path": project_path,
+            "project_key": project_key,
+            "created_at": created_at,
+            "options": {
+                "mode": mode,
+                "strict": strict,
+                "visual_style": visual_style,
+                "allow_partial_write": allow_partial_write,
+                "engine": "netlist_first",
+            },
+            "cancel_requested": False,
+            "progress": {
+                "current_step": "queued",
+                "elapsed_seconds": 0.0,
+                "last_heartbeat": created_at,
+            },
+        }
+        with _DESIGN_INTENT_JOBS_LOCK:
+            active_job = _active_design_intent_job_for_project_locked(project_key)
+            if active_job is not None:
+                return _project_busy_response(
+                    project_path,
+                    "schematic_start_design_intent_job",
+                    active_job,
+                )
+            _DESIGN_INTENT_JOBS[job_id] = job
+        future = _DESIGN_INTENT_JOB_EXECUTOR.submit(
+            _run_netlist_first_design_job,
+            job_id,
+            project_path,
+            intent,
+            job,
+        )
+        with _DESIGN_INTENT_JOBS_LOCK:
+            if job_id in _DESIGN_INTENT_JOBS:
+                _DESIGN_INTENT_JOBS[job_id]["future"] = future
+        response = _design_intent_job_public(job)
+        response["recommended_next_tool"] = "schematic_get_job_status"
+        return response
+    finally:
+        project_lock.release()
+
+
+def _run_netlist_first_design_job(
+    job_id: str, project_path: str, intent: dict[str, Any], job: dict[str, Any]
+) -> None:
+    """Background worker for the netlist-first engine."""
+    from kicad_mcp.schematic_engine.pipeline import apply_design_intent_netlist_first
+
+    project_key = _design_intent_project_key(project_path)
+    project_lock = _design_intent_project_lock(project_key)
+
+    try:
+        with project_lock:
+            with _DESIGN_INTENT_JOBS_LOCK:
+                job = _DESIGN_INTENT_JOBS.get(job_id)  # type: ignore[assignment]
+                if job is None or job.get("status") == "cancelled" or job.get("cancel_requested"):
+                    if job is not None:
+                        job["status"] = "cancelled"
+                        job["stage"] = "cancelled"
+                        job["result"] = {
+                            "success": False,
+                            "status": "cancelled",
+                            "stage": "cancelled",
+                            "project_path": project_path,
+                            "changed": False,
+                            "rolled_back": False,
+                        }
+                        job.setdefault("finished_at", _utc_now())
+                    return
+                job["status"] = "running"
+                job["stage"] = "netlist_first_pipeline"
+                job["started_at"] = _utc_now()
+                job["started_monotonic"] = time.monotonic()
+                job["progress"] = {
+                    "current_step": "netlist_first_pipeline",
+                    "elapsed_seconds": 0.0,
+                    "last_heartbeat": job["started_at"],
+                }
+
+            options = job.get("options", {})
+            result = apply_design_intent_netlist_first(
+                project_path,
+                intent,
+                mode=options.get("mode", "update"),
+                atomic=True,
+                visual_style=options.get("visual_style", "professional_blocks"),
+                run_erc=True,
+                export_svg=True,
+                allow_partial_write=options.get("allow_partial_write", False),
+                strict=options.get("strict", False),
+                require_netlist_match=True,
+                require_kicad_cli_verification=True,
+                job_id=job_id,
+                cancel_check=lambda: job.get("cancel_requested", False),
+            )
+
+        status = (
+            "cancelled"
+            if result.get("status") == "cancelled" or result.get("stage", "").startswith("cancelled")
+            else "completed"
+            if result.get("success")
+            else "failed"
+        )
+        with _DESIGN_INTENT_JOBS_LOCK:
+            job = _DESIGN_INTENT_JOBS.get(job_id)  # type: ignore[assignment]
+            if job is not None:
+                job["status"] = status
+                job["stage"] = result.get("stage")
+                job["result"] = result
+                job["error"] = result.get("error")
+                job["finished_at"] = _utc_now()
+                progress = dict(job.get("progress") or {})
+                progress["current_step"] = status
+                progress["last_heartbeat"] = job["finished_at"]
+                job["progress"] = progress
+                _trim_design_intent_jobs_locked()
+    except Exception as exc:
+        with _DESIGN_INTENT_JOBS_LOCK:
+            job = _DESIGN_INTENT_JOBS.get(job_id)  # type: ignore[assignment]
+            if job is not None:
+                job["status"] = "failed"
+                job["stage"] = "failed"
+                job["error"] = str(exc)
+                job["result"] = {"success": False, "job_id": job_id, "error": str(exc)}
+                job["finished_at"] = _utc_now()
+                _trim_design_intent_jobs_locked()
+
+
+def _preview_design_intent_netlist_first(
+    project_path: str,
+    intent: dict[str, Any],
+    *,
+    visual_style: str = "professional_blocks",
+) -> dict[str, Any]:
+    """Preview design intent through the netlist-first pipeline without writing.
+
+    Runs: normalize → resolve symbols → SKiDL compile → sheet planning → visual lint
+    Returns a summary without writing any schematic files.
+    """
+    from kicad_mcp.schematic_engine.normalize import normalize_design_intent
+    from kicad_mcp.schematic_engine.sheet_planner import plan_sheets
+    from kicad_mcp.schematic_engine.skidl_compiler import SkidlCompiler
+    from kicad_mcp.schematic_engine.visual_lint import visual_lint
+
+    try:
+        canonical = normalize_design_intent(project_path, intent)
+    except (ValueError, KeyError) as e:
+        return {
+            "success": False,
+            "tool": "schematic_preview_design_intent",
+            "stage": "normalize_failed",
+            "error": f"Intent normalization failed: {e}",
+            "changed": False,
+        }
+
+    # Compile to verify circuit validity
+    project_dir = os.path.dirname(os.path.abspath(project_path))
+    artifact_dir = os.path.join(project_dir, ".kicad_mcp", "engine_artifacts", "preview")
+    os.makedirs(artifact_dir, exist_ok=True)
+
+    compiler = SkidlCompiler(artifact_dir=artifact_dir)
+    compile_result = compiler.compile(canonical)
+
+    if not compile_result.success:
+        return {
+            "success": False,
+            "tool": "schematic_preview_design_intent",
+            "stage": "compile_failed",
+            "error": compile_result.error or "SKiDL compilation failed",
+            "changed": False,
+            "part_count": len(canonical.parts),
+        }
+
+    # Plan sheets
+    sheet_plan = plan_sheets(canonical, style=visual_style)
+
+    # Visual lint
+    lint_result = visual_lint(canonical, sheet_plan)
+
+    return {
+        "success": True,
+        "tool": "schematic_preview_design_intent",
+        "stage": "preview",
+        "changed": False,
+        "engine": "skidl_kiutils_kicad_cli",
+        "summary": {
+            "generated_part_count": len(canonical.parts),
+            "net_count": compile_result.net_count,
+            "sheet_count": len(sheet_plan.sheets),
+            "sheets": list(sheet_plan.sheets.keys()),
+            "visual_lint_blocking": lint_result.blocking_count,
+            "visual_lint_warnings": lint_result.warning_count,
+        },
+        "visual_lint": {
+            "blocking_count": lint_result.blocking_count,
+            "warning_count": lint_result.warning_count,
+            "issues": [
+                {
+                    "type": issue.type,
+                    "ref": issue.ref,
+                    "message": issue.message,
+                    "severity": issue.severity,
+                }
+                for issue in lint_result.issues[:20]
+            ],
+        },
+        "recommended_apply_tool": "schematic_apply_design_intent_safe",
+    }
 
 
 def _apply_via_netlist_first_engine(
