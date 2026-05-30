@@ -186,11 +186,11 @@ def create_server() -> FastMCP:
 
     # Compatibility shim: older tests use get_tools()/get_resource_templates() returning dicts.
     async def _compat_get_tools():
-        tools = await mcp.list_tools()
+        tools = await _list_mcp_tools(mcp)
         return {t.name: t for t in tools}
 
     async def _compat_get_resource_templates():
-        templates = await mcp.list_resource_templates()
+        templates = await _list_mcp_resource_templates(mcp)
         return {t.uri_template for t in templates}
 
     mcp.get_tools = _compat_get_tools
@@ -545,6 +545,26 @@ def get_tool_profile() -> str:
     return "agent" if profile == "default" else profile
 
 
+async def _list_mcp_tools(mcp: FastMCP) -> list[Any]:
+    """Return registered tools across FastMCP API variants."""
+    if hasattr(mcp, "list_tools"):
+        return await mcp.list_tools()
+    if hasattr(mcp, "_list_tools"):
+        return await mcp._list_tools()
+    raise AttributeError("FastMCP instance does not expose list_tools or _list_tools")
+
+
+async def _list_mcp_resource_templates(mcp: FastMCP) -> list[Any]:
+    """Return resource templates across FastMCP API variants."""
+    if hasattr(mcp, "list_resource_templates"):
+        return await mcp.list_resource_templates()
+    if hasattr(mcp, "_list_resource_templates"):
+        return await mcp._list_resource_templates()
+    raise AttributeError(
+        "FastMCP instance does not expose list_resource_templates or _list_resource_templates"
+    )
+
+
 def _apply_tool_profile(mcp: FastMCP, profile: str) -> None:
     """Hide tools that do not belong to the configured LLM tool surface."""
     import asyncio
@@ -556,11 +576,11 @@ def _apply_tool_profile(mcp: FastMCP, profile: str) -> None:
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(1) as pool:
-                tools = pool.submit(asyncio.run, mcp.list_tools()).result()
+                tools = pool.submit(asyncio.run, _list_mcp_tools(mcp)).result()
         else:
-            tools = loop.run_until_complete(mcp.list_tools())
+            tools = loop.run_until_complete(_list_mcp_tools(mcp))
     except RuntimeError:
-        tools = asyncio.run(mcp.list_tools())
+        tools = asyncio.run(_list_mcp_tools(mcp))
 
     tool_names = [t.name for t in tools]
 
