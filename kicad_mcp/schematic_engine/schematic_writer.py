@@ -9,7 +9,10 @@ Uses:
 - Falls back to S-expression text generation when libraries unavailable
 
 Key design: Every CircuitEndpoint becomes a real KiCad connection via a wire
-stub from the estimated pin coordinate to a net label placed at the stub end.
+stub from the exact KiCad symbol pin coordinate to a net label placed at the
+stub end. Pin coordinates are resolved from the KiCad symbol library using the
+same geometry pipeline as the rest of the MCP tools. If library resolution fails
+(e.g., libraries not installed), falls back to estimation.
 """
 
 from __future__ import annotations
@@ -45,15 +48,81 @@ try:
 except ImportError:
     pass
 
-# ─── Pin coordinate estimation ──────────────────────────────────────────────
-# KiCad symbols have pins at known offsets from the symbol origin.
-# Without full symbol library data available at write time, we estimate pin
-# positions based on the pin index for the given component. Pins are placed
-# along the left and right edges of an estimated bounding box.
+# ─── Pin coordinate constants ───────────────────────────────────────────────
 
 _PIN_GRID_MM = 2.54  # KiCad standard pin grid (100mil)
 _WIRE_STUB_LENGTH_MM = 10.0  # Length of wire from pin to label
-_SYMBOL_HALF_WIDTH_MM = 7.62  # Estimated half-width of symbol body
+_SYMBOL_HALF_WIDTH_MM = 7.62  # Estimated half-width of symbol body (fallback only)
+
+
+# ─── Real pin resolution from KiCad symbol libraries ────────────────────────
+
+
+def _resolve_real_pin_positions(
+    part: CircuitPart,
+    placement: PlacementInfo,
+) -> dict[str, tuple[float, float, float]]:
+    """Resolve exact pin positions from KiCad symbol library.
+
+    Returns a dict mapping pin identifier (number or name) to
+    (connection_x, connection_y, stub_angle) in sheet coordinates.
+
+    Uses the same pin resolution and coordinate transform pipeline as
+    get_symbol_pin_map_from_schematic in schematic_pins.py.
+
+    Returns empty dict if library resolution fails (caller should fall back
+    to estimation).
+    """
+    try:
+        from kicad_mcp.utils.schematic_pins import _resolve_symbol_pins, _transform_pin
+    except ImportError:
+        return {}
+
+    try:
+        pins = _resolve_symbol_pins(part.lib_id)
+    except Exception:
+        # Library not available or symbol not found - fall back
+        return {}
+
+    if not pins:
+        return {}
+
+    # Transform each library pin to sheet coordinates using the placement
+    result: dict[str, tuple[float, float, float]] = {}
+    for pin in pins:
+        transformed = _transform_pin(
+            pin, placement.x, placement.y, placement.angle
+        )
+        cp = transformed["connection_point"]
+        stub_angle = transformed["position"].get("angle", 0.0)
+        # Index by pin number (primary) and pin name (secondary)
+        pin_number = pin.get("number", "")
+        pin_name = pin.get("name", "")
+        if pin_number:
+            result[pin_number] = (cp["x"], cp["y"], stub_angle)
+        if pin_name and pin_name != pin_number:
+            # Also index by name for endpoints that reference by name
+            result[pin_name] = (cp["x"], cp["y"], stub_angle)
+
+    return result
+
+
+def _compute_label_position_from_stub_angle(
+    pin_x: float, pin_y: float, stub_angle: float
+) -> tuple[float, float]:
+    """Compute label position using the real pin stub direction.
+
+    The stub_angle from _transform_pin indicates the direction the wire
+    should extend from the pin (outward from the symbol body).
+    """
+    rad = math.radians(stub_angle)
+    label_x = pin_x + math.cos(rad) * _WIRE_STUB_LENGTH_MM
+    label_y = pin_y + math.sin(rad) * _WIRE_STUB_LENGTH_MM
+    return (label_x, label_y)
+
+
+# ─── Fallback pin coordinate estimation ─────────────────────────────────────
+# Used only when KiCad symbol libraries are not available on the system.
 
 
 def _estimate_pin_position(
@@ -67,6 +136,8 @@ def _estimate_pin_position(
     Even-indexed pins go on the left, odd-indexed on the right.
 
     Returns (x, y) of the estimated pin connection point.
+
+    NOTE: This is a fallback only used when library resolution fails.
     """
     # Determine side: even pins left, odd pins right
     is_right = pin_index % 2 == 1
@@ -96,6 +167,8 @@ def _compute_label_position(
     """Compute the label position at the end of a wire stub from a pin.
 
     The wire extends outward from the symbol.
+
+    NOTE: This is a fallback only used when library resolution fails.
     """
     # Direction away from symbol center
     dx = pin_x - placement.x
@@ -274,13 +347,14 @@ class SchematicWriter:
         sheet_plan: SheetPlan,
         sheet_name: str,
     ) -> None:
-        """Add net labels with wire stubs connecting to estimated pin positions.
+        """Add net labels with wire stubs connecting to real symbol pin positions.
 
         For every endpoint on this sheet, we:
-        1. Estimate the pin coordinate on the symbol.
+        1. Resolve the exact pin coordinate from the KiCad symbol library.
         2. Place a wire stub from the pin to a label position.
         3. Place the net label at the wire stub end.
 
+        Falls back to estimated pin positions only when libraries are unavailable.
         This ensures KiCad recognizes electrical connectivity between pins and nets.
         """
         try:
@@ -289,7 +363,17 @@ class SchematicWriter:
 
             ref_set = set(refs)
 
-            # Pre-compute pin indices per ref for position estimation
+            # Resolve real pin positions for each part on this sheet.
+            # Cache per-ref to avoid resolving the same symbol multiple times.
+            resolved_pin_cache: dict[str, dict[str, tuple[float, float, float]]] = {}
+            for ref in refs:
+                part = canonical.part_by_ref(ref)
+                placement = sheet_plan.placements.get(ref)
+                if part and placement:
+                    pin_map = _resolve_real_pin_positions(part, placement)
+                    resolved_pin_cache[ref] = pin_map
+
+            # Pre-compute pin indices per ref for fallback estimation
             ref_pin_counts: dict[str, int] = {}
             ref_pin_indices: dict[tuple[str, str], int] = {}
             for ep in canonical.endpoints:
@@ -308,13 +392,26 @@ class SchematicWriter:
                 if not placement:
                     continue
 
-                # Estimate pin position
-                pin_idx = ref_pin_indices.get((ep.ref, ep.pin), 0)
-                total_pins = ref_pin_counts.get(ep.ref, 1)
-                pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
+                # Try real pin resolution first
+                real_pins = resolved_pin_cache.get(ep.ref, {})
+                real_pin_data = real_pins.get(ep.pin)
 
-                # Compute label position at end of wire stub
-                label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
+                if real_pin_data is not None:
+                    # Use exact pin coordinate from library
+                    pin_x, pin_y, stub_angle = real_pin_data
+                    label_x, label_y = _compute_label_position_from_stub_angle(
+                        pin_x, pin_y, stub_angle
+                    )
+                else:
+                    # Fallback: estimate pin position
+                    logger.debug(
+                        "Pin %s.%s not resolved from library, using estimation",
+                        ep.ref, ep.pin,
+                    )
+                    pin_idx = ref_pin_indices.get((ep.ref, ep.pin), 0)
+                    total_pins = ref_pin_counts.get(ep.ref, 1)
+                    pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
+                    label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
 
                 # Add wire from pin to label
                 self._add_wire_kiutils(sch, pin_x, pin_y, label_x, label_y)
@@ -480,7 +577,16 @@ class SchematicWriter:
             if part and placement:
                 lines.append(self._symbol_sexpr(part, placement))
 
-        # Pre-compute pin indices per ref for position estimation
+        # Resolve real pin positions for each part on this sheet
+        resolved_pin_cache: dict[str, dict[str, tuple[float, float, float]]] = {}
+        for ref in refs:
+            part = canonical.part_by_ref(ref)
+            placement = sheet_plan.placements.get(ref)
+            if part and placement:
+                pin_map = _resolve_real_pin_positions(part, placement)
+                resolved_pin_cache[ref] = pin_map
+
+        # Pre-compute pin indices per ref for fallback estimation
         ref_pin_counts: dict[str, int] = {}
         ref_pin_indices: dict[tuple[str, str], int] = {}
         for ep in canonical.endpoints:
@@ -499,10 +605,22 @@ class SchematicWriter:
             if not placement:
                 continue
 
-            pin_idx = ref_pin_indices.get((ep.ref, ep.pin), 0)
-            total_pins = ref_pin_counts.get(ep.ref, 1)
-            pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
-            label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
+            # Try real pin resolution first
+            real_pins = resolved_pin_cache.get(ep.ref, {})
+            real_pin_data = real_pins.get(ep.pin)
+
+            if real_pin_data is not None:
+                # Use exact pin coordinate from library
+                pin_x, pin_y, stub_angle = real_pin_data
+                label_x, label_y = _compute_label_position_from_stub_angle(
+                    pin_x, pin_y, stub_angle
+                )
+            else:
+                # Fallback: estimate pin position
+                pin_idx = ref_pin_indices.get((ep.ref, ep.pin), 0)
+                total_pins = ref_pin_counts.get(ep.ref, 1)
+                pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
+                label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
 
             # Wire stub
             lines.append(self._wire_sexpr(pin_x, pin_y, label_x, label_y))
