@@ -61,11 +61,15 @@ _SYMBOL_HALF_WIDTH_MM = 7.62  # Estimated half-width of symbol body (fallback on
 def _resolve_real_pin_positions(
     part: CircuitPart,
     placement: PlacementInfo,
-) -> dict[str, tuple[float, float, float]]:
+) -> dict[str, list[tuple[float, float, float]]]:
     """Resolve exact pin positions from KiCad symbol library.
 
-    Returns a dict mapping pin identifier (number or name) to
-    (connection_x, connection_y, stub_angle) in sheet coordinates.
+    Returns a dict mapping pin identifier (number or name) to a *list* of
+    (connection_x, connection_y, stub_angle) tuples in sheet coordinates.
+
+    Pin numbers are unique per KiCad symbol, so their lists always have one
+    entry.  Pin *names* may be duplicated (e.g. multiple VDD pins on an MCU),
+    so their lists can have multiple entries — one per physical pin.
 
     Uses the same pin resolution and coordinate transform pipeline as
     get_symbol_pin_map_from_schematic in schematic_pins.py.
@@ -88,21 +92,23 @@ def _resolve_real_pin_positions(
         return {}
 
     # Transform each library pin to sheet coordinates using the placement
-    result: dict[str, tuple[float, float, float]] = {}
+    result: dict[str, list[tuple[float, float, float]]] = {}
     for pin in pins:
         transformed = _transform_pin(
             pin, placement.x, placement.y, placement.angle
         )
         cp = transformed["connection_point"]
         stub_angle = transformed["position"].get("angle", 0.0)
-        # Index by pin number (primary) and pin name (secondary)
+        pin_coord = (cp["x"], cp["y"], stub_angle)
+
+        # Index by pin number (primary) — numbers are unique per symbol
         pin_number = pin.get("number", "")
         pin_name = pin.get("name", "")
         if pin_number:
-            result[pin_number] = (cp["x"], cp["y"], stub_angle)
+            result.setdefault(pin_number, []).append(pin_coord)
         if pin_name and pin_name != pin_number:
-            # Also index by name for endpoints that reference by name
-            result[pin_name] = (cp["x"], cp["y"], stub_angle)
+            # Also index by name — may have multiple entries for same name
+            result.setdefault(pin_name, []).append(pin_coord)
 
     return result
 
@@ -267,7 +273,7 @@ class SchematicWriter:
                 self._add_labels_kiutils(sch, canonical, refs, sheet_plan, sheet_name)
 
                 # Add no-connect markers
-                self._add_no_connects_kiutils(sch, canonical, refs)
+                self._add_no_connects_kiutils(sch, canonical, refs, sheet_plan)
 
                 # Write schematic
                 sch.to_file(filepath)
@@ -365,7 +371,7 @@ class SchematicWriter:
 
             # Resolve real pin positions for each part on this sheet.
             # Cache per-ref to avoid resolving the same symbol multiple times.
-            resolved_pin_cache: dict[str, dict[str, tuple[float, float, float]]] = {}
+            resolved_pin_cache: dict[str, dict[str, list[tuple[float, float, float]]]] = {}
             for ref in refs:
                 part = canonical.part_by_ref(ref)
                 placement = sheet_plan.placements.get(ref)
@@ -394,16 +400,35 @@ class SchematicWriter:
 
                 # Try real pin resolution first
                 real_pins = resolved_pin_cache.get(ep.ref, {})
-                real_pin_data = real_pins.get(ep.pin)
+                real_pin_entries = real_pins.get(ep.pin, [])
 
-                if real_pin_data is not None:
-                    # Use exact pin coordinate from library
-                    pin_x, pin_y, stub_angle = real_pin_data
-                    label_x, label_y = _compute_label_position_from_stub_angle(
-                        pin_x, pin_y, stub_angle
-                    )
+                if real_pin_entries:
+                    # Connect ALL matching pins (handles duplicate pin names
+                    # like multiple VDD/GND pins on MCUs)
+                    for pin_x, pin_y, stub_angle in real_pin_entries:
+                        label_x, label_y = _compute_label_position_from_stub_angle(
+                            pin_x, pin_y, stub_angle
+                        )
+                        # Add wire from pin to label
+                        self._add_wire_kiutils(sch, pin_x, pin_y, label_x, label_y)
+
+                        # Use global labels for cross-sheet nets, local otherwise
+                        is_global = ep.net in sheet_plan.cross_sheet_nets
+
+                        if is_global:
+                            label = GlobalLabel()
+                            label.text = ep.net
+                            label.position = Position(X=label_x, Y=label_y)
+                            label.uuid = str(uuid.uuid4())
+                            sch.globalLabels.append(label)
+                        else:
+                            label = NetLabel()
+                            label.text = ep.net
+                            label.position = Position(X=label_x, Y=label_y)
+                            label.uuid = str(uuid.uuid4())
+                            sch.netLabels.append(label)
                 else:
-                    # Fallback: estimate pin position
+                    # Fallback: estimate pin position when library unavailable
                     logger.debug(
                         "Pin %s.%s not resolved from library, using estimation",
                         ep.ref, ep.pin,
@@ -413,24 +438,21 @@ class SchematicWriter:
                     pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
                     label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
 
-                # Add wire from pin to label
-                self._add_wire_kiutils(sch, pin_x, pin_y, label_x, label_y)
+                    self._add_wire_kiutils(sch, pin_x, pin_y, label_x, label_y)
 
-                # Use global labels for cross-sheet nets, local otherwise
-                is_global = ep.net in sheet_plan.cross_sheet_nets
-
-                if is_global:
-                    label = GlobalLabel()
-                    label.text = ep.net
-                    label.position = Position(X=label_x, Y=label_y)
-                    label.uuid = str(uuid.uuid4())
-                    sch.globalLabels.append(label)
-                else:
-                    label = NetLabel()
-                    label.text = ep.net
-                    label.position = Position(X=label_x, Y=label_y)
-                    label.uuid = str(uuid.uuid4())
-                    sch.netLabels.append(label)
+                    is_global = ep.net in sheet_plan.cross_sheet_nets
+                    if is_global:
+                        label = GlobalLabel()
+                        label.text = ep.net
+                        label.position = Position(X=label_x, Y=label_y)
+                        label.uuid = str(uuid.uuid4())
+                        sch.globalLabels.append(label)
+                    else:
+                        label = NetLabel()
+                        label.text = ep.net
+                        label.position = Position(X=label_x, Y=label_y)
+                        label.uuid = str(uuid.uuid4())
+                        sch.netLabels.append(label)
         except Exception as e:
             logger.warning("Failed to add labels via KiUtils: %s", e)
 
@@ -461,11 +483,51 @@ class SchematicWriter:
         sch: Any,
         canonical: CanonicalCircuit,
         refs: list[str],
+        sheet_plan: SheetPlan | None = None,
     ) -> None:
-        """Add no-connect markers."""
-        # No-connects require pin position resolution which needs symbol data
-        # For now, skip - they will be added during visual lint pass
-        pass
+        """Add no-connect markers at exact pin positions.
+
+        For each (ref, pin) in canonical.no_connects that belongs to this sheet,
+        resolve the real pin coordinate and place a no_connect marker there.
+        Falls back to estimated position if library resolution is unavailable.
+        """
+        try:
+            from kiutils.items.common import Position
+            from kiutils.schematic import NoConnect
+
+            ref_set = set(refs)
+
+            for nc_ref, nc_pin in canonical.no_connects:
+                if nc_ref not in ref_set:
+                    continue
+
+                placement = sheet_plan.placements.get(nc_ref) if sheet_plan else None
+                if not placement:
+                    continue
+
+                # Try to resolve exact pin position
+                nc_x: float | None = None
+                nc_y: float | None = None
+
+                part = canonical.part_by_ref(nc_ref)
+                if part:
+                    pin_map = _resolve_real_pin_positions(part, placement)
+                    pin_entries = pin_map.get(nc_pin, [])
+                    if pin_entries:
+                        # Use first matching pin position for no-connect
+                        nc_x, nc_y, _ = pin_entries[0]
+
+                if nc_x is None or nc_y is None:
+                    # Fallback: place near the symbol origin
+                    nc_x = placement.x - 5.08
+                    nc_y = placement.y
+
+                no_connect = NoConnect()
+                no_connect.position = Position(X=nc_x, Y=nc_y)
+                no_connect.uuid = str(uuid.uuid4())
+                sch.noConnects.append(no_connect)
+        except Exception as e:
+            logger.warning("Failed to add no-connects via KiUtils: %s", e)
 
     def _add_hierarchical_sheets_kiutils(
         self,
@@ -578,7 +640,7 @@ class SchematicWriter:
                 lines.append(self._symbol_sexpr(part, placement))
 
         # Resolve real pin positions for each part on this sheet
-        resolved_pin_cache: dict[str, dict[str, tuple[float, float, float]]] = {}
+        resolved_pin_cache: dict[str, dict[str, list[tuple[float, float, float]]]] = {}
         for ref in refs:
             part = canonical.part_by_ref(ref)
             placement = sheet_plan.placements.get(ref)
@@ -607,14 +669,19 @@ class SchematicWriter:
 
             # Try real pin resolution first
             real_pins = resolved_pin_cache.get(ep.ref, {})
-            real_pin_data = real_pins.get(ep.pin)
+            real_pin_entries = real_pins.get(ep.pin, [])
 
-            if real_pin_data is not None:
-                # Use exact pin coordinate from library
-                pin_x, pin_y, stub_angle = real_pin_data
-                label_x, label_y = _compute_label_position_from_stub_angle(
-                    pin_x, pin_y, stub_angle
-                )
+            if real_pin_entries:
+                # Connect ALL matching pins (multi-pin support)
+                for pin_x, pin_y, stub_angle in real_pin_entries:
+                    label_x, label_y = _compute_label_position_from_stub_angle(
+                        pin_x, pin_y, stub_angle
+                    )
+                    # Wire stub
+                    lines.append(self._wire_sexpr(pin_x, pin_y, label_x, label_y))
+                    # Label at wire end
+                    is_global = ep.net in sheet_plan.cross_sheet_nets
+                    lines.append(self._label_sexpr(ep.net, label_x, label_y, is_global))
             else:
                 # Fallback: estimate pin position
                 pin_idx = ref_pin_indices.get((ep.ref, ep.pin), 0)
@@ -622,19 +689,37 @@ class SchematicWriter:
                 pin_x, pin_y = _estimate_pin_position(placement, pin_idx, total_pins)
                 label_x, label_y = _compute_label_position(pin_x, pin_y, placement)
 
-            # Wire stub
-            lines.append(self._wire_sexpr(pin_x, pin_y, label_x, label_y))
+                # Wire stub
+                lines.append(self._wire_sexpr(pin_x, pin_y, label_x, label_y))
 
-            # Label at wire end
-            is_global = ep.net in sheet_plan.cross_sheet_nets
-            lines.append(self._label_sexpr(ep.net, label_x, label_y, is_global))
+                # Label at wire end
+                is_global = ep.net in sheet_plan.cross_sheet_nets
+                lines.append(self._label_sexpr(ep.net, label_x, label_y, is_global))
 
-        # Add no-connect markers
-        for nc_ref, _nc_pin in canonical.no_connects:
-            if nc_ref in ref_set:
-                placement = sheet_plan.placements.get(nc_ref)
-                if placement:
-                    lines.append(self._no_connect_sexpr(placement.x - 5.0, placement.y))
+        # Add no-connect markers at exact pin positions
+        for nc_ref, nc_pin in canonical.no_connects:
+            if nc_ref not in ref_set:
+                continue
+            placement = sheet_plan.placements.get(nc_ref)
+            if not placement:
+                continue
+
+            # Try real pin resolution
+            nc_x: float | None = None
+            nc_y: float | None = None
+            part = canonical.part_by_ref(nc_ref)
+            if part:
+                pin_map = resolved_pin_cache.get(nc_ref, {})
+                pin_entries = pin_map.get(nc_pin, [])
+                if pin_entries:
+                    nc_x, nc_y, _ = pin_entries[0]
+
+            if nc_x is None or nc_y is None:
+                # Fallback: place near symbol origin
+                nc_x = placement.x - 5.08
+                nc_y = placement.y
+
+            lines.append(self._no_connect_sexpr(nc_x, nc_y))
 
         lines.append(")")
         return "\n".join(lines)
