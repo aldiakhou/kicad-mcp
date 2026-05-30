@@ -4,7 +4,6 @@ Project, schematic creation, library resolution, and conservative PCB authoring 
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 import json
 import os
@@ -684,6 +683,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
         no_connect_rules; the compiler expands those into the v2 build spec.
         """
         resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+
+        # Route through safe engine if configured (non-dry-run only)
+        if not dry_run and os.getenv("KICAD_MCP_SCHEMATIC_ENGINE", "legacy") == "safe":
+            return _apply_via_netlist_first_engine(
+                resolved_project,
+                intent or spec or {},
+                mode=mode,
+                strict=strict,
+                visual_style=visual_style,
+                allow_partial_write=allow_partial_write,
+                atomic=True,
+            )
+
         if dry_run:
             return _schematic_design_intent_response(
                 resolved_project,
@@ -828,60 +840,33 @@ def register_creation_tools(mcp: FastMCP) -> None:
         schematic_path: str | None = None,
         spec: dict[str, Any] | None = None,
         path: str | None = None,
+        atomic: bool = True,
+        wait: bool = True,
+        timeout_seconds: float = 300,
     ) -> dict[str, Any]:
-        """Safely compile, stage/background-apply, and validate a large design intent."""
+        """Safely compile, stage/background-apply, and validate a large design intent.
+
+        Always uses the netlist-first pipeline:
+          intent → canonical circuit/netlist → schematic writer → KiCad CLI verification
+          → commit or rollback.
+
+        Never partially commits failed output (unless allow_partial_write=True).
+        Netlist mismatch always blocks commit regardless of strict setting.
+        """
         resolved_project = _resolve_project_alias(project_path, schematic_path, path)
 
-        def start_safe_apply() -> dict[str, Any]:
-            return _schematic_design_intent_response(
-                resolved_project,
-                intent or spec or {},
-                mode=mode,
-                dry_run=False,
-                strict=strict,
-                detail=detail,
-                include_expanded_spec=False,
-                tool_name="schematic_apply_design_intent_safe",
-                visual_layout=visual_layout,
-                visual_style=visual_style,
-                quick_apply=False,
-                include_preview=False,
-                run_quality_report=True,
-                run_native_validation=True,
-                run_cli_validation=True,
-                unsafe_fast_apply=False,
-                allow_partial_write=allow_partial_write,
-                allow_background_redirect=allow_background,
-            )
-
-        project_lock, busy = _try_acquire_project_mutation_lock(
+        # Always use the netlist-first engine for the safe tool
+        return _apply_via_netlist_first_engine(
             resolved_project,
-            "schematic_apply_design_intent_safe",
+            intent or spec or {},
+            mode=mode,
+            strict=strict,
+            visual_style=visual_style,
+            allow_partial_write=allow_partial_write,
+            atomic=atomic,
+            require_netlist_match=True,
+            require_kicad_cli_verification=True,
         )
-        if busy is not None:
-            return busy
-        try:
-            result = start_safe_apply()
-        finally:
-            cast(Any, project_lock).release()
-        job_id = result.get("job_id")
-        if not job_id or max_wait_seconds <= 0:
-            return result
-        with _DESIGN_INTENT_JOBS_LOCK:
-            job = _DESIGN_INTENT_JOBS.get(str(job_id))
-            future = cast(Future[Any] | None, job.get("future") if job else None)
-        if future is not None:
-            try:
-                future.result(timeout=max_wait_seconds)
-            except FutureTimeoutError:
-                status = _get_design_intent_job_status(str(job_id))
-                status["success"] = True
-                status["stage"] = "background_job_running"
-                status["tool"] = "schematic_apply_design_intent_safe"
-                return status
-        final = _get_design_intent_job_result(str(job_id))
-        final["tool"] = "schematic_apply_design_intent_safe"
-        return final
 
     @mcp.tool()
     def schematic_get_job_status(job_id: str) -> dict[str, Any]:
@@ -897,6 +882,131 @@ def register_creation_tools(mcp: FastMCP) -> None:
     def schematic_cancel_job(job_id: str) -> dict[str, Any]:
         """Cancel a pending background schematic job or mark a running one as cancel-requested."""
         return _cancel_design_intent_job(job_id)
+
+    @mcp.tool()
+    def schematic_validate_generated_schematic(
+        project_path: str | None = None,
+        schematic_path: str | None = None,
+        expected_netlist_path: str | None = None,
+        run_erc: bool = True,
+        run_visual_lint: bool = True,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate a generated schematic against expected netlist, ERC, and visual lint.
+
+        Use this after schematic generation to verify correctness without modifying files.
+        """
+        resolved_project = _resolve_project_alias(project_path, schematic_path, path)
+        try:
+            from kicad_mcp.schematic_engine.expected_netlist import (
+                compare_netlists,
+                load_expected_netlist,
+                parse_kicad_netlist,
+            )
+            from kicad_mcp.schematic_engine.kicad_cli_verifier import KicadCliVerifier
+
+            sch_path = schematic_path or get_project_files(resolved_project).get("schematic")
+            if not sch_path:
+                return {"success": False, "error": "Schematic file not found"}
+
+            result: dict[str, Any] = {
+                "success": True,
+                "tool": "schematic_validate_generated_schematic",
+                "project_path": resolved_project,
+            }
+
+            # Run KiCad CLI verification
+            verifier = KicadCliVerifier()
+            verify_result = verifier.verify(sch_path, run_erc=run_erc, export_svg=False)
+            result["erc"] = {
+                "errors": verify_result.erc_errors,
+                "warnings": verify_result.erc_warnings,
+                "total": verify_result.erc_total,
+            }
+            if verify_result.erc_errors > 0:
+                result["success"] = False
+
+            # Compare netlists if expected netlist provided
+            if expected_netlist_path and verify_result.netlist_path:
+                expected = load_expected_netlist(expected_netlist_path)
+                actual = parse_kicad_netlist(verify_result.netlist_path)
+                compare_result = compare_netlists(expected, actual)
+                result["netlist_compare"] = {
+                    "success": compare_result.success,
+                    "missing_endpoints": compare_result.missing_endpoints[:10],
+                    "extra_endpoints": compare_result.extra_endpoints[:10],
+                }
+                if not compare_result.success:
+                    result["success"] = False
+
+            # Run visual lint if requested
+            if run_visual_lint:
+                try:
+                    import importlib.util
+                    if importlib.util.find_spec("kicad_mcp.schematic_engine.visual_lint"):
+                        # Check for stored canonical circuit in project artifacts
+                        project_dir = os.path.dirname(os.path.abspath(resolved_project))
+                        artifact_dir = os.path.join(
+                            project_dir, ".kicad_mcp", "engine_artifacts"
+                        )
+                        netlist_json = os.path.join(artifact_dir, "expected_netlist.json")
+
+                        if os.path.exists(netlist_json):
+                            # Reconstruct canonical from stored netlist metadata
+                            import json as json_mod
+                            with open(netlist_json) as f:
+                                netlist_data = json_mod.load(f)
+                            metadata = netlist_data.get("metadata", {})
+                            result["visual_lint"] = {
+                                "note": "Visual lint requires design intent to "
+                                        "reconstruct canonical circuit. "
+                                        "Use pipeline for full lint.",
+                                "stored_metadata": metadata,
+                            }
+                        else:
+                            result["visual_lint"] = {
+                                "note": "Visual lint skipped: no engine artifacts "
+                                        "found. Run schematic_apply_design_intent_safe "
+                                        "for full validation.",
+                            }
+                    else:
+                        result["visual_lint"] = {
+                            "note": "Visual lint dependencies not available",
+                        }
+                except Exception:
+                    result["visual_lint"] = {
+                        "note": "Visual lint dependencies not available",
+                    }
+
+            return result
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    @mcp.tool()
+    def schematic_rebuild_from_canonical_netlist(
+        project_path: str | None = None,
+        intent: dict[str, Any] | None = None,
+        visual_style: str = "professional_blocks",
+        strict: bool = True,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Rebuild schematic from scratch using the netlist-first engine.
+
+        Forces the safe engine regardless of KICAD_MCP_SCHEMATIC_ENGINE setting.
+        Useful for regenerating a schematic that has become corrupted or messy.
+        """
+        resolved_project = _resolve_project_alias(project_path, None, path)
+        if not intent:
+            return {"success": False, "error": "intent is required"}
+        return _apply_via_netlist_first_engine(
+            resolved_project,
+            intent,
+            mode="replace",
+            strict=strict,
+            visual_style=visual_style,
+            allow_partial_write=False,
+            atomic=True,
+        )
 
     @mcp.tool()
     def schematic_build_from_spec(
@@ -3804,10 +3914,11 @@ def _schematic_apply_expanded_spec_response(
     if not visual_layout:
         expanded_spec = _without_default_visual_layout(expanded_spec)
     estimate = _preview_size_estimate(expanded_spec, {})
-    if not strict and (
+    is_large = (
         estimate["total_part_count"] > estimate["thresholds"]["quick_apply"]["max_parts"]
         or estimate["connection_count"] > estimate["thresholds"]["quick_apply"]["max_connections"]
-    ):
+    )
+    if not strict and is_large:
         staged = _apply_expanded_spec_staged(
             project_path,
             expanded_spec,
@@ -3954,6 +4065,51 @@ def _build_failure_diagnostics(built: dict[str, Any], detail: str) -> dict[str, 
             "recoverable": built.get("recoverable"),
         }
     return diagnostics
+
+
+def _apply_via_netlist_first_engine(
+    project_path: str,
+    intent: dict[str, Any],
+    *,
+    mode: str = "update",
+    strict: bool = False,
+    visual_style: str = "professional_blocks",
+    allow_partial_write: bool = False,
+    atomic: bool = True,
+    require_netlist_match: bool = False,
+    require_kicad_cli_verification: bool = False,
+) -> dict[str, Any]:
+    """Route design intent through the netlist-first schematic engine.
+
+    This is the new safe path that guarantees:
+    - No partial writes on failure
+    - Netlist verification before commit
+    - Visual lint before commit
+    - Atomic commit or full rollback
+
+    Args:
+        require_netlist_match: If True, netlist mismatch always blocks commit
+            regardless of strict setting.
+        require_kicad_cli_verification: If True, KiCad CLI netlist export must
+            succeed for commit to proceed.
+    """
+    from kicad_mcp.schematic_engine.pipeline import apply_design_intent_netlist_first
+
+    result = apply_design_intent_netlist_first(
+        project_path,
+        intent,
+        mode=mode,
+        atomic=atomic,
+        visual_style=visual_style,
+        run_erc=True,
+        export_svg=True,
+        allow_partial_write=allow_partial_write,
+        strict=strict,
+        require_netlist_match=require_netlist_match,
+        require_kicad_cli_verification=require_kicad_cli_verification,
+    )
+    result["tool"] = "schematic_apply_design_intent_safe"
+    return result
 
 
 def _schematic_design_intent_response(

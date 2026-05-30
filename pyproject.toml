@@ -49,6 +49,13 @@ dependencies = [
     "defusedxml>=0.7.0",  # Secure XML parsing
 ]
 
+[project.optional-dependencies]
+schematic-engine = [
+    "skidl>=2.2.3",
+    "kiutils>=1.4.8",
+    "kicad-skip>=0.2.5",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/aldiakhou/kicad-mcp"
 "Bug Tracker" = "https://github.com/aldiakhou/kicad-mcp/issues"
@@ -86,6 +93,11 @@ visualization = [
     "cairosvg>=2.7.0",     # SVG to PNG conversion
     "Pillow>=10.0.0",      # Image processing
     "playwright>=1.40.0",  # Browser automation (optional)
+]
+schematic-engine = [
+    "skidl>=2.2.3",        # Circuit connectivity compiler & netlist generation
+    "kiutils>=1.4.8",      # KiCad file structured parser/serializer
+    "kicad-skip>=0.2.5",   # KiCad S-expression schematic manipulation
 ]
 
 [tool.ruff]
@@ -177,8 +189,17 @@ module = [
     "kicad_mcp.utils.netlist_parser",
     "kicad_mcp.utils.pattern_recognition",
     "kicad_mcp.utils.secure_subprocess",
+    "kicad_mcp.schematic_engine.*",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "skidl.*",
+    "kiutils.*",
+    "kicad_skip.*",
+]
+ignore_missing_imports = true
 
 
 [tool.pytest.ini_options]

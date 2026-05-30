@@ -8,9 +8,8 @@ from typing import Any
 from fastmcp import Context, FastMCP
 
 from kicad_mcp.utils.file_utils import get_project_files
-from kicad_mcp.utils.path_validator import PathValidationError
-from kicad_mcp.utils.transactional_edit import validate_local_path
 from kicad_mcp.utils.netlist_parser import extract_netlist
+from kicad_mcp.utils.path_validator import PathValidationError
 from kicad_mcp.utils.pattern_recognition import (
     identify_amplifiers,
     identify_digital_interfaces,
@@ -20,6 +19,7 @@ from kicad_mcp.utils.pattern_recognition import (
     identify_power_supplies,
     identify_sensor_interfaces,
 )
+from kicad_mcp.utils.transactional_edit import validate_local_path
 
 
 async def _identify_circuit_patterns_impl(

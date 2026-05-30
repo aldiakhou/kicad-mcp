@@ -184,6 +184,18 @@ def create_server() -> FastMCP:
     _instrument_registered_tools(mcp)
     _apply_tool_profile(mcp, get_tool_profile())
 
+    # Compatibility shim: older tests use get_tools()/get_resource_templates() returning dicts.
+    async def _compat_get_tools():
+        tools = await mcp.list_tools()
+        return {t.name: t for t in tools}
+
+    async def _compat_get_resource_templates():
+        templates = await mcp.list_resource_templates()
+        return {t.uri_template for t in templates}
+
+    mcp.get_tools = _compat_get_tools
+    mcp.get_resource_templates = _compat_get_resource_templates
+
     # Register prompts
     logging.info("Registering prompts...")
     register_prompts(mcp)
@@ -535,8 +547,23 @@ def get_tool_profile() -> str:
 
 def _apply_tool_profile(mcp: FastMCP, profile: str) -> None:
     """Hide tools that do not belong to the configured LLM tool surface."""
-    tool_manager = getattr(mcp, "_tool_manager", None)
-    tool_names = list(getattr(tool_manager, "_tools", {}).keys())
+    import asyncio
+
+    # Discover registered tool names using the public list_tools() API.
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                tools = pool.submit(asyncio.run, mcp.list_tools()).result()
+        else:
+            tools = loop.run_until_complete(mcp.list_tools())
+    except RuntimeError:
+        tools = asyncio.run(mcp.list_tools())
+
+    tool_names = [t.name for t in tools]
+
     if profile == "all":
         logging.info("Using all tool profile; all %d tools are exposed.", len(tool_names))
         return

@@ -14,8 +14,8 @@ import re
 from typing import Any
 
 from kicad_mcp.utils.kicad_s_expr import (
-    SExpressionError,
     SExprAtom,
+    SExpressionError,
     SExprList,
     parse_s_expression,
     serialize_s_expression,
