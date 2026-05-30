@@ -48,7 +48,6 @@ def apply_design_intent_netlist_first(
     run_erc: bool = True,
     export_svg: bool = True,
     max_inline_bytes: int = 50_000,
-    allow_partial_write: bool = False,
     strict: bool = False,
     require_netlist_match: bool = False,
     require_kicad_cli_verification: bool = False,
@@ -57,8 +56,7 @@ def apply_design_intent_netlist_first(
 ) -> dict[str, Any]:
     """Apply design intent using the netlist-first pipeline.
 
-    The live project is NOT modified until all verification passes,
-    unless allow_partial_write=True.
+    The live project is NOT modified until all verification passes.
 
     Args:
         project_path: Path to the KiCad project file (.kicad_pro).
@@ -69,7 +67,6 @@ def apply_design_intent_netlist_first(
         run_erc: Whether to run KiCad CLI ERC.
         export_svg: Whether to export SVG preview.
         max_inline_bytes: Max bytes for inline SVG in response.
-        allow_partial_write: If True, allow commit even with warnings.
         strict: If True, any ERC error or netlist mismatch blocks commit.
         require_netlist_match: If True, netlist mismatch always blocks commit
             regardless of strict setting. Used by the safe tool.
@@ -132,7 +129,12 @@ def apply_design_intent_netlist_first(
         }
 
         compiler = SkidlCompiler(artifact_dir=artifact_dir)
-        compile_result = compiler.compile(canonical)
+        try:
+            compile_result = compiler.compile(canonical)
+        except RuntimeError as e:
+            result.error = str(e)
+            result.stage = "engine_not_ready"
+            return result.to_dict()
 
         if not compile_result.success:
             result.error = compile_result.error or "SKiDL compilation failed"
@@ -173,6 +175,7 @@ def apply_design_intent_netlist_first(
             "warning_count": lint_result.warning_count,
             "issues": [
                 {
+                    "category": _visual_issue_category(issue.type, issue.severity),
                     "type": issue.type,
                     "ref": issue.ref,
                     "message": issue.message,
@@ -182,7 +185,7 @@ def apply_design_intent_netlist_first(
             ],
         }
 
-        if lint_result.blocking_count > 0 and strict and not allow_partial_write:
+        if lint_result.blocking_count > 0 and strict:
             result.error = (
                 f"Visual lint found {lint_result.blocking_count} blocking issues"
             )
@@ -336,7 +339,7 @@ def apply_design_intent_netlist_first(
                 should_commit = False
                 result.stage = "visual_lint_failed"
 
-            if not should_commit and not allow_partial_write:
+            if not should_commit:
                 tx.rollback()
                 result.success = False
                 result.changed = False
@@ -386,3 +389,11 @@ def _cancelled_result(result: EngineResult, stage: str) -> dict[str, Any]:
     result.stage = f"cancelled:{stage}"
     result.error = f"Job cancelled at stage: {stage}"
     return result.to_dict()
+
+
+def _visual_issue_category(issue_type: str, severity: str) -> str:
+    if severity == "blocking" and issue_type == "unplaced_symbol":
+        return "blocking_generation_issue"
+    if severity == "blocking":
+        return "blocking_connectivity_issue"
+    return "visual_warning"

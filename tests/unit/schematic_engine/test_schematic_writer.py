@@ -539,8 +539,8 @@ class TestSafeToolPipelineHelper:
         assert "atomic" in params
         assert "strict" in params
 
-    def test_safe_tool_function_is_defined(self):
-        """schematic_apply_design_intent_safe is registered as an MCP tool."""
+    def test_apply_tool_function_is_defined(self):
+        """schematic_apply_design_intent is registered as an MCP tool."""
         # The function is decorated with @mcp.tool() so it can't be imported directly.
         # Verify it exists by checking the source contains the definition.
         import inspect
@@ -548,5 +548,5 @@ class TestSafeToolPipelineHelper:
         import kicad_mcp.tools.creation_tools as ct
 
         source = inspect.getsource(ct)
-        assert "def schematic_apply_design_intent_safe(" in source
+        assert "def schematic_apply_design_intent(" in source
         assert "_apply_via_netlist_first_engine(" in source

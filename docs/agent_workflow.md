@@ -4,7 +4,7 @@ This server is intended to be agent-first: declare electrical intent, let the MC
 
 ## Schematic Generation (Default: Netlist-First Safe Engine)
 
-For schematic generation, use `schematic_apply_design_intent` or `schematic_apply_design_intent_safe`.
+For schematic generation, use `schematic_apply_design_intent`.
 
 Do not use `schematic_apply_expanded_spec`, `schematic_build_from_spec_v2`, or low-level connection tools unless repairing/debugging an existing schematic.
 
@@ -14,19 +14,19 @@ The default engine is the **netlist-first safe pipeline** which guarantees:
 - Visual lint before commit
 - Atomic commit or full rollback
 
-To use the legacy engine (for debugging), set `KICAD_MCP_SCHEMATIC_ENGINE=legacy`.
+The schematic engine is fixed to the SKiDL -> KiUtils -> KiCad CLI pipeline.
 
 ## Recommended order
 
 1. `project_design_state`
 2. `find_symbols` / `find_footprints` for unknown library IDs
 3. `schematic_preview_design_intent`, when you want to inspect expansion first
-4. `schematic_apply_design_intent` or `schematic_apply_design_intent_safe`
+4. `schematic_apply_design_intent`
 5. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
 6. `schematic_quality_report`
 7. `project_design_state`
 
-For background execution, use `schematic_start_design_intent_job` / `schematic_get_job_status` / `schematic_get_job_result`.
+The schematic apply path is synchronous and always verifies before commit.
 
 ## Advanced/Debug Tools
 

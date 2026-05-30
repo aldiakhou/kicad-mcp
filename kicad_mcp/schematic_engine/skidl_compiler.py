@@ -50,9 +50,6 @@ except ImportError:
 
 class SkidlCompiler:
     """Compiles a CanonicalCircuit using SKiDL for netlist generation and ERC.
-
-    If SKiDL is not installed, falls back to a pure-Python netlist builder
-    that produces the same expected netlist format without ERC.
     """
 
     def __init__(self, artifact_dir: str | None = None):
@@ -73,17 +70,11 @@ class SkidlCompiler:
         Returns:
             SkidlCompileResult with expected netlist and diagnostics.
         """
-        if _SKIDL_AVAILABLE:
-            result = self._compile_with_skidl(canonical)
-            # If SKiDL failed due to library issues, fall back to pure-Python
-            if not result.success and any(
-                "Can't open" in e or "not found" in e or "import" in e.lower()
-                for e in result.erc_errors
-            ):
-                logger.info("SKiDL library loading failed, using fallback compiler")
-                return self._compile_fallback(canonical)
-            return result
-        return self._compile_fallback(canonical)
+        if not _SKIDL_AVAILABLE:
+            raise RuntimeError(
+                "SKiDL is required. Install kicad-mcp with required dependencies."
+            )
+        return self._compile_with_skidl(canonical)
 
     def _compile_fallback(self, canonical: CanonicalCircuit) -> SkidlCompileResult:
         """Pure-Python fallback: build expected netlist from canonical endpoints.

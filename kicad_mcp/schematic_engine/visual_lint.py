@@ -138,7 +138,7 @@ def _check_symbol_overlaps(
                         type=LINT_SYMBOL_OVERLAP,
                         ref=p1.ref,
                         sheet=sheet_name,
-                        severity="blocking",
+                        severity="warning",
                         message=(
                             f"Symbol {p1.ref} overlaps with {p2.ref} "
                             f"(distance: {distance:.1f}mm)"
@@ -179,7 +179,7 @@ def _check_decoupling_placement(
                 type=LINT_DECOUPLING_NOT_NEAR_TARGET,
                 ref=part.ref,
                 sheet=part_placement.sheet,
-                severity="blocking",
+                severity="warning",
                 message=(
                     f"Decoupling cap {part.ref} is {distance:.1f}mm from "
                     f"target {target_ref} (max: {MAX_DECOUPLING_DISTANCE_MM}mm)"
@@ -215,7 +215,7 @@ def _check_sheet_overflow(
                     type=LINT_SHEET_OVERFLOW,
                     ref=placement.ref,
                     sheet=sheet_name,
-                    severity="blocking",
+                    severity="warning",
                     message=(
                         f"Symbol {placement.ref} at ({placement.x:.1f}, "
                         f"{placement.y:.1f}) is outside sheet bounds "

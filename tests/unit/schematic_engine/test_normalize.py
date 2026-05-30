@@ -168,6 +168,45 @@ class TestNormalizeDesignIntent:
         assert len(crystal_parts) == 1
         load_cap_parts = [p for p in canonical.parts if p.role == "load_capacitor"]
         assert len(load_cap_parts) == 2
+        assert crystal_parts[0].ref == "Y1"
+        assert {part.ref for part in load_cap_parts} == {"C1", "C2"}
+
+    def test_duplicate_crystals_allocate_unique_refs(self):
+        """Generated crystal support parts use unique standard refs across targets."""
+        intent = {
+            "parts": [
+                {"ref": "U1", "lib_id": "MCU_ST:STM32G431KBTx", "value": "STM32"},
+                {"ref": "U5", "lib_id": "MCU_ST:STM32G431KBTx", "value": "STM32"},
+            ],
+            "support_circuits": [
+                {"type": "crystal", "target": "U1", "pins": ["PF0", "PF1"], "load_capacitors": "18pF"},
+                {"type": "crystal", "target": "U5", "pins": ["PF0", "PF1"], "load_capacitors": "18pF"},
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        refs = [part.ref for part in canonical.parts]
+        assert len(refs) == len(set(refs))
+        assert {part.ref for part in canonical.parts if part.role == "crystal"} == {"Y1", "Y2"}
+
+    def test_duplicate_decoupling_groups_allocate_unique_refs(self):
+        """Decoupling groups allocate unique capacitor refs without target-derived names."""
+        intent = {
+            "parts": [
+                {"ref": "U1", "lib_id": "MCU_ST:STM32G431KBTx", "value": "STM32"},
+                {"ref": "U5", "lib_id": "MCU_ST:STM32G431KBTx", "value": "STM32"},
+            ],
+            "support_circuits": [
+                {"type": "decoupling", "target": "U1", "capacitors": ["100n", "1u"]},
+                {"type": "decoupling", "target": "U5", "capacitors": ["100n"]},
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        decap_refs = [part.ref for part in canonical.parts if part.role == "decoupling"]
+        assert decap_refs == ["C1", "C2", "C3"]
 
     def test_usb_c_power_support_circuit(self):
         """USB-C power input generates connector + CC pulldowns."""

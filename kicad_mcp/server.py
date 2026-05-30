@@ -5,6 +5,7 @@ MCP server creation and configuration.
 import atexit
 from collections.abc import Callable
 import functools
+import importlib
 import inspect
 import json
 import logging
@@ -70,6 +71,29 @@ LARGE_RESPONSE_FIELD_NAMES = {
     "native_netlist",
     "full_native_netlist",
 }
+
+_SCHEMATIC_RUNTIME_DEPENDENCIES = (
+    ("skidl", "skidl"),
+    ("kiutils", "kiutils"),
+    ("skip", "kicad-skip"),
+)
+
+
+def require_schematic_runtime() -> None:
+    """Fail fast when required schematic runtime dependencies are missing."""
+    missing: list[str] = []
+    for module_name, package_name in _SCHEMATIC_RUNTIME_DEPENDENCIES:
+        try:
+            importlib.import_module(module_name)
+        except ImportError:
+            missing.append(package_name)
+
+    if missing:
+        missing_text = ", ".join(missing)
+        raise RuntimeError(
+            "Missing required schematic dependencies: "
+            f"{missing_text}. Install the package dependencies before running kicad-mcp."
+        )
 
 
 def add_cleanup_handler(handler: Callable) -> None:
@@ -148,6 +172,7 @@ def create_server() -> FastMCP:
     """Create and configure the KiCad MCP server."""
     global _server_instance
     logging.info("Initializing KiCad MCP server")
+    require_schematic_runtime()
 
     # Try to set up KiCad Python path - Removed
     # kicad_modules_available = setup_kicad_python_path()

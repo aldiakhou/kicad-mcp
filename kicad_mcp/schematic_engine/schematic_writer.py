@@ -4,9 +4,8 @@ Consumes SheetPlan, CanonicalCircuit, and PlacementInfo to produce
 complete KiCad schematic files in a temporary project directory.
 
 Uses:
-- KiUtils for structured reading/writing and format safety (preferred)
-- kicad-skip where its ergonomic helpers are better
-- Falls back to S-expression text generation when libraries unavailable
+- KiUtils for structured reading/writing and format safety
+- kicad-skip as a required schematic runtime dependency
 
 Key design: Every CircuitEndpoint becomes a real KiCad connection via a wire
 stub from the exact KiCad symbol pin coordinate to a net label placed at the
@@ -43,7 +42,7 @@ except ImportError:
     pass
 
 try:
-    import kicad_skip  # noqa: F401
+    import skip  # noqa: F401
     _KICAD_SKIP_AVAILABLE = True
 except ImportError:
     pass
@@ -231,9 +230,20 @@ class SchematicWriter:
         """
         os.makedirs(self.output_dir, exist_ok=True)
 
-        if _KIUTILS_AVAILABLE:
-            return self._write_with_kiutils(canonical, sheet_plan)
-        return self._write_fallback(canonical, sheet_plan)
+        if not _KIUTILS_AVAILABLE or not _KICAD_SKIP_AVAILABLE:
+            missing: list[str] = []
+            if not _KIUTILS_AVAILABLE:
+                missing.append("kiutils")
+            if not _KICAD_SKIP_AVAILABLE:
+                missing.append("kicad-skip")
+            return {
+                "success": False,
+                "error": (
+                    "Required schematic writer dependencies are missing: "
+                    + ", ".join(missing)
+                ),
+            }
+        return self._write_with_kiutils(canonical, sheet_plan)
 
     def _write_with_kiutils(
         self,
@@ -300,8 +310,12 @@ class SchematicWriter:
                 "method": "kiutils",
             }
         except Exception as e:
-            logger.error("KiUtils write failed: %s, falling back", e)
-            return self._write_fallback(canonical, sheet_plan)
+            logger.error("KiUtils write failed: %s", e)
+            return {
+                "success": False,
+                "error": f"KiUtils writer failed: {e}",
+                "method": "kiutils",
+            }
 
     def _add_symbol_kiutils(
         self,

@@ -282,7 +282,7 @@ def design_intent_schema(section: str = "all") -> dict[str, Any]:
                 "available_sections": sorted(DESIGN_INTENT_SCHEMA),
             }
 
-    base["recommended_apply_tool"] = "schematic_apply_design_intent_safe"
+    base["recommended_apply_tool"] = "schematic_apply_design_intent"
     return base
 
 

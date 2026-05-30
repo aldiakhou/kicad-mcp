@@ -22,6 +22,7 @@ from kicad_mcp.server import (
     create_server,
     get_tool_profile,
     get_transport_config,
+    require_schematic_runtime,
 )
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.utils.kicad_api_detection import check_for_cli_api
@@ -84,27 +85,22 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "discover_projects" in tools
     assert "get_project_structure" in tools
     assert "schematic_apply_design_intent" in tools
-    assert "schematic_apply_design_intent_safe" in tools
     assert "schematic_preview_design_intent" in tools
-    assert "schematic_start_design_intent_job" in tools
-    assert "schematic_get_job_status" in tools
-    assert "schematic_get_job_result" in tools
-    assert "schematic_cancel_job" in tools
-    assert "schematic_add_support_circuits" in tools
-    assert "schematic_apply_no_connect_rules" in tools
     assert "schematic_engine_status" in tools
     assert "schematic_validate_generated_schematic" in tools
     assert "export_schematic_preview" in tools
     assert "export_schematic_svg" in tools
-    assert "schematic_delete_item" in tools
-    assert "schematic_snap_to_grid" in tools
     assert "validate_project_boundaries" in tools
     assert "generate_validation_report" in tools
-    assert "run_erc_check" in tools
     assert "resolve_symbol" in tools
     assert "resolve_symbols" in tools
     assert "resolve_footprint" in tools
     assert "resolve_footprints" in tools
+    assert "schematic_apply_design_intent_safe" not in tools
+    assert "schematic_start_design_intent_job" not in tools
+    assert "schematic_get_job_status" not in tools
+    assert "schematic_get_job_result" not in tools
+    assert "schematic_cancel_job" not in tools
     # Legacy build/connection tools moved to advanced profile
     assert "schematic_apply_expanded_spec" not in tools
     assert "schematic_build_from_spec_v2" not in tools
@@ -230,6 +226,20 @@ def test_transport_config_defaults_to_stdio(monkeypatch):
         "port": 8000,
         "path": "/mcp",
     }
+
+
+def test_require_schematic_runtime_reports_missing_dependency(monkeypatch):
+    """Server startup should fail fast when a required schematic dependency is missing."""
+
+    def fake_import(name: str):
+        if name == "kiutils":
+            raise ImportError("missing kiutils")
+        return object()
+
+    monkeypatch.setattr(server_module.importlib, "import_module", fake_import)
+
+    with pytest.raises(RuntimeError, match="Missing required schematic dependencies: kiutils"):
+        require_schematic_runtime()
 
 
 def test_transport_config_supports_sse_http_endpoint(monkeypatch):

@@ -32,6 +32,27 @@ _POWER_NET_PATTERNS = re.compile(
 )
 
 
+class GeneratedRefAllocator:
+    """Allocate unique generated reference designators."""
+
+    def __init__(self, existing_refs: set[str]):
+        self.used = set(existing_refs)
+
+    def claim(self, ref: str) -> str:
+        if ref in self.used:
+            raise ValueError(f"Duplicate reference designator '{ref}'")
+        self.used.add(ref)
+        return ref
+
+    def next(self, prefix: str) -> str:
+        for index in range(1, 10000):
+            ref = f"{prefix}{index}"
+            if ref not in self.used:
+                self.used.add(ref)
+                return ref
+        raise RuntimeError(f"No free reference for {prefix}")
+
+
 def normalize_design_intent(
     project_path: str,
     intent: dict[str, Any],
@@ -60,6 +81,8 @@ def normalize_design_intent(
         parts.append(part)
         block_name = part.block
         blocks.setdefault(block_name, []).append(part.ref)
+
+    ref_allocator = GeneratedRefAllocator({part.ref for part in parts})
 
     # --- Extract rails ---
     for rail_spec in intent.get("rails", []):
@@ -121,7 +144,7 @@ def normalize_design_intent(
 
     # --- Extract support_circuits ---
     for sc in intent.get("support_circuits", []):
-        sc_parts, sc_endpoints = _normalize_support_circuit(sc, parts)
+        sc_parts, sc_endpoints = _normalize_support_circuit(sc, ref_allocator)
         parts.extend(sc_parts)
         endpoints.extend(sc_endpoints)
         for p in sc_parts:
@@ -241,7 +264,7 @@ def _normalize_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
 
 def _normalize_support_circuit(
     sc_spec: dict[str, Any],
-    existing_parts: list[CircuitPart],
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Convert a support circuit spec to parts and endpoints."""
     parts: list[CircuitPart] = []
@@ -250,19 +273,19 @@ def _normalize_support_circuit(
     target = sc_spec.get("target", "")
 
     if sc_type == "decoupling":
-        parts, endpoints = _normalize_decoupling(sc_spec, target)
+        parts, endpoints = _normalize_decoupling(sc_spec, target, ref_allocator)
     elif sc_type == "crystal":
-        parts, endpoints = _normalize_crystal(sc_spec, target)
+        parts, endpoints = _normalize_crystal(sc_spec, target, ref_allocator)
     elif sc_type == "usb_c_power_input":
-        parts, endpoints = _normalize_usb_c_power(sc_spec)
+        parts, endpoints = _normalize_usb_c_power(sc_spec, ref_allocator)
     elif sc_type in ("pullup", "pulldown"):
-        parts, endpoints = _normalize_pull_resistors(sc_spec, target, sc_type)
+        parts, endpoints = _normalize_pull_resistors(sc_spec, target, sc_type, ref_allocator)
     elif sc_type == "reset_button":
-        parts, endpoints = _normalize_reset_button(sc_spec, target)
+        parts, endpoints = _normalize_reset_button(sc_spec, target, ref_allocator)
     elif sc_type == "led":
-        parts, endpoints = _normalize_led(sc_spec, target)
+        parts, endpoints = _normalize_led(sc_spec, target, ref_allocator)
     elif sc_type == "ferrite":
-        parts, endpoints = _normalize_ferrite(sc_spec, target)
+        parts, endpoints = _normalize_ferrite(sc_spec, target, ref_allocator)
 
     return parts, endpoints
 
@@ -270,6 +293,7 @@ def _normalize_support_circuit(
 def _normalize_decoupling(
     spec: dict[str, Any],
     target: str,
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Generate decoupling capacitor parts and endpoints."""
     parts: list[CircuitPart] = []
@@ -280,12 +304,12 @@ def _normalize_decoupling(
     if isinstance(capacitors, str):
         capacitors = [capacitors]
 
-    for i, cap_value in enumerate(capacitors):
-        ref = spec.get("ref", f"C_{target}_decap{i + 1}")
-        if i > 0 and "ref" in spec:
-            ref = f"{spec['ref']}_{i + 1}"
-        elif i > 0:
-            ref = f"C_{target}_decap{i + 1}"
+    explicit_ref = spec.get("ref")
+    for cap_value in capacitors:
+        if explicit_ref and len(capacitors) == 1:
+            ref = ref_allocator.claim(str(explicit_ref))
+        else:
+            ref = ref_allocator.next("C")
 
         part = CircuitPart(
             ref=ref,
@@ -317,12 +341,14 @@ def _normalize_decoupling(
 def _normalize_crystal(
     spec: dict[str, Any],
     target: str,
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Generate crystal and load capacitor parts."""
     parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
 
-    crystal_ref = spec.get("ref", f"Y_{target}")
+    explicit_ref = spec.get("ref")
+    crystal_ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("Y")
     crystal_value = spec.get("value", "8MHz")
     pins = spec.get("pins", ["PF0", "PF1"])
     ground = spec.get("ground", "GND")
@@ -381,8 +407,8 @@ def _normalize_crystal(
     load_caps = spec.get("load_capacitors")
     if load_caps:
         cap_value = load_caps if isinstance(load_caps, str) else "18pF"
-        for i, net_name in enumerate([f"XTAL_{target}_IN", f"XTAL_{target}_OUT"]):
-            cap_ref = f"C_{crystal_ref}_{i + 1}"
+        for net_name in [f"XTAL_{target}_IN", f"XTAL_{target}_OUT"]:
+            cap_ref = ref_allocator.next("C")
             cap_part = CircuitPart(
                 ref=cap_ref,
                 lib_id="Device:C",
@@ -410,12 +436,14 @@ def _normalize_crystal(
 
 def _normalize_usb_c_power(
     spec: dict[str, Any],
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Generate USB-C power input circuit."""
     parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
 
-    connector_ref = spec.get("ref", "J3")
+    explicit_ref = spec.get("ref")
+    connector_ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("J")
     vbus_net = spec.get("vbus_net", "+5V")
     ground = spec.get("ground", "GND")
     cc_resistor = spec.get("cc_resistor", "5.1k")
@@ -465,7 +493,7 @@ def _normalize_usb_c_power(
 
     # CC pulldown resistors
     for i, cc_pin in enumerate(spec.get("cc_pins", ["A5", "B5"])):
-        r_ref = f"R_{connector_ref}_CC{i + 1}"
+        r_ref = ref_allocator.next("R")
         r_part = CircuitPart(
             ref=r_ref,
             lib_id="Device:R",
@@ -501,6 +529,7 @@ def _normalize_pull_resistors(
     spec: dict[str, Any],
     target: str,
     pull_type: str,
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Generate pull-up or pull-down resistors."""
     parts: list[CircuitPart] = []
@@ -512,11 +541,13 @@ def _normalize_pull_resistors(
     if isinstance(signals, str):
         signals = [signals]
 
-    for i, signal in enumerate(signals):
+    explicit_ref = spec.get("ref")
+    for signal in signals:
         net_name = signal if isinstance(signal, str) else signal.get("net", "")
-        ref = spec.get("ref", f"R_{target}_PU{i + 1}")
-        if i > 0:
-            ref = f"R_{target}_PU{i + 1}"
+        if explicit_ref and len(signals) == 1:
+            ref = ref_allocator.claim(str(explicit_ref))
+        else:
+            ref = ref_allocator.next("R")
 
         part = CircuitPart(
             ref=ref,
@@ -551,12 +582,14 @@ def _normalize_pull_resistors(
 def _normalize_reset_button(
     spec: dict[str, Any],
     target: str,
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Generate reset button circuit."""
     parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
 
-    ref = spec.get("ref", f"SW_{target}_RST")
+    explicit_ref = spec.get("ref")
+    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("SW")
     net = spec.get("net", f"NRST_{target}")
     ground = spec.get("ground", "GND")
 
@@ -594,13 +627,20 @@ def _normalize_reset_button(
 def _normalize_led(
     spec: dict[str, Any],
     target: str,
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Generate LED with current-limiting resistor."""
     parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
 
-    led_ref = spec.get("ref", f"D_{target}_LED")
-    resistor_ref = spec.get("resistor_ref", f"R_{led_ref}")
+    explicit_led_ref = spec.get("ref")
+    led_ref = ref_allocator.claim(str(explicit_led_ref)) if explicit_led_ref else ref_allocator.next("D")
+    explicit_resistor_ref = spec.get("resistor_ref")
+    resistor_ref = (
+        ref_allocator.claim(str(explicit_resistor_ref))
+        if explicit_resistor_ref
+        else ref_allocator.next("R")
+    )
     net = spec.get("net", f"LED_{target}")
     rail = spec.get("rail", "+3V3")
     ground = spec.get("ground", "GND")
@@ -652,12 +692,14 @@ def _normalize_led(
 def _normalize_ferrite(
     spec: dict[str, Any],
     target: str,
+    ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Generate ferrite bead."""
     parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
 
-    ref = spec.get("ref", f"FB_{target}")
+    explicit_ref = spec.get("ref")
+    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("FB")
     input_net = spec.get("input_net", "+5V")
     output_net = spec.get("output_net", "+5V_F")
     value = spec.get("value", "600R@100MHz")
