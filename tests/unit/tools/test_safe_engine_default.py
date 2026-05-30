@@ -66,6 +66,8 @@ async def test_start_design_intent_job_defaults_to_safe_engine(tmp_path: Path):
             {"parts": [{"ref": "U1", "value": "MCU", "lib_id": "MCU:MCU_TEST"}]},
         )
         mock_netlist_job.assert_called_once()
+        assert result["success"] is True
+        assert result["job_id"] == "test_123"
 
 
 @pytest.mark.asyncio
@@ -88,6 +90,8 @@ async def test_start_design_intent_job_legacy_env_routes_old_engine(tmp_path: Pa
             {"parts": [{"ref": "U1", "value": "MCU"}]},
         )
         mock_legacy_job.assert_called_once()
+        assert result["success"] is True
+        assert result["job_id"] == "test_456"
 
 
 @pytest.mark.asyncio
