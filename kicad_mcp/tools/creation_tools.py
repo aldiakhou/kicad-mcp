@@ -674,7 +674,7 @@ def register_creation_tools(mcp: FastMCP) -> None:
         detail: str = "compact",
         include_expanded_spec: bool = False,
         visual_layout: bool = True,
-        visual_style: str = "readable",
+        visual_style: str = "professional_blocks",
         dry_run_validation: str = "none",
         schematic_path: str | None = None,
         spec: dict[str, Any] | None = None,
@@ -894,6 +894,14 @@ def register_creation_tools(mcp: FastMCP) -> None:
         """
         resolved_project = _resolve_project_alias(project_path, schematic_path, path)
 
+        # Reject partial writes unless explicitly allowed via environment
+        if allow_partial_write and os.getenv("KICAD_MCP_ALLOW_PARTIAL_WRITE") != "1":
+            return {
+                "success": False,
+                "error": "allow_partial_write requires KICAD_MCP_ALLOW_PARTIAL_WRITE=1",
+                "recoverable": True,
+            }
+
         # Always use the netlist-first engine for the safe tool
         return _apply_via_netlist_first_engine(
             resolved_project,
@@ -940,19 +948,19 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
         skidl_available = False
         try:
-            from kicad_mcp.schematic_engine.skidl_compiler import SkidlCompiler  # noqa: F401
-            skidl_available = True
+            from kicad_mcp.schematic_engine.skidl_compiler import _SKIDL_AVAILABLE
+            skidl_available = _SKIDL_AVAILABLE
         except Exception:
             pass
 
         kiutils_available = False
         try:
-            from kicad_mcp.schematic_engine.schematic_writer import SchematicWriter  # noqa: F401
-            kiutils_available = True
+            from kicad_mcp.schematic_engine.schematic_writer import _KIUTILS_AVAILABLE
+            kiutils_available = _KIUTILS_AVAILABLE
         except Exception:
             pass
 
-        safe_apply_ready = skidl_available and kiutils_available
+        safe_apply_ready = kicad_cli_available and skidl_available and kiutils_available
 
         return {
             "engine": engine_mode,

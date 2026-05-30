@@ -201,6 +201,22 @@ async def test_preview_defaults_to_safe_engine(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_safe_alias_partial_write_blocked_without_env_var():
+    """allow_partial_write=True on the safe alias is rejected without env var."""
+    server = create_server()
+    tools = await server.get_tools()
+
+    result = tools["schematic_apply_design_intent_safe"].fn(
+        "/tmp/test",
+        {"parts": [{"ref": "U1", "value": "MCU", "lib_id": "MCU:TEST"}]},
+        allow_partial_write=True,
+    )
+    assert result["success"] is False
+    assert "KICAD_MCP_ALLOW_PARTIAL_WRITE" in result["error"]
+    assert result["recoverable"] is True
+
+
+@pytest.mark.asyncio
 async def test_schema_includes_recommended_apply_tool():
     """design_intent_schema output includes recommended_apply_tool."""
     server = create_server()
