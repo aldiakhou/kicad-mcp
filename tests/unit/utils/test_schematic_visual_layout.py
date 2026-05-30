@@ -15,7 +15,10 @@ from kicad_mcp.utils.schematic_pins import (
     _rects_intersect,
     _text_rect,
 )
-from kicad_mcp.utils.schematic_visual_layout import _candidate_papers, apply_visual_layout_to_v2_spec
+from kicad_mcp.utils.schematic_visual_layout import (
+    _candidate_papers,
+    apply_visual_layout_to_v2_spec,
+)
 
 
 def _large_mcu_part() -> dict:

@@ -8,7 +8,6 @@ from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.library_resolver import resolve_symbol
 from kicad_mcp.utils.native_netlist import export_native_netlist
-from kicad_mcp.utils.schematic_intent import connect_pins
 from kicad_mcp.utils.schematic_builder import (
     _apply_spec_to_existing_schematic,
     _build_in_memory_schematic,
@@ -17,6 +16,7 @@ from kicad_mcp.utils.schematic_builder import (
     normalize_build_spec_v2,
     validate_connection_plan_membership,
 )
+from kicad_mcp.utils.schematic_intent import connect_pins
 from kicad_mcp.utils.schematic_pins import (
     _resolve_symbol_pins_cached,
     add_no_connect_to_pin,
