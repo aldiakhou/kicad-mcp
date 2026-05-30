@@ -403,8 +403,9 @@ class SchematicWriter:
                 real_pin_entries = real_pins.get(ep.pin, [])
 
                 if real_pin_entries:
-                    # Connect ALL matching pins (handles duplicate pin names
-                    # like multiple VDD/GND pins on MCUs)
+                    # Connect ALL matching pins.  When a pin name (e.g. "VDD")
+                    # maps to multiple physical pins, each gets its own wire
+                    # stub + label so KiCad recognizes every pin as connected.
                     for pin_x, pin_y, stub_angle in real_pin_entries:
                         label_x, label_y = _compute_label_position_from_stub_angle(
                             pin_x, pin_y, stub_angle
