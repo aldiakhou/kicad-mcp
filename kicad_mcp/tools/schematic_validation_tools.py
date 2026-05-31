@@ -1,7 +1,5 @@
 """Generated schematic validation MCP tools."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from fastmcp import FastMCP

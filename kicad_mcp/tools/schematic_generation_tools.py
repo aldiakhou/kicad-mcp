@@ -1,7 +1,5 @@
 """Schematic generation MCP tool registration."""
 
-from __future__ import annotations
-
 from fastmcp import FastMCP
 
 from kicad_mcp.tools.design_intent_tools import register_design_intent_tools

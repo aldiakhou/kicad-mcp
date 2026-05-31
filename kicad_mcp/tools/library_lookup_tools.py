@@ -1,7 +1,5 @@
 """KiCad symbol and footprint lookup MCP tools."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from fastmcp import FastMCP

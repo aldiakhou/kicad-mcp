@@ -1,7 +1,5 @@
 """Project creation and project-state MCP tools."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from fastmcp import Context, FastMCP
