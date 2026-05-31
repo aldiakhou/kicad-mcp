@@ -17,6 +17,7 @@ def register_project_creation_tools(mcp: FastMCP) -> None:
         create_schematic: bool = True,
         create_pcb: bool = True,
         paper: str = "A4",
+        paper_size: str | None = None,
         directory: str | None = None,
         path: str | None = None,
         name: str | None = None,
@@ -24,6 +25,7 @@ def register_project_creation_tools(mcp: FastMCP) -> None:
         """Create a new KiCad project and optional schematic/PCB files."""
         resolved_dir = project_dir or directory or path
         resolved_name = project_name or name or ""
+        resolved_paper = paper_size or paper
         if not resolved_dir:
             return {
                 "success": False,
@@ -35,7 +37,7 @@ def register_project_creation_tools(mcp: FastMCP) -> None:
             resolved_name,
             create_schematic,
             create_pcb,
-            paper,
+            resolved_paper,
         )
 
     @mcp.tool()

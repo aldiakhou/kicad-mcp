@@ -148,6 +148,24 @@ class TestParseSexprNetlist:
         netlist = _parse_sexpr_netlist(content)
         assert NetlistEntry("U1", "NRST") in netlist.nets["RESET_N"]
 
+    def test_slash_separated_pinfunction_aliases(self):
+        """Dual-role KiCad pin functions expose each role as an alias."""
+        content = '''
+        (export (version "E")
+          (nets
+            (net (code 1) (name "I2C_SCL")
+              (node (ref "U2") (pin "23") (pinfunction "SCL/SCLK"))
+            )
+            (net (code 2) (name "I2C_SDA")
+              (node (ref "U2") (pin "24") (pinfunction "SDA/SDI"))
+            )
+          )
+        )
+        '''
+        netlist = _parse_sexpr_netlist(content)
+        assert NetlistEntry("U2", "SCL") in netlist.nets["I2C_SCL"]
+        assert NetlistEntry("U2", "SDA") in netlist.nets["I2C_SDA"]
+
     def test_empty_content(self):
         """Empty content produces empty netlist."""
         netlist = _parse_sexpr_netlist("")

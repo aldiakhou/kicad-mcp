@@ -7,12 +7,53 @@ from kicad_mcp.server import create_server
 from kicad_mcp.tools.export_tools import register_export_tools
 from kicad_mcp.tools.netlist_tools import register_netlist_tools
 from kicad_mcp.tools.pattern_tools import register_pattern_tools
+from kicad_mcp.tools.project_creation_tools import register_project_creation_tools
 
 
 async def _tools_from(registrar):
     mcp = FastMCP("tool-wrapper-test")
     registrar(mcp)
     return {tool.name: tool for tool in await mcp.list_tools()}
+
+
+@pytest.mark.asyncio
+async def test_create_kicad_project_accepts_paper_size_alias(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    def fake_create_project(
+        project_dir: str,
+        project_name: str,
+        create_schematic: bool,
+        create_pcb: bool,
+        paper: str,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "project_dir": project_dir,
+                "project_name": project_name,
+                "create_schematic": create_schematic,
+                "create_pcb": create_pcb,
+                "paper": paper,
+            }
+        )
+        return {"success": True, "project_path": "demo.kicad_pro"}
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.project_creation_tools.ct._create_kicad_project",
+        fake_create_project,
+    )
+    tools = await _tools_from(register_project_creation_tools)
+
+    result = tools["create_kicad_project"].fn(
+        directory="C:/tmp",
+        name="demo",
+        paper_size="A3",
+    )
+
+    assert result["success"] is True
+    assert captured["paper"] == "A3"
 
 
 @pytest.mark.asyncio

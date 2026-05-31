@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 from typing import Any
 
@@ -233,6 +234,10 @@ def apply_design_intent_netlist_first(
                     f"found {generated_symbol_count}"
                 )
                 result.stage = "persistence_verification_failed"
+                result.generated_schematic_artifacts = _copy_generated_schematics_to_artifacts(
+                    tx.list_generated_schematics(),
+                    artifact_dir,
+                )
                 tx.rollback()
                 result.rolled_back = True
                 return result.to_dict()
@@ -362,6 +367,10 @@ def apply_design_intent_netlist_first(
                 result.stage = "visual_lint_failed"
 
             if not should_commit:
+                result.generated_schematic_artifacts = _copy_generated_schematics_to_artifacts(
+                    tx.list_generated_schematics(),
+                    artifact_dir,
+                )
                 tx.rollback()
                 result.success = False
                 result.changed = False
@@ -450,6 +459,23 @@ def _count_symbols_in_project(project_path: str) -> int:
             if filename.endswith(".kicad_sch")
         ]
     )
+
+
+def _copy_generated_schematics_to_artifacts(paths: list[str], artifact_dir: str) -> list[str]:
+    """Preserve failed generated schematics for rollback/debug inspection."""
+    if not paths:
+        return []
+    dest_dir = os.path.join(artifact_dir, "failed_schematics")
+    os.makedirs(dest_dir, exist_ok=True)
+    copied: list[str] = []
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        name = os.path.basename(path)
+        dest = os.path.join(dest_dir, name)
+        shutil.copy2(path, dest)
+        copied.append(dest)
+    return copied
 
 
 def _count_symbols_in_paths(paths: list[str]) -> int:

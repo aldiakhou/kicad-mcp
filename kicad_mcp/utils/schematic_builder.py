@@ -909,7 +909,7 @@ def _library_pin(
     x = -7.62 if left_side else 7.62
     pin_pitch = 7.62 if total >= 8 else 5.08
     y = _snap((local_index - max(total / 4, 1)) * -pin_pitch)
-    angle = 180 if left_side else 0
+    angle = 0 if left_side else 180
     items: list[Any] = [
         SExprAtom("pin"),
         SExprAtom(_normalize_pin_type(pin_type)),

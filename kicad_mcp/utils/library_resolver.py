@@ -225,6 +225,21 @@ def symbol_footprint_suggestions(lib_id: str, max_results: int = 5) -> list[dict
 
 def resolve_symbol(lib_id: str) -> dict[str, Any]:
     """Resolve a KiCad symbol by full lib_id, for example Device:R."""
+    cached = _resolve_symbol_source(lib_id)
+    return {
+        "success": True,
+        "lib_id": cached["lib_id"],
+        "library": cached["library"],
+        "symbol": cached["symbol"],
+        "path": cached["path"],
+        "node": parse_s_expression(cached["source"]),
+        "source": cached["source"],
+    }
+
+
+@lru_cache(maxsize=1024)
+def _resolve_symbol_source(lib_id: str) -> dict[str, str]:
+    """Resolve a symbol once and cache its serialized embedded source."""
     library_name, symbol_name = _split_library_id(lib_id)
     library_file = _find_symbol_library(library_name)
     if library_file is None:
@@ -236,12 +251,10 @@ def resolve_symbol(lib_id: str) -> dict[str, Any]:
             embedded = deepcopy(symbol)
             embedded.items[1] = SExprAtom(lib_id, quoted=True)
             return {
-                "success": True,
                 "lib_id": lib_id,
                 "library": library_name,
                 "symbol": symbol_name,
                 "path": str(library_file),
-                "node": embedded,
                 "source": serialize_s_expression(embedded),
             }
     raise KiCadLibraryError(f"Symbol not found: {lib_id}")

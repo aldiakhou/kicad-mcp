@@ -58,7 +58,7 @@ except ImportError:
 # ─── Pin coordinate constants ───────────────────────────────────────────────
 
 _PIN_GRID_MM = 2.54  # KiCad standard pin grid (100mil)
-_WIRE_STUB_LENGTH_MM = 10.0  # Length of wire from pin to label
+_WIRE_STUB_LENGTH_MM = 2.54  # Keep labels close enough to avoid shorts in dense sheets.
 _SYMBOL_HALF_WIDTH_MM = 7.62  # Estimated half-width of symbol body (fallback only)
 
 
@@ -144,10 +144,13 @@ def _pin_selector_aliases(pin_name: str, pin_number: str = "") -> set[str]:
             .replace("}", "")
             .replace("{", "")
             .replace("~", "")
-            .replace("/", "")
         )
         if stripped:
             aliases.add(stripped)
+            if "/" in stripped:
+                aliases.update(part for part in stripped.split("/") if part)
+        if "/" in candidate:
+            aliases.update(part for part in candidate.split("/") if part)
     return {alias for alias in aliases if alias}
 
 
@@ -191,6 +194,11 @@ def _compute_label_position_from_stub_angle(
     label_x = pin_x + math.cos(rad) * _WIRE_STUB_LENGTH_MM
     label_y = pin_y + math.sin(rad) * _WIRE_STUB_LENGTH_MM
     return (label_x, label_y)
+
+
+def _label_angle_from_stub(stub_angle: float) -> float:
+    """Orient a KiCad label so its anchor stays on the wire stub endpoint."""
+    return float(round(stub_angle / 90.0) * 90) % 360.0
 
 
 # ─── Fallback pin coordinate estimation ─────────────────────────────────────
@@ -519,6 +527,7 @@ class SchematicWriter:
                         label_x, label_y = _compute_label_position_from_stub_angle(
                             pin_x, pin_y, stub_angle
                         )
+                        label_angle = _label_angle_from_stub(stub_angle)
                         # Add wire from pin to label
                         self._add_wire_kiutils(sch, pin_x, pin_y, label_x, label_y)
 
@@ -528,13 +537,13 @@ class SchematicWriter:
                         if is_global:
                             label = GlobalLabel()
                             label.text = ep.net
-                            label.position = Position(X=label_x, Y=label_y, angle=0)
+                            label.position = Position(X=label_x, Y=label_y, angle=label_angle)
                             label.uuid = str(uuid.uuid4())
                             sch.globalLabels.append(label)
                         else:
                             label = LocalLabel()
                             label.text = ep.net
-                            label.position = Position(X=label_x, Y=label_y, angle=0)
+                            label.position = Position(X=label_x, Y=label_y, angle=label_angle)
                             label.uuid = str(uuid.uuid4())
                             sch.labels.append(label)
                 else:

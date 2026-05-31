@@ -812,7 +812,10 @@ def _transform_pin(pin: dict[str, Any], origin_x: float, origin_y: float, angle:
     y = -local["x"] * math.sin(radians) - local["y"] * math.cos(radians) + origin_y
     transformed = dict(pin)
     connection_point = {"x": _snap(x), "y": _snap(y)}
-    stub_angle = (local.get("angle", 0.0) - angle) % 360
+    # KiCad library pin angles describe the pin line from the electrical
+    # connection point toward the symbol body.  Net-label stubs must leave the
+    # body, and the library Y axis is inverted relative to sheet coordinates.
+    stub_angle = (180.0 - float(local.get("angle", 0.0)) - angle) % 360
     recommended_label_position = {
         "x": _snap(connection_point["x"] + math.cos(math.radians(stub_angle)) * 5.08),
         "y": _snap(connection_point["y"] + math.sin(math.radians(stub_angle)) * 5.08),

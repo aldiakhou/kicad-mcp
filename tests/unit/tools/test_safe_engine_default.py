@@ -74,7 +74,6 @@ async def test_engine_status_tool_reports_required_runtime():
 
 def test_preview_returns_ready_to_apply_false_on_blocking_generation_issue(monkeypatch):
     canonical = SimpleNamespace(parts=[], endpoints=[])
-    compile_result = SimpleNamespace(success=True, net_count=1)
     sheet_plan = SimpleNamespace(sheets={"root": []})
     issue = SimpleNamespace(
         type="unplaced_symbol",
@@ -93,9 +92,7 @@ def test_preview_returns_ready_to_apply_false_on_blocking_generation_issue(monke
     ), patch(
         "kicad_mcp.schematic_engine.visual_lint.visual_lint",
         return_value=lint_result,
-    ), patch("kicad_mcp.schematic_engine.skidl_compiler.SkidlCompiler") as mock_compiler:
-        mock_compiler.return_value.compile.return_value = compile_result
-
+    ):
         result = creation_tools._preview_design_intent_netlist_first(
             "/tmp/test.kicad_pro",
             {"parts": []},

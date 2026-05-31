@@ -192,6 +192,61 @@ class TestResolveRealPinPositions:
             vdd_positions = result["VDD"]
             assert vdd_positions[0] != vdd_positions[1]
 
+    def test_pin_stub_angles_leave_symbol_body(self):
+        """Horizontal KiCad pin angles are converted to outward stub directions."""
+        mock_pins = [
+            {
+                "number": "1",
+                "name": "LEFT",
+                "pinfunction": "LEFT_1",
+                "pintype": "passive",
+                "shape": "line",
+                "hidden": False,
+                "local_position": {"x": -5.08, "y": 0.0, "angle": 0.0},
+            },
+            {
+                "number": "2",
+                "name": "RIGHT",
+                "pinfunction": "RIGHT_2",
+                "pintype": "passive",
+                "shape": "line",
+                "hidden": False,
+                "local_position": {"x": 5.08, "y": 0.0, "angle": 180.0},
+            },
+            {
+                "number": "3",
+                "name": "TOP",
+                "pinfunction": "TOP_3",
+                "pintype": "passive",
+                "shape": "line",
+                "hidden": False,
+                "local_position": {"x": 0.0, "y": 5.08, "angle": 270.0},
+            },
+            {
+                "number": "4",
+                "name": "BOTTOM",
+                "pinfunction": "BOTTOM_4",
+                "pintype": "passive",
+                "shape": "line",
+                "hidden": False,
+                "local_position": {"x": 0.0, "y": -5.08, "angle": 90.0},
+            },
+        ]
+
+        with patch(
+            "kicad_mcp.utils.schematic_pins._resolve_symbol_pins",
+            return_value=mock_pins,
+        ):
+            result = _resolve_real_pin_positions(
+                self._make_part(),
+                self._make_placement(x=100.0, y=80.0, angle=0.0),
+            )
+
+        assert result["1"][0][2] == pytest.approx(180.0)
+        assert result["2"][0][2] == pytest.approx(0.0)
+        assert result["3"][0][2] == pytest.approx(270.0)
+        assert result["4"][0][2] == pytest.approx(90.0)
+
 
 # ─── Test _compute_label_position_from_stub_angle ────────────────────────────
 

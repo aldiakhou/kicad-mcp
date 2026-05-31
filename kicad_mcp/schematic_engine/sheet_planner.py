@@ -27,10 +27,10 @@ SHEET_MARGIN_X = 25.0
 SHEET_MARGIN_Y = 25.0
 BLOCK_GAP_X = 50.0
 BLOCK_GAP_Y = 40.0
-SYMBOL_GAP_X = 30.0
-SYMBOL_GAP_Y = 25.0
-DECOUPLING_OFFSET_X = 10.0
-DECOUPLING_OFFSET_Y = 15.0
+SYMBOL_GAP_X = 55.0
+SYMBOL_GAP_Y = 38.0
+DECOUPLING_OFFSET_X = 24.0
+DECOUPLING_OFFSET_Y = 22.0
 
 # Paper sizes in mm (width, height)
 PAPER_SIZES: dict[str, tuple[float, float]] = {
@@ -218,9 +218,9 @@ def _find_cross_sheet_nets(
             if ep.ref in ref_set:
                 net_sheets.setdefault(ep.net, set()).add(sheet_name)
 
-    # Also include power rails as cross-sheet
     cross_sheet = {net for net, sheet_set in net_sheets.items() if len(sheet_set) > 1}
-    cross_sheet.update(canonical.rails)
+    if len(sheets) > 1:
+        cross_sheet.update(canonical.rails)
 
     return cross_sheet
 
@@ -425,7 +425,7 @@ def _place_support_near_targets(
 
             # Place near target with offset
             offset_x = DECOUPLING_OFFSET_X * (1 + offset_idx % 3)
-            offset_y = DECOUPLING_OFFSET_Y + (offset_idx // 3) * 10.0
+            offset_y = DECOUPLING_OFFSET_Y + (offset_idx // 3) * 14.0
 
             placements[ref] = PlacementInfo(
                 ref=ref,

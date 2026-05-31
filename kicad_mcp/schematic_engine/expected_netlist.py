@@ -254,8 +254,11 @@ def _pinfunction_aliases(pinfunction: str, pin_number: str) -> set[str]:
             .replace("}", "")
             .replace("{", "")
             .replace("~", "")
-            .replace("/", "")
         )
         if stripped:
             aliases.add(stripped)
+            if "/" in stripped:
+                aliases.update(part for part in stripped.split("/") if part)
+        if "/" in alias:
+            aliases.update(part for part in alias.split("/") if part)
     return aliases

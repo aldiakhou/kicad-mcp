@@ -35,6 +35,7 @@ class EngineResult:
     kicad_netlist_path: str | None = None
     svg_dir: str | None = None
     erc_path: str | None = None
+    generated_schematic_artifacts: list[str] = field(default_factory=list)
 
     # Counts
     part_count: int = 0
@@ -84,6 +85,8 @@ class EngineResult:
             result["svg_dir"] = self.svg_dir
         if self.erc_path:
             result["erc_path"] = self.erc_path
+        if self.generated_schematic_artifacts:
+            result["generated_schematic_artifacts"] = self.generated_schematic_artifacts
         if self.part_count:
             result["part_count"] = self.part_count
             result["net_count"] = self.net_count

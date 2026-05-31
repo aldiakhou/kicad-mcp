@@ -78,6 +78,19 @@ class TestSheetPlanner:
             assert abs(placement.x % GRID_MM) < 0.01 or abs(placement.x % GRID_MM - GRID_MM) < 0.01
             assert abs(placement.y % GRID_MM) < 0.01 or abs(placement.y % GRID_MM - GRID_MM) < 0.01
 
+    def test_horizontal_flow_keeps_medium_designs_spaced_apart(self):
+        """Dense single-sheet designs need enough clearance for label stubs."""
+        parts = [CircuitPart(ref=f"U{i}", lib_id="Device:R", value="10k") for i in range(1, 13)]
+        canonical = self._make_canonical(parts)
+
+        plan = plan_sheets(canonical, paper_size="A3")
+        first = plan.placements["U1"]
+        second = plan.placements["U2"]
+        first_next_row = plan.placements["U7"]
+
+        assert second.x - first.x >= 50.0
+        assert first_next_row.y - first.y >= 35.0
+
     def test_cross_sheet_nets_detected(self):
         """Nets spanning multiple sheets are identified as cross-sheet."""
         parts = [
@@ -97,12 +110,25 @@ class TestSheetPlanner:
         if len(plan.sheets) > 1:
             assert "I2C_SCL" in plan.cross_sheet_nets
 
-    def test_power_rails_are_cross_sheet(self):
-        """Power rails are always marked as cross-sheet."""
+    def test_power_rails_stay_local_on_single_sheet(self):
+        """Single-sheet designs do not need global rail labels."""
         parts = [CircuitPart(ref="U1", lib_id="Device:R", value="10k")]
         canonical = self._make_canonical(parts, rails={"+3V3", "GND"})
 
         plan = plan_sheets(canonical)
+        assert "+3V3" not in plan.cross_sheet_nets
+        assert "GND" not in plan.cross_sheet_nets
+
+    def test_power_rails_are_cross_sheet_on_multi_sheet(self):
+        """Power rails are global only when the planner creates multiple sheets."""
+        parts = [
+            CircuitPart(ref="U1", lib_id="Device:R", value="10k", block="power"),
+            CircuitPart(ref="U2", lib_id="Device:R", value="10k", block="sensors"),
+        ]
+        blocks = {"power": ["U1"], "sensors": ["U2"]}
+        canonical = self._make_canonical(parts, blocks=blocks, rails={"+3V3", "GND"})
+
+        plan = plan_sheets(canonical, max_parts_per_sheet=1)
         assert "+3V3" in plan.cross_sheet_nets
         assert "GND" in plan.cross_sheet_nets
 

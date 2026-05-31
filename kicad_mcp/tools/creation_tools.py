@@ -419,15 +419,10 @@ def _preview_design_intent_netlist_first(
     *,
     visual_style: str = "professional_blocks",
 ) -> dict[str, Any]:
-    """Preview design intent through the netlist-first pipeline without writing.
-
-    Runs: normalize → resolve symbols → SKiDL compile → sheet planning → visual lint
-    Returns a summary without writing any schematic files.
-    """
+    """Fast preview of intent structure and layout before authoritative apply."""
     from kicad_mcp.schematic_engine.intent_state import prepare_intent_for_action
     from kicad_mcp.schematic_engine.normalize import normalize_design_intent
     from kicad_mcp.schematic_engine.sheet_planner import plan_sheets
-    from kicad_mcp.schematic_engine.skidl_compiler import SkidlCompiler
     from kicad_mcp.schematic_engine.visual_lint import visual_lint
 
     try:
@@ -440,24 +435,6 @@ def _preview_design_intent_netlist_first(
             "stage": "normalize_failed",
             "error": f"Intent normalization failed: {e}",
             "changed": False,
-        }
-
-    # Compile to verify circuit validity
-    project_dir = os.path.dirname(os.path.abspath(project_path))
-    artifact_dir = os.path.join(project_dir, ".kicad_mcp", "engine_artifacts", "preview")
-    os.makedirs(artifact_dir, exist_ok=True)
-
-    compiler = SkidlCompiler(artifact_dir=artifact_dir)
-    compile_result = compiler.compile(canonical)
-
-    if not compile_result.success:
-        return {
-            "success": False,
-            "tool": "schematic_preview_design_intent",
-            "stage": "compile_failed",
-            "error": compile_result.error or "SKiDL compilation failed",
-            "changed": False,
-            "part_count": len(canonical.parts),
         }
 
     # Plan sheets
@@ -492,11 +469,15 @@ def _preview_design_intent_netlist_first(
         "issues": issues,
         "summary": {
             "generated_part_count": len(canonical.parts),
-            "net_count": compile_result.net_count,
+            "net_count": len({ep.net for ep in canonical.endpoints}),
             "sheet_count": len(sheet_plan.sheets),
             "sheets": list(sheet_plan.sheets.keys()),
             "visual_lint_blocking": lint_result.blocking_count,
             "visual_lint_warnings": lint_result.warning_count,
+        },
+        "verification": {
+            "skidl_compile": "deferred_to_apply",
+            "kicad_cli": "deferred_to_apply",
         },
         "visual_lint": {
             "blocking_count": lint_result.blocking_count,
@@ -524,6 +505,7 @@ def _apply_via_netlist_first_engine(
     result = apply_design_intent_netlist_first(
         project_path=project_path,
         intent=intent,
+        export_svg=False,
     )
     result["tool"] = "schematic_apply_design_intent"
     return result
