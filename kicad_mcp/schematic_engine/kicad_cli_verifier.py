@@ -67,11 +67,9 @@ class KicadCliVerifier:
         Returns:
             VerifierResult with all verification outputs.
         """
-        from kicad_mcp.utils.secure_subprocess import get_subprocess_runner
-
-        runner = get_subprocess_runner()
         output_dir = self._get_output_dir(schematic_path)
         os.makedirs(output_dir, exist_ok=True)
+        runner = _make_verifier_subprocess_runner(schematic_path, output_dir)
 
         result = VerifierResult(success=True)
 
@@ -236,3 +234,15 @@ class KicadCliVerifier:
             return self.output_dir
         project_dir = os.path.dirname(schematic_path)
         return os.path.join(project_dir, ".kicad_mcp", "verification")
+
+
+def _make_verifier_subprocess_runner(schematic_path: str, output_dir: str) -> Any:
+    """Create a runner trusted only for this generated schematic and artifacts."""
+    from kicad_mcp.utils.path_validator import PathValidator
+    from kicad_mcp.utils.secure_subprocess import SecureSubprocessRunner
+
+    trusted_roots = {
+        os.path.dirname(os.path.abspath(schematic_path)),
+        os.path.abspath(output_dir),
+    }
+    return SecureSubprocessRunner(path_validator=PathValidator(trusted_roots=trusted_roots))

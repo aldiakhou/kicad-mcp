@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pytest
 
@@ -22,7 +23,7 @@ def _medium_ic_intent() -> dict:
         "parts": [
             {
                 "ref": "U1",
-                "lib_id": "MCU_ST:STM32G431KBTx",
+                "lib_id": "MCU_ST_STM32G4:STM32G431KBTx",
                 "value": "STM32G431KBTx",
                 "footprint": "Package_QFP:LQFP-32_7x7mm_P0.8mm",
                 "block": "mcu",
@@ -75,10 +76,10 @@ def _medium_ic_intent() -> dict:
                 ],
             },
             {
-                "net": "NRST",
+                "net": "GPIO_TEST",
                 "endpoints": [
                     {"ref": "J1", "pin": "5"},
-                    {"ref": "U1", "pin": "NRST"},
+                    {"ref": "U1", "pin": "PB8"},
                     {"ref": "R1", "pin": "2"},
                 ],
             },
@@ -128,5 +129,5 @@ async def test_medium_ic_schematic_end_to_end(tmp_path: Path):
     schematic_path = Path(project["created_files"]["schematic"])
     schematic_text = schematic_path.read_text(encoding="utf-8")
     for ref in ("U1", "J1", "R1", "C1", "C2"):
-        assert f'property "Reference" "{ref}"' in schematic_text
+        assert re.search(rf'\(property\s+"Reference"\s+"{ref}"', schematic_text)
     assert "C_U1" not in schematic_text

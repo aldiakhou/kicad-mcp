@@ -16,6 +16,7 @@ same geometry pipeline as the rest of the MCP tools. If library resolution fails
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 import math
 import os
@@ -250,6 +251,7 @@ class SchematicWriter:
     ) -> dict[str, Any]:
         """Write schematics using KiUtils library."""
         try:
+            from kiutils.items.schitems import SymbolInstance
             from kiutils.schematic import Schematic
 
             generated_files: list[str] = []
@@ -265,10 +267,15 @@ class SchematicWriter:
 
                 # Create a new schematic
                 sch = Schematic.create_new()
+                sch.version = "20230121"
+                sch.generator = '"kicad_mcp"'
+                sch.uuid = str(uuid.uuid4())
 
                 # Set paper size
+                from kiutils.items.common import PageSettings
+
                 paper_size = sheet_plan.sheet_sizes.get(sheet_name, "A3")
-                sch.paper = paper_size
+                sch.paper = PageSettings(paperSize=paper_size)
 
                 # Add symbols for each part in this sheet
                 for ref in refs:
@@ -283,8 +290,23 @@ class SchematicWriter:
                 # Add no-connect markers
                 self._add_no_connects_kiutils(sch, canonical, refs, sheet_plan)
 
+                # KiCad CLI netlist export relies on symbol instance metadata.
+                for ref in refs:
+                    part = canonical.part_by_ref(ref)
+                    if part:
+                        sch.symbolInstances.append(
+                            SymbolInstance(
+                                path="/",
+                                reference=part.ref,
+                                unit=1,
+                                value=part.value,
+                                footprint=part.footprint or "",
+                            )
+                        )
+
                 # Write schematic
                 sch.to_file(filepath)
+                _embed_required_lib_symbols(filepath, canonical, refs)
                 generated_files.append(filename)
 
             # Write root sheet with hierarchical sheet references
@@ -293,7 +315,12 @@ class SchematicWriter:
                     self.output_dir, f"{self.project_name}.kicad_sch"
                 )
                 root_sch = Schematic.create_new()
-                root_sch.paper = "A3"
+                root_sch.version = "20230121"
+                root_sch.generator = '"kicad_mcp"'
+                root_sch.uuid = str(uuid.uuid4())
+                from kiutils.items.common import PageSettings
+
+                root_sch.paper = PageSettings(paperSize="A3")
                 self._add_hierarchical_sheets_kiutils(root_sch, sheet_plan)
                 root_sch.to_file(root_path)
                 generated_files.insert(0, f"{self.project_name}.kicad_sch")
@@ -330,27 +357,32 @@ class SchematicWriter:
             symbol.libId = part.lib_id
             symbol.entryName = part.lib_id.split(":")[-1] if ":" in part.lib_id else part.lib_id
             symbol.position = Position(X=placement.x, Y=placement.y, angle=placement.angle)
+            symbol.unit = 1
+            symbol.inBom = True
+            symbol.onBoard = True
             symbol.uuid = str(uuid.uuid4())
 
             # Add properties
-            ref_prop = Property(key="Reference", value=part.ref)
-            ref_prop.position = Position(X=placement.x, Y=placement.y - 2.54)
+            ref_prop = Property(key="Reference", value=part.ref, id=0)
+            ref_prop.position = Position(X=placement.x, Y=placement.y - 2.54, angle=0)
             symbol.properties.append(ref_prop)
 
-            val_prop = Property(key="Value", value=part.value)
-            val_prop.position = Position(X=placement.x, Y=placement.y + 2.54)
+            val_prop = Property(key="Value", value=part.value, id=1)
+            val_prop.position = Position(X=placement.x, Y=placement.y + 2.54, angle=0)
             symbol.properties.append(val_prop)
 
             if part.footprint:
-                fp_prop = Property(key="Footprint", value=part.footprint)
-                fp_prop.position = Position(X=placement.x, Y=placement.y + 5.08)
+                fp_prop = Property(key="Footprint", value=part.footprint, id=2)
+                fp_prop.position = Position(X=placement.x, Y=placement.y + 5.08, angle=0)
                 symbol.properties.append(fp_prop)
 
             # Add MCP metadata properties
+            next_property_id = 3
             for key, value in part.properties.items():
                 if key.startswith("KICAD_MCP_"):
-                    meta_prop = Property(key=key, value=value)
-                    meta_prop.position = Position(X=placement.x, Y=placement.y)
+                    meta_prop = Property(key=key, value=value, id=next_property_id)
+                    next_property_id += 1
+                    meta_prop.position = Position(X=placement.x, Y=placement.y, angle=0)
                     symbol.properties.append(meta_prop)
 
             sch.schematicSymbols.append(symbol)
@@ -377,7 +409,7 @@ class SchematicWriter:
         """
         try:
             from kiutils.items.common import Position
-            from kiutils.items.schitems import GlobalLabel, NetLabel
+            from kiutils.items.schitems import GlobalLabel, LocalLabel
 
             ref_set = set(refs)
 
@@ -431,15 +463,15 @@ class SchematicWriter:
                         if is_global:
                             label = GlobalLabel()
                             label.text = ep.net
-                            label.position = Position(X=label_x, Y=label_y)
+                            label.position = Position(X=label_x, Y=label_y, angle=0)
                             label.uuid = str(uuid.uuid4())
                             sch.globalLabels.append(label)
                         else:
-                            label = NetLabel()
+                            label = LocalLabel()
                             label.text = ep.net
-                            label.position = Position(X=label_x, Y=label_y)
+                            label.position = Position(X=label_x, Y=label_y, angle=0)
                             label.uuid = str(uuid.uuid4())
-                            sch.netLabels.append(label)
+                            sch.labels.append(label)
                 else:
                     # Fallback: estimate pin position when library unavailable
                     logger.debug(
@@ -457,15 +489,15 @@ class SchematicWriter:
                     if is_global:
                         label = GlobalLabel()
                         label.text = ep.net
-                        label.position = Position(X=label_x, Y=label_y)
+                        label.position = Position(X=label_x, Y=label_y, angle=0)
                         label.uuid = str(uuid.uuid4())
                         sch.globalLabels.append(label)
                     else:
-                        label = NetLabel()
+                        label = LocalLabel()
                         label.text = ep.net
-                        label.position = Position(X=label_x, Y=label_y)
+                        label.position = Position(X=label_x, Y=label_y, angle=0)
                         label.uuid = str(uuid.uuid4())
-                        sch.netLabels.append(label)
+                        sch.labels.append(label)
         except Exception as e:
             logger.warning("Failed to add labels via KiUtils: %s", e)
 
@@ -479,15 +511,15 @@ class SchematicWriter:
     ) -> None:
         """Add a wire segment between two points in a KiUtils schematic."""
         try:
-            from kiutils.items.common import Position
+            from kiutils.items.common import Position, Stroke
             from kiutils.items.schitems import Connection
 
             wire = Connection()
             wire.type = "wire"
-            wire.startPoint = Position(X=x1, Y=y1)
-            wire.endPoint = Position(X=x2, Y=y2)
+            wire.points = [Position(X=x1, Y=y1), Position(X=x2, Y=y2)]
+            wire.stroke = Stroke(width=0.0, type="default")
             wire.uuid = str(uuid.uuid4())
-            sch.connections.append(wire)
+            sch.graphicalItems.append(wire)
         except Exception as e:
             logger.warning("Failed to add wire via KiUtils: %s", e)
 
@@ -506,7 +538,7 @@ class SchematicWriter:
         """
         try:
             from kiutils.items.common import Position
-            from kiutils.schematic import NoConnect
+            from kiutils.items.schitems import NoConnect
 
             ref_set = set(refs)
 
@@ -536,7 +568,7 @@ class SchematicWriter:
                     nc_y = placement.y
 
                 no_connect = NoConnect()
-                no_connect.position = Position(X=nc_x, Y=nc_y)
+                no_connect.position = Position(X=nc_x, Y=nc_y, angle=0)
                 no_connect.uuid = str(uuid.uuid4())
                 sch.noConnects.append(no_connect)
         except Exception as e:
@@ -549,7 +581,7 @@ class SchematicWriter:
     ) -> None:
         """Add hierarchical sheet symbols to root schematic."""
         try:
-            from kiutils.items.common import Position
+            from kiutils.items.common import Position, Property
             from kiutils.items.schitems import HierarchicalSheet
 
             x_offset = 50.0
@@ -563,14 +595,17 @@ class SchematicWriter:
                     continue
 
                 sheet = HierarchicalSheet()
-                sheet.fileName = f"{sheet_name}.kicad_sch"
-                sheet.sheetName = sheet_name
+                sheet.fileName = Property(key="Sheetfile", value=f"{sheet_name}.kicad_sch")
+                sheet.sheetName = Property(key="Sheetname", value=sheet_name)
                 sheet.position = Position(
                     X=x_offset + (i % 3) * (sheet_width + gap),
                     Y=y_offset + (i // 3) * (sheet_height + gap),
+                    angle=0,
                 )
+                sheet.width = sheet_width
+                sheet.height = sheet_height
                 sheet.uuid = str(uuid.uuid4())
-                sch.hierarchicalSheets.append(sheet)
+                sch.sheets.append(sheet)
         except Exception as e:
             logger.warning("Failed to add hierarchical sheets: %s", e)
 
@@ -589,3 +624,99 @@ class SchematicWriter:
             )
             with open(pro_path, "w", encoding="utf-8") as f:
                 f.write(content)
+
+
+def _embed_required_lib_symbols(
+    schematic_path: str,
+    canonical: CanonicalCircuit,
+    refs: list[str],
+) -> None:
+    """Embed library symbol definitions required by KiCad CLI netlist export."""
+    from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
+
+    schematic = KiCadSchematic.from_file(schematic_path)
+    for ref in refs:
+        part = canonical.part_by_ref(ref)
+        if not part:
+            continue
+        for lib_id, symbol_node in _resolve_symbol_embed_chain(part.lib_id):
+            schematic.embed_lib_symbol(lib_id, deepcopy(symbol_node))
+    with open(schematic_path, "w", encoding="utf-8") as f:
+        f.write(schematic.to_text())
+
+
+def _resolve_symbol_embed_chain(lib_id: str) -> list[tuple[str, Any]]:
+    """Return parent lib symbols followed by the requested symbol."""
+    from kicad_mcp.utils.library_resolver import resolve_symbol
+
+    resolved = resolve_symbol(lib_id)
+    parent = _symbol_extends(resolved["node"])
+    if parent and not _node_has_pin(resolved["node"]):
+        parent_node = _nearest_parent_with_pins(resolved["library"], parent)
+        if parent_node is not None:
+            flattened = deepcopy(parent_node)
+            _rename_embedded_symbol(flattened, lib_id)
+            return [(lib_id, flattened)]
+
+    chain: list[tuple[str, Any]] = [(lib_id, resolved["node"])]
+    library = resolved["library"]
+    seen = {lib_id}
+    while parent:
+        parent_lib_id = f"{library}:{parent}"
+        if parent_lib_id in seen:
+            break
+        seen.add(parent_lib_id)
+        parent_resolved = resolve_symbol(parent_lib_id)
+        chain.insert(0, (parent_lib_id, parent_resolved["node"]))
+        parent = _symbol_extends(parent_resolved["node"])
+    return chain
+
+
+def _nearest_parent_with_pins(library: str, parent: str) -> Any | None:
+    from kicad_mcp.utils.library_resolver import resolve_symbol
+
+    seen: set[str] = set()
+    while parent:
+        parent_lib_id = f"{library}:{parent}"
+        if parent_lib_id in seen:
+            return None
+        seen.add(parent_lib_id)
+        resolved = resolve_symbol(parent_lib_id)
+        if _node_has_pin(resolved["node"]):
+            return resolved["node"]
+        parent = _symbol_extends(resolved["node"]) or ""
+    return None
+
+
+def _symbol_extends(node: Any) -> str | None:
+    child = node.first_child("extends") if hasattr(node, "first_child") else None
+    if child is None or len(child.items) < 2:
+        return None
+    value = child.items[1]
+    return value.value if hasattr(value, "value") else None
+
+
+def _node_has_pin(node: Any) -> bool:
+    if hasattr(node, "head") and node.head() == "pin":
+        return True
+    if not hasattr(node, "child_lists"):
+        return False
+    return any(_node_has_pin(child) for child in node.child_lists())
+
+
+def _rename_embedded_symbol(node: Any, lib_id: str) -> None:
+    from kicad_mcp.utils.kicad_s_expr import SExprAtom
+
+    if not hasattr(node, "head") or node.head() != "symbol" or len(node.items) < 2:
+        return
+    old_name = node.items[1].value if hasattr(node.items[1], "value") else ""
+    old_part = old_name.split(":", 1)[-1]
+    new_part = lib_id.split(":", 1)[-1]
+    node.items[1] = SExprAtom(lib_id, quoted=True)
+    for child in node.child_lists():
+        if child.head() == "symbol" and len(child.items) >= 2 and hasattr(child.items[1], "value"):
+            child_name = child.items[1].value
+            if child_name.startswith(old_part):
+                child.items[1] = SExprAtom(
+                    f"{new_part}{child_name[len(old_part):]}", quoted=True
+                )

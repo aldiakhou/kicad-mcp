@@ -73,6 +73,14 @@ class EngineResult:
             result["netlist_compare"] = self.netlist_compare
         if self.artifact_dir:
             result["artifact_dir"] = self.artifact_dir
+        if self.expected_netlist_path:
+            result["expected_netlist_path"] = self.expected_netlist_path
+        if self.kicad_netlist_path:
+            result["kicad_netlist_path"] = self.kicad_netlist_path
+        if self.svg_dir:
+            result["svg_dir"] = self.svg_dir
+        if self.erc_path:
+            result["erc_path"] = self.erc_path
         if self.part_count:
             result["part_count"] = self.part_count
             result["net_count"] = self.net_count

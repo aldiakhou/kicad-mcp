@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pytest
 
@@ -101,5 +102,5 @@ async def test_led_resistor_schematic_end_to_end(tmp_path: Path):
 
     schematic_path = Path(project["created_files"]["schematic"])
     schematic_text = schematic_path.read_text(encoding="utf-8")
-    assert 'property "Reference" "R1"' in schematic_text
-    assert 'property "Reference" "D1"' in schematic_text
+    assert re.search(r'\(property\s+"Reference"\s+"R1"', schematic_text)
+    assert re.search(r'\(property\s+"Reference"\s+"D1"', schematic_text)

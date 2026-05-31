@@ -192,14 +192,15 @@ def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
 
     # Find net blocks by matching balanced parentheses
     net_start_pattern = re.compile(
-        r'\(net\s+\(code\s+\d+\)\s+\(name\s+"([^"]+)"\)',
+        r'\(net\s+\(code\s+"?\d+"?\)\s+\(name\s+"([^"]+)"\)',
     )
     node_pattern = re.compile(
-        r'\(node\s+\(ref\s+"([^"]+)"\)\s+\(pin\s+"([^"]+)"\)',
+        r'\(node\s+\(ref\s+"([^"]+)"\)\s+\(pin\s+"([^"]+)"\)'
+        r'(?:\s+\(pinfunction\s+"([^"]+)"\))?',
     )
 
     for match in net_start_pattern.finditer(content):
-        net_name = match.group(1)
+        net_name = _normalize_net_name(match.group(1))
         # Extract the body after the name match until we find the matching close paren
         body_start = match.end()
 
@@ -222,8 +223,29 @@ def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
             ref = node_match.group(1)
             pin = node_match.group(2)
             entries.add(NetlistEntry(ref=ref, pin=pin))
+            pinfunction = node_match.group(3) or ""
+            for alias in _pinfunction_aliases(pinfunction, pin):
+                entries.add(NetlistEntry(ref=ref, pin=alias))
 
         if entries:
             nets[net_name] = entries
 
     return NormalizedNetlist(nets=nets)
+
+
+def _normalize_net_name(net_name: str) -> str:
+    """Normalize KiCad root-sheet local net names to design-intent net names."""
+    if net_name.startswith("/") and net_name.count("/") == 1:
+        return net_name[1:]
+    return net_name
+
+
+def _pinfunction_aliases(pinfunction: str, pin_number: str) -> set[str]:
+    """Return readable pin-name aliases KiCad stores alongside numeric pins."""
+    if not pinfunction:
+        return set()
+    aliases = {pinfunction}
+    suffix = f"_{pin_number}"
+    if pinfunction.endswith(suffix) and len(pinfunction) > len(suffix):
+        aliases.add(pinfunction[: -len(suffix)])
+    return aliases
