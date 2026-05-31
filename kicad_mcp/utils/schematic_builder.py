@@ -305,7 +305,7 @@ def build_schematic_from_spec(
             "schematic_path": schematic_path,
             "error": "mode='replace' would overwrite a non-empty schematic; pass allow_destructive_replace=True or use mode='update'",
             "recoverable": True,
-            "recommended_next_tool": "schematic_build_from_spec_v2",
+            "recommended_next_tool": "schematic_apply_design_intent",
             "recommended_next_arguments": {"project_path": project_path, "mode": "update"},
         }
     preview = preview_build_from_spec(project_path, spec)
@@ -379,7 +379,7 @@ def build_schematic_from_spec(
         }
     )
     result["tool"] = (
-        "schematic_build_from_spec_v2"
+        "schematic_apply_design_intent"
         if spec.get("source_format") == "v2"
         else "schematic_build_from_spec"
     )
@@ -1684,7 +1684,7 @@ def _missing_connection_error(
         "likely_reason": likely_reason,
         "connection": connection,
         "reason": f"Pin {ref}.{pin} could not be verified on net {net_name}",
-        "suggested_next_tool": "schematic_apply_connection_plan",
+        "suggested_next_tool": "schematic_apply_design_intent",
         "suggested_next_arguments": {"replace_existing": True},
     }
 

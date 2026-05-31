@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 import pytest
 
-import kicad_mcp.tools.creation_tools as creation_tools
 from kicad_mcp.server import create_server
 from kicad_mcp.tools import AGENT_PROFILE_TOOLS
+import kicad_mcp.tools.creation_tools as creation_tools
 
 
 @pytest.mark.asyncio
@@ -38,10 +38,10 @@ async def test_apply_design_intent_routes_to_required_engine(tmp_path: Path):
 
         mock_engine.assert_called_once()
         assert mock_engine.call_args.args[0] == str(tmp_path)
-        assert mock_engine.call_args.kwargs["strict"] is True
-        assert mock_engine.call_args.kwargs["visual_style"] == "professional_blocks"
-        assert mock_engine.call_args.kwargs["require_netlist_match"] is True
-        assert mock_engine.call_args.kwargs["require_kicad_cli_verification"] is True
+        assert mock_engine.call_args.args[1] == {
+            "parts": [{"ref": "U1", "value": "MCU", "lib_id": "MCU:TEST"}]
+        }
+        assert mock_engine.call_args.kwargs == {}
 
 
 @pytest.mark.asyncio

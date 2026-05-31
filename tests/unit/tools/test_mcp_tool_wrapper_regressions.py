@@ -1,8 +1,18 @@
 from pathlib import Path
 
+from fastmcp import FastMCP
 import pytest
 
 from kicad_mcp.server import create_server
+from kicad_mcp.tools.export_tools import register_export_tools
+from kicad_mcp.tools.netlist_tools import register_netlist_tools
+from kicad_mcp.tools.pattern_tools import register_pattern_tools
+
+
+async def _tools_from(registrar):
+    mcp = FastMCP("tool-wrapper-test")
+    registrar(mcp)
+    return {tool.name: tool for tool in await mcp.list_tools()}
 
 
 @pytest.mark.asyncio
@@ -30,8 +40,7 @@ async def test_extract_project_netlist_uses_undecorated_helper(
         },
     )
 
-    server = create_server()
-    tools = await server.get_tools()
+    tools = await _tools_from(register_netlist_tools)
 
     result = await tools["extract_project_netlist"].fn(str(project_path), None)
 
@@ -73,8 +82,7 @@ async def test_analyze_project_circuit_patterns_uses_undecorated_helper(
     ):
         monkeypatch.setattr(f"kicad_mcp.tools.pattern_tools.{name}", lambda *args: [])
 
-    server = create_server()
-    tools = await server.get_tools()
+    tools = await _tools_from(register_pattern_tools)
 
     result = await tools["analyze_project_circuit_patterns"].fn(str(project_path), None)
 
@@ -111,8 +119,7 @@ async def test_generate_project_thumbnail_uses_undecorated_helper(
         fake_thumbnail,
     )
 
-    server = create_server()
-    tools = await server.get_tools()
+    tools = await _tools_from(register_export_tools)
 
     result = await tools["generate_project_thumbnail"].fn(str(project_path), None)
 

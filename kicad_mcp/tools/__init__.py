@@ -14,7 +14,6 @@ from kicad_mcp.tools.export_tools import register_export_tools
 from kicad_mcp.tools.netlist_tools import register_netlist_tools
 from kicad_mcp.tools.pattern_tools import register_pattern_tools
 from kicad_mcp.tools.project_tools import register_project_tools
-from kicad_mcp.tools.schematic_edit_tools import register_schematic_edit_tools
 from kicad_mcp.tools.validation_tools import register_validation_tools
 
 ToolRegistrar = Callable[[FastMCP], None]
@@ -28,7 +27,6 @@ TOOL_REGISTRARS: tuple[ToolRegistrar, ...] = (
     register_netlist_tools,
     register_pattern_tools,
     register_validation_tools,
-    register_schematic_edit_tools,
     register_creation_tools,
 )
 
@@ -56,29 +54,33 @@ AGENT_PROFILE_TOOLS = {
 
 ADVANCED_PROFILE_TOOLS = {
     "create_schematic_file",
-    "schematic_add_symbol",
-    "schematic_snap_to_grid",
-    "schematic_delete_item",
-    "schematic_apply_functional_layout",
-    "schematic_apply_expanded_spec",
-    "schematic_build_from_spec_v2",
-    "schematic_apply_connection_plan",
-    "schematic_connect_pin_to_net",
-    "schematic_connect_pins",
-    "schematic_connect_pin_to_ground",
-    "schematic_connect_pin_to_power",
+    "create_pcb_file",
+    "project_completion_report",
+    "project_next_actions",
     "list_symbol_libraries",
     "list_footprint_libraries",
+    "pcb_sync_from_schematic",
+    "pcb_complete_from_schematic",
+    "pcb_sync_place_and_report",
+    "pcb_apply_functional_placement",
+    "pcb_get_ratsnest",
+    "pcb_quality_report",
 }
 
 DEBUG_PROFILE_TOOLS = {
-    "schematic_add_wire",
-    "schematic_add_label",
-    "schematic_connect_points",
-    "schematic_get_pin_map",
-    "schematic_attach_net_to_pin",
-    "schematic_preview_build_from_spec",
-    "schematic_build_from_spec",
+    "extract_schematic_netlist",
+    "extract_project_netlist",
+    "analyze_schematic_connections",
+    "find_component_connections",
+    "pcb_add_footprint",
+    "pcb_move_footprint",
+    "pcb_create_board_outline",
+    "pcb_add_track",
+    "pcb_add_via",
+    "pcb_generate_basic_layout",
+    "pcb_route_net_manhattan",
+    "pcb_route_between_pads",
+    "pcb_route_ratsnest_connection",
 }
 
 

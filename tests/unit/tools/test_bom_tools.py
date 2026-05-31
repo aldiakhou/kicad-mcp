@@ -1,10 +1,17 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from fastmcp import FastMCP
 import pytest
 
-from kicad_mcp.server import create_server
 from kicad_mcp.tools import bom_tools
+from kicad_mcp.tools.bom_tools import register_bom_tools
+
+
+async def _bom_tools():
+    mcp = FastMCP("bom-test")
+    register_bom_tools(mcp)
+    return {tool.name: tool for tool in await mcp.list_tools()}
 
 
 @pytest.mark.asyncio
@@ -39,7 +46,7 @@ async def test_export_bom_csv_does_not_retry_internal_parser_when_already_attemp
     monkeypatch.setattr(bom_tools, "export_bom_with_python", fail_internal)
     monkeypatch.setattr(bom_tools, "export_bom_with_cli", fail_cli)
 
-    tools = await create_server().get_tools()
+    tools = await _bom_tools()
     result = await tools["export_bom_csv"].fn(str(project_path), None)
 
     assert result["success"] is False
@@ -79,7 +86,7 @@ async def test_export_bom_csv_uses_internal_fallback_after_cli_failure(
     monkeypatch.setattr(bom_tools, "export_bom_with_python", succeed_internal)
     monkeypatch.setattr(bom_tools, "export_bom_with_cli", fail_cli)
 
-    tools = await create_server().get_tools()
+    tools = await _bom_tools()
     result = await tools["export_bom_csv"].fn(str(project_path), None)
 
     assert result["success"] is True

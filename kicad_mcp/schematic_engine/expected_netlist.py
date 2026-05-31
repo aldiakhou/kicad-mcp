@@ -201,7 +201,6 @@ def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
     for match in net_start_pattern.finditer(content):
         net_name = match.group(1)
         # Extract the body after the name match until we find the matching close paren
-        start_pos = match.start()
         body_start = match.end()
 
         # Count parentheses to find the end of this net block

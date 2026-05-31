@@ -56,7 +56,8 @@ class TestSchematicBuildTransaction:
     def test_rollback_does_not_modify_live(self):
         """Rollback ensures live project is untouched."""
         tmpdir, project_path = self._create_test_project()
-        original_content = open(os.path.join(tmpdir, "test_project.kicad_sch")).read()
+        with open(os.path.join(tmpdir, "test_project.kicad_sch")) as handle:
+            original_content = handle.read()
 
         with SchematicBuildTransaction(project_path) as tx:
             worktree = tx.create_worktree()
@@ -69,13 +70,15 @@ class TestSchematicBuildTransaction:
             tx.rollback()
 
         # Live project unchanged
-        current_content = open(os.path.join(tmpdir, "test_project.kicad_sch")).read()
+        with open(os.path.join(tmpdir, "test_project.kicad_sch")) as handle:
+            current_content = handle.read()
         assert current_content == original_content
 
     def test_exception_triggers_rollback(self):
         """Exceptions in context trigger automatic rollback."""
         tmpdir, project_path = self._create_test_project()
-        original_content = open(os.path.join(tmpdir, "test_project.kicad_sch")).read()
+        with open(os.path.join(tmpdir, "test_project.kicad_sch")) as handle:
+            original_content = handle.read()
 
         try:
             with SchematicBuildTransaction(project_path) as tx:
@@ -88,7 +91,8 @@ class TestSchematicBuildTransaction:
             pass
 
         # Live project unchanged
-        current_content = open(os.path.join(tmpdir, "test_project.kicad_sch")).read()
+        with open(os.path.join(tmpdir, "test_project.kicad_sch")) as handle:
+            current_content = handle.read()
         assert current_content == original_content
         assert tx.is_rolled_back
 

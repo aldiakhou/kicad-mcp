@@ -2,8 +2,6 @@
 
 Converts a CanonicalCircuit into a SKiDL circuit, runs ERC, and generates
 the expected netlist as the ground truth for verification.
-
-Requires optional dependency: skidl>=2.2.3
 """
 
 from __future__ import annotations
@@ -75,40 +73,6 @@ class SkidlCompiler:
                 "SKiDL is required. Install kicad-mcp with required dependencies."
             )
         return self._compile_with_skidl(canonical)
-
-    def _compile_fallback(self, canonical: CanonicalCircuit) -> SkidlCompileResult:
-        """Pure-Python fallback: build expected netlist from canonical endpoints.
-
-        This provides the same netlist output without SKiDL's ERC checking.
-        """
-        try:
-            nets: dict[str, set[NetlistEntry]] = defaultdict(set)
-
-            for endpoint in canonical.endpoints:
-                entry = NetlistEntry(ref=endpoint.ref, pin=endpoint.pin)
-                nets[endpoint.net].add(entry)
-
-            # Remove single-endpoint nets (these are unconnected)
-            # But keep them for verification purposes
-            expected = NormalizedNetlist(nets=dict(nets))
-
-            # Save artifacts
-            netlist_path = self._save_expected_netlist(canonical, expected)
-
-            return SkidlCompileResult(
-                success=True,
-                expected_netlist=expected,
-                expected_netlist_path=netlist_path,
-                part_count=len(canonical.parts),
-                net_count=len(expected.nets),
-                endpoint_count=len(canonical.endpoints),
-                erc_warnings=["SKiDL not installed; ERC not performed"],
-            )
-        except Exception as e:
-            return SkidlCompileResult(
-                success=False,
-                error=f"Fallback netlist compilation failed: {e}",
-            )
 
     def _compile_with_skidl(self, canonical: CanonicalCircuit) -> SkidlCompileResult:
         """Compile using SKiDL for full ERC and netlist generation."""

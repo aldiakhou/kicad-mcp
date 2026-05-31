@@ -262,254 +262,61 @@ class TestFallbackEstimation:
 # ─── Test writer integration with real pin resolution ────────────────────────
 
 
-class TestWriterIntegration:
-    """Integration tests for the writer using pin resolution."""
+class TestWriterRuntimeDependencies:
+    """Writer runtime dependency checks."""
 
     def _make_simple_circuit(self) -> tuple[CanonicalCircuit, SheetPlan]:
-        """Create a simple R-C circuit for testing."""
-        parts = [
-            CircuitPart(ref="R1", lib_id="Device:R", value="10k"),
-            CircuitPart(ref="C1", lib_id="Device:C", value="100n"),
-        ]
-        endpoints = [
-            CircuitEndpoint(ref="R1", pin="1", net="VCC"),
-            CircuitEndpoint(ref="R1", pin="2", net="NET1"),
-            CircuitEndpoint(ref="C1", pin="1", net="NET1"),
-            CircuitEndpoint(ref="C1", pin="2", net="GND"),
-        ]
-        placements = {
-            "R1": PlacementInfo(ref="R1", x=100.0, y=80.0),
-            "C1": PlacementInfo(ref="C1", x=140.0, y=80.0),
-        }
+        parts = [CircuitPart(ref="R1", lib_id="Device:R", value="10k")]
+        endpoints = [CircuitEndpoint(ref="R1", pin="1", net="NET1")]
+        placements = {"R1": PlacementInfo(ref="R1", x=100.0, y=80.0)}
         canonical = CanonicalCircuit(
             project_path="/tmp/test",
             parts=parts,
             endpoints=endpoints,
             no_connects=[],
-            blocks={"default": ["R1", "C1"]},
+            blocks={"default": ["R1"]},
         )
         sheet_plan = SheetPlan(
-            sheets={"root": ["R1", "C1"]},
+            sheets={"root": ["R1"]},
             placements=placements,
             sheet_sizes={"root": "A4"},
             cross_sheet_nets=set(),
         )
         return canonical, sheet_plan
 
-    def test_writer_uses_real_pins_when_available(self, tmp_path):
-        """Writer uses real pin coordinates when library resolution succeeds."""
+    def test_writer_fails_immediately_without_kiutils(self, tmp_path, monkeypatch):
         canonical, sheet_plan = self._make_simple_circuit()
+        monkeypatch.setattr(
+            "kicad_mcp.schematic_engine.schematic_writer._KIUTILS_AVAILABLE",
+            False,
+        )
+        monkeypatch.setattr(
+            "kicad_mcp.schematic_engine.schematic_writer._KICAD_SKIP_AVAILABLE",
+            True,
+        )
 
-        # Mock pin data for Device:R
-        mock_r_pins = [
-            {
-                "number": "1",
-                "name": "~",
-                "pinfunction": "~_1",
-                "pintype": "passive",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": 0.0, "y": 3.81, "angle": 90.0},
-            },
-            {
-                "number": "2",
-                "name": "~",
-                "pinfunction": "~_2",
-                "pintype": "passive",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": 0.0, "y": -3.81, "angle": 270.0},
-            },
-        ]
-        mock_c_pins = [
-            {
-                "number": "1",
-                "name": "~",
-                "pinfunction": "~_1",
-                "pintype": "passive",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": 0.0, "y": 2.54, "angle": 90.0},
-            },
-            {
-                "number": "2",
-                "name": "~",
-                "pinfunction": "~_2",
-                "pintype": "passive",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": 0.0, "y": -2.54, "angle": 270.0},
-            },
-        ]
+        writer = SchematicWriter(str(tmp_path), "test_project")
 
-        def mock_resolve(lib_id):
-            if "R" in lib_id:
-                return mock_r_pins
-            if "C" in lib_id:
-                return mock_c_pins
-            return []
+        with pytest.raises(RuntimeError, match="kiutils"):
+            writer.write(canonical, sheet_plan)
 
-        with patch(
-            "kicad_mcp.utils.schematic_pins._resolve_symbol_pins",
-            side_effect=mock_resolve,
-        ):
-            writer = SchematicWriter(str(tmp_path), "test_project")
-            # Use fallback writer (S-expression) since kiutils may not be installed
-            result = writer._write_fallback(canonical, sheet_plan)
-
-        assert result["success"] is True
-        assert len(result["files"]) > 0
-
-        # Read the generated schematic and verify wire positions
-        sch_path = tmp_path / "test_project.kicad_sch"
-        content = sch_path.read_text()
-
-        # Should contain wire segments
-        assert "(wire" in content
-        # Should contain labels
-        assert "VCC" in content
-        assert "NET1" in content
-        assert "GND" in content
-
-    def test_writer_falls_back_to_estimation(self, tmp_path):
-        """Writer falls back to estimation when library resolution fails."""
+    def test_writer_fails_immediately_without_kicad_skip(self, tmp_path, monkeypatch):
         canonical, sheet_plan = self._make_simple_circuit()
-
-        # Mock library resolution failure
-        with patch(
-            "kicad_mcp.utils.schematic_pins._resolve_symbol_pins",
-            side_effect=Exception("Library not found"),
-        ):
-            writer = SchematicWriter(str(tmp_path), "test_project")
-            result = writer._write_fallback(canonical, sheet_plan)
-
-        assert result["success"] is True
-        # Should still produce valid output using estimation
-        sch_path = tmp_path / "test_project.kicad_sch"
-        content = sch_path.read_text()
-        assert "(wire" in content
-        assert "VCC" in content
-
-
-# ─── Test no-connect placement at real pin positions ─────────────────────────
-
-
-class TestNoConnectPlacement:
-    """Tests for no-connect marker placement using real pin coordinates."""
-
-    def _make_circuit_with_no_connects(self):
-        """Create a circuit with no-connect pins."""
-        parts = [
-            CircuitPart(ref="U1", lib_id="Device:IC", value="IC1"),
-        ]
-        endpoints = [
-            CircuitEndpoint(ref="U1", pin="1", net="VCC"),
-            CircuitEndpoint(ref="U1", pin="2", net="DATA"),
-        ]
-        placements = {
-            "U1": PlacementInfo(ref="U1", x=100.0, y=80.0),
-        }
-        canonical = CanonicalCircuit(
-            project_path="/tmp/test",
-            parts=parts,
-            endpoints=endpoints,
-            no_connects=[("U1", "3"), ("U1", "4")],
-            blocks={"default": ["U1"]},
+        monkeypatch.setattr(
+            "kicad_mcp.schematic_engine.schematic_writer._KIUTILS_AVAILABLE",
+            True,
         )
-        sheet_plan = SheetPlan(
-            sheets={"root": ["U1"]},
-            placements=placements,
-            sheet_sizes={"root": "A4"},
-            cross_sheet_nets=set(),
+        monkeypatch.setattr(
+            "kicad_mcp.schematic_engine.schematic_writer._KICAD_SKIP_AVAILABLE",
+            False,
         )
-        return canonical, sheet_plan
 
-    def test_no_connects_placed_at_real_pin_positions(self, tmp_path):
-        """No-connect markers use real pin coordinates when available."""
-        canonical, sheet_plan = self._make_circuit_with_no_connects()
+        writer = SchematicWriter(str(tmp_path), "test_project")
 
-        mock_pins = [
-            {
-                "number": "1",
-                "name": "VCC",
-                "pinfunction": "VCC",
-                "pintype": "power_in",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": -5.08, "y": 5.08, "angle": 180.0},
-            },
-            {
-                "number": "2",
-                "name": "DATA",
-                "pinfunction": "DATA",
-                "pintype": "input",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": -5.08, "y": 0.0, "angle": 180.0},
-            },
-            {
-                "number": "3",
-                "name": "NC1",
-                "pinfunction": "NC1",
-                "pintype": "passive",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": 5.08, "y": 5.08, "angle": 0.0},
-            },
-            {
-                "number": "4",
-                "name": "NC2",
-                "pinfunction": "NC2",
-                "pintype": "passive",
-                "shape": "line",
-                "hidden": False,
-                "local_position": {"x": 5.08, "y": 0.0, "angle": 0.0},
-            },
-        ]
+        with pytest.raises(RuntimeError, match="kicad-skip"):
+            writer.write(canonical, sheet_plan)
 
-        with patch(
-            "kicad_mcp.utils.schematic_pins._resolve_symbol_pins",
-            return_value=mock_pins,
-        ):
-            writer = SchematicWriter(str(tmp_path), "test_project")
-            result = writer._write_fallback(canonical, sheet_plan)
 
-        assert result["success"] is True
-        sch_path = tmp_path / "test_project.kicad_sch"
-        content = sch_path.read_text()
-
-        # Should have no_connect markers
-        assert content.count("(no_connect") == 2
-
-        # No-connects should be at real pin positions (near 100 + 5.08 ≈ 105)
-        # not at the old fallback position (100 - 5.08 = 94.92)
-        # Exact value may differ due to grid snapping in _transform_pin
-        assert "94.92" not in content  # Not using fallback position
-        # Check that no-connect x is to the right of the symbol center (> 100)
-        import re
-
-        nc_matches = re.findall(r"\(no_connect \(at ([\d.]+) ([\d.]+)\)", content)
-        assert len(nc_matches) == 2
-        for nc_x_str, _nc_y_str in nc_matches:
-            assert float(nc_x_str) > 100.0  # Pin 3 and 4 are at +5.08 from center
-
-    def test_no_connects_fallback_when_library_unavailable(self, tmp_path):
-        """No-connect falls back to estimated position without library."""
-        canonical, sheet_plan = self._make_circuit_with_no_connects()
-
-        with patch(
-            "kicad_mcp.utils.schematic_pins._resolve_symbol_pins",
-            side_effect=Exception("Library not found"),
-        ):
-            writer = SchematicWriter(str(tmp_path), "test_project")
-            result = writer._write_fallback(canonical, sheet_plan)
-
-        assert result["success"] is True
-        sch_path = tmp_path / "test_project.kicad_sch"
-        content = sch_path.read_text()
-
-        # Should still have no_connect markers even without library
-        assert content.count("(no_connect") == 2
 
 
 # ─── Test safe tool has its pipeline helper defined ──────────────────────────
@@ -525,19 +332,13 @@ class TestSafeToolPipelineHelper:
         assert callable(_apply_via_netlist_first_engine)
 
     def test_apply_via_netlist_first_engine_signature(self):
-        """The helper accepts the expected keyword arguments."""
+        """The helper accepts only the public apply arguments."""
         import inspect
 
         from kicad_mcp.tools.creation_tools import _apply_via_netlist_first_engine
 
         sig = inspect.signature(_apply_via_netlist_first_engine)
-        params = sig.parameters
-        assert "project_path" in params
-        assert "intent" in params
-        assert "require_netlist_match" in params
-        assert "require_kicad_cli_verification" in params
-        assert "atomic" in params
-        assert "strict" in params
+        assert list(sig.parameters) == ["project_path", "intent"]
 
     def test_apply_tool_function_is_defined(self):
         """schematic_apply_design_intent is registered as an MCP tool."""
@@ -545,8 +346,8 @@ class TestSafeToolPipelineHelper:
         # Verify it exists by checking the source contains the definition.
         import inspect
 
-        import kicad_mcp.tools.creation_tools as ct
+        import kicad_mcp.tools.design_intent_tools as design_intent_tools
 
-        source = inspect.getsource(ct)
+        source = inspect.getsource(design_intent_tools)
         assert "def schematic_apply_design_intent(" in source
         assert "_apply_via_netlist_first_engine(" in source

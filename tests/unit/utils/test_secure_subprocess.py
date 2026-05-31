@@ -20,6 +20,10 @@ from kicad_mcp.utils.secure_subprocess import (
 )
 
 
+def _mock_cli_path() -> str:
+    return os.path.abspath("kicad-cli")
+
+
 def _kicad_cli_available():
     """Check if KiCad CLI is available."""
     try:
@@ -52,7 +56,7 @@ class TestSecureSubprocessRunner:
         """Test successful KiCad command execution."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Setup mocks
-            mock_get_cli.return_value = "/usr/bin/kicad-cli"
+            mock_get_cli.return_value = _mock_cli_path()
             mock_result = MagicMock(returncode=0, stdout="Success")
             mock_run_subprocess.return_value = mock_result
 
@@ -119,7 +123,7 @@ class TestSecureSubprocessRunner:
     def test_run_kicad_command_with_working_dir(self, mock_run_subprocess, mock_get_cli):
         """Test KiCad command with working directory."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            mock_get_cli.return_value = "/usr/bin/kicad-cli"
+            mock_get_cli.return_value = _mock_cli_path()
             mock_result = MagicMock(returncode=0)
             mock_run_subprocess.return_value = mock_result
 
@@ -137,7 +141,7 @@ class TestSecureSubprocessRunner:
     @patch.object(SecureSubprocessRunner, "_run_subprocess")
     def test_run_kicad_command_subprocess_error(self, mock_run_subprocess, mock_get_cli):
         """Test KiCad command with subprocess error."""
-        mock_get_cli.return_value = "/usr/bin/kicad-cli"
+        mock_get_cli.return_value = _mock_cli_path()
         mock_run_subprocess.side_effect = subprocess.SubprocessError("Command failed")
 
         runner = SecureSubprocessRunner()
@@ -150,7 +154,7 @@ class TestSecureSubprocessRunner:
     @patch.object(SecureSubprocessRunner, "run_kicad_command")
     async def test_run_kicad_command_async(self, mock_run_command, mock_get_cli):
         """Test async KiCad command execution."""
-        mock_get_cli.return_value = "/usr/bin/kicad-cli"
+        mock_get_cli.return_value = _mock_cli_path()
         mock_result = MagicMock(returncode=0)
         mock_run_command.return_value = mock_result
 

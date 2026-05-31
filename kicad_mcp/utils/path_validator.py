@@ -6,6 +6,7 @@ and ensure file operations are restricted to safe directories.
 """
 
 from collections.abc import Iterable
+from contextlib import suppress
 import os
 import pathlib
 import tempfile
@@ -259,11 +260,9 @@ def get_application_temp_root() -> str:
         root_name = APP_TEMP_DIR_NAME
     temp_root = os.path.realpath(os.path.join(tempfile.gettempdir(), root_name))
     os.makedirs(temp_root, mode=0o700, exist_ok=True)
-    try:
+    # Windows permissions are ACL-based; os.chmod cannot reliably enforce owner-only access.
+    with suppress(OSError):
         os.chmod(temp_root, 0o700)
-    except OSError:
-        # Windows permissions are ACL-based; os.chmod cannot reliably enforce owner-only access.
-        pass
     return temp_root
 
 

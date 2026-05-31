@@ -1,54 +1,56 @@
 # Agent Workflow
 
-This server is intended to be agent-first: declare electrical intent, let the MCP layer resolve KiCad geometry, then verify with KiCad-native checks.
+This server is agent-first: declare electrical intent, let the MCP layer build a canonical circuit, then verify the generated KiCad schematic before anything is committed.
 
-## Schematic Generation (Default: Netlist-First Safe Engine)
+## Schematic Generation
 
-For schematic generation, use `schematic_apply_design_intent`.
+Use one schematic-generation path:
 
-Do not use `schematic_apply_expanded_spec`, `schematic_build_from_spec_v2`, or low-level connection tools unless repairing/debugging an existing schematic.
-
-The default engine is the **netlist-first safe pipeline** which guarantees:
-- No partial writes on failure
-- Netlist verification before commit (SKiDL expected vs KiCad CLI exported)
-- Visual lint before commit
-- Atomic commit or full rollback
-
-The schematic engine is fixed to the SKiDL -> KiUtils -> KiCad CLI pipeline.
-
-## Recommended order
-
-1. `project_design_state`
-2. `find_symbols` / `find_footprints` for unknown library IDs
-3. `schematic_preview_design_intent`, when you want to inspect expansion first
-4. `schematic_apply_design_intent`
-5. `export_schematic_preview` / `export_schematic_svg`, when visual feedback is needed
-6. `schematic_quality_report`
-7. `project_design_state`
-
-The schematic apply path is synchronous and always verifies before commit.
-
-## Advanced/Debug Tools
-
-The following tools are available in the advanced profile for repair/debug workflows only:
-
-- `schematic_apply_expanded_spec` — apply a pre-compiled spec without recompiling
-- `schematic_build_from_spec_v2` — explicit parts/nets build
-- `schematic_apply_connection_plan` — incremental connection edits
-- `schematic_connect_pin_to_net`, `schematic_connect_pins` — single-connection wrappers
-
-Use this schematic connection shape for incremental work:
-
-```json
-{
-  "type": "pin_to_pin",
-  "from": {"ref": "U1", "pin": "OUT"},
-  "to": {"ref": "R3", "pin": "1"},
-  "net": "LED_A"
-}
+```text
+design intent
+  -> SKiDL canonical circuit / expected netlist
+  -> KiUtils / kicad-skip schematic writer
+  -> KiCad CLI netlist + ERC verification
+  -> commit or rollback
 ```
 
-Use this bulk design-intent shape for normal complete circuits:
+The public schematic tools are:
+
+- `schematic_engine_status`
+- `schematic_design_intent_schema`
+- `schematic_preview_design_intent`
+- `schematic_apply_design_intent`
+- `schematic_validate_generated_schematic`
+- `export_schematic_preview`
+- `export_schematic_svg`
+
+Symbol and footprint discovery tools remain public:
+
+- `find_symbols`
+- `resolve_symbol`
+- `resolve_symbols`
+- `find_footprints`
+- `resolve_footprint`
+- `resolve_footprints`
+
+`schematic_apply_design_intent` always uses the required SKiDL, KiUtils, kicad-skip, and KiCad CLI verification path. It does not expose engine mode, unsafe apply, partial write, or validation-level parameters.
+
+## Recommended Order
+
+1. `create_kicad_project`
+2. `schematic_engine_status`
+3. `find_symbols` / `resolve_symbols`
+4. `find_footprints` / `resolve_footprints`
+5. `schematic_preview_design_intent`
+6. `schematic_apply_design_intent`
+7. `schematic_validate_generated_schematic`
+8. `export_schematic_preview`
+
+The apply tool writes in a temporary worktree first. If KiCad CLI export, ERC, or netlist comparison fails, the live project is not changed.
+
+## Design Intent Shape
+
+Use full KiCad symbol IDs and explicit connection intent:
 
 ```json
 {
@@ -62,7 +64,7 @@ Use this bulk design-intent shape for normal complete circuits:
   ],
   "pin_rules": [
     {"ref": "U1", "match": {"name": "VDD"}, "net": "+3V3"},
-    {"ref": "U1", "match": {"name_regex": "^(VSS|VSSA|GND)$"}, "net": "GND", "allow_hidden_power": true}
+    {"ref": "U1", "match": {"name_regex": "^(VSS|VSSA|GND)$"}, "net": "GND"}
   ],
   "interfaces": [
     {
@@ -74,105 +76,35 @@ Use this bulk design-intent shape for normal complete circuits:
     }
   ],
   "support_circuits": [
-    {"type": "decoupling", "target": "U1", "rail": "+3V3", "ground": "GND", "capacitors": ["100n", "4.7u"]}
+    {
+      "type": "decoupling",
+      "target": "U1",
+      "rail": "+3V3",
+      "ground": "GND",
+      "capacitors": ["100n", "4.7u"]
+    }
   ],
-  "layout_hints": {
-    "paper_strategy": "auto",
-    "max_paper": "A1",
-    "visual_gate": "strict"
-  },
   "no_connect_rules": [
-    {"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PB6", "PB7"], "action": "mark_no_connect"}
-  ]
-}
-```
-
-Pin selectors support exact `name` and `number` aliases. Regex selectors use substring matching, so anchor regexes when you need exact matches, for example `{"name_regex": "^VDD$"}`. Hidden power pins on power or ground nets are auto-authorized during design-intent compile; USB-C `VBUS`/ground connector pins are treated as hidden power pins. For intentional nonstandard hidden power wiring, pass `allow_hidden_power=true` on the pin rule or at the intent top level.
-
-`bulk_connections` in design intent should normally use `{"net": "...", "pins": [[ref, pin], ...]}`. The compiler also accepts `type=pin_to_net` and `type=pin_to_pin` as forgiving aliases, but `schematic_apply_connection_plan` is the preferred tool for incremental connection-plan entries.
-
-Support-circuit aliases are accepted for common agent output: `crystal` can use `xin`/`xout`, `ferrite_filter` can use `rail`/`supply_rail`, and `pullup` can use `target` or `ref` plus `pin` to connect the target pin before adding the resistor.
-
-For readable incremental wiring, `schematic_apply_connection_plan` accepts `connection_style` per connection: `label`, `wire`, or `auto`. `auto` uses power symbols for known rails, routes simple two-endpoint signal nets as wires, and falls back to labels for multi-drop or unsafe routes. For fragile edits, it also accepts `verify=false`, `verify_native_netlist=false`, `run_erc=false`, and `rollback_on_failure=false`; run `schematic_quality_report` after layout is stable.
-
-For incremental support circuitry on an existing schematic, use `schematic_add_support_circuits` with the same `support_circuits` entries as design intent, or the convenience tools `schematic_add_decoupling_capacitor`, `schematic_add_pullup_resistor`, and `schematic_add_passive`. Use `schematic_apply_no_connect_rules` to apply the same regex-based `no_connect_rules` format without rebuilding a full intent.
-
-`no_connect_rules` can exclude pins either inside the selector or at the rule level:
-
-```json
-{"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+", "exclude": {"names": ["PA13", "PA14"]}}}
-{"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PA13", "PA14"]}
-```
-
-`schematic_apply_design_intent` compiles this into v2 `parts`, generated passives/connectors, expanded net memberships, and no-connect markers. `schematic_build_from_spec_v2` also accepts this full intent shape and compiles it before building, so support circuits and no-connect rules are not silently dropped. Both paths report exact `symbol_errors`, `footprint_errors`, and `normalization_errors` when preflight fails, and save artifacts under `.kicad_mcp/`.
-
-By default it also applies a generic visual layout pass before writing the schematic. The visual pass assigns explicit symbol positions using estimated symbol bounds, groups generated support parts near their targets, uses short external stubs for signal labels, and keeps known power rails on power-symbol/pin-anchor behavior for native-netlist reliability. The compact tool response includes a `visual_layout` summary.
-
-Set `visual_layout=false` to skip both the high-level visual pass and the lower-level default v2 visual layout. The expanded spec is marked with `layout_hints.visual_layout.enabled=false` so later build calls do not silently re-enable layout.
-
-Use this lower-level v2 build shape when every connection is already explicit:
-
-```json
-{
-  "name": "555_led_blinker",
-  "paper": "A4",
-  "parts": [
     {
       "ref": "U1",
-      "symbol": "Timer:LM555xN",
-      "value": "LM555",
-      "footprint": "Package_DIP:DIP-8_W7.62mm"
-    }
-  ],
-  "nets": {
-    "+5V": [["U1", "VCC"]],
-    "GND": [{"ref": "U1", "pin": "GND"}]
-  },
-  "no_connects": [["U1", "CV"]]
-}
-```
-
-In v2 specs, `symbol` and `lib_id` are both accepted for parts, but the value must be a full KiCad library ID such as `Device:R`, not a symbol-unit name such as `R_1_1`. Net endpoints should use `["U1", "1"]` or `{"ref": "U1", "pin": "1"}`. Legacy string shorthand like `U1_1` is accepted with `rsplit("_", 1)` but is not preferred.
-
-Missing library parts can be declared as `custom_parts` with explicit pins:
-
-```json
-{
-  "custom_parts": [
-    {
-      "ref": "U6",
-      "value": "DPS310",
-      "footprint": "Package_LGA:LGA-8_2.0x2.5mm_P0.65mm",
-      "pins": [
-        {"number": "1", "name": "SCL", "type": "bidirectional"},
-        {"number": "2", "name": "SDA", "type": "bidirectional"},
-        {"number": "3", "name": "GND", "type": "power_in"}
-      ]
+      "match": {"name_regex": "PA[0-9]+|PB[0-9]+"},
+      "except": ["PB6", "PB7"],
+      "action": "mark_no_connect"
     }
   ]
 }
 ```
 
-The MCP layer resolves symbols, resolves pins, snaps generated geometry to the schematic grid, writes KiCad S-expressions, exports the native netlist, runs ERC when requested, and rolls back failed connection transactions.
+Pin selectors support exact `name`, exact `number`, and anchored regex selectors such as `{"name_regex": "^VDD$"}`. Support-circuit aliases are accepted for common intent output, including decoupling, crystal, ferrite, pullup, pulldown, reset button, and LED circuits.
+
+Generated support parts use normal unique references such as `C1`, `C2`, `Y1`, `R1`, `FB1`, and `SW1`.
 
 ## Tool Profiles
 
-By default, `KICAD_MCP_TOOL_PROFILE=agent` exposes the design-intent workflow tools (safe apply, preview, background jobs, engine status, validation), schematic preview/export, functional layout, safe delete/grid helpers, footprint assignment/report tools, ERC explanation/fix planning tools, symbol/footprint search and resolve tools, and `project_design_state`. Legacy build tools, raw coordinate tools, v1 builders, compatibility aliases, full library listing, PCB primitives, broad export helpers, and analysis tools are hidden from the normal LLM tool list.
+The default `KICAD_MCP_TOOL_PROFILE=agent` exposes only the agent workflow tools, project discovery/state tools, validation, preview/export, and symbol/footprint lookup.
 
-Use this for manual schematic edits or library exploration:
+`advanced` adds project creation details, library listing, and PCB sync/placement/report tools.
 
-```text
-KICAD_MCP_TOOL_PROFILE=advanced
-```
+`debug` adds read-only schematic inspection plus explicit PCB primitives. It does not expose alternate schematic generation engines.
 
-Use this for raw schematic geometry, v1 builder compatibility, and pin-map diagnostics:
-
-```text
-KICAD_MCP_TOOL_PROFILE=debug
-```
-
-Use this only for broad regression testing or non-agent clients that need every registered tool:
-
-```text
-KICAD_MCP_TOOL_PROFILE=all
-```
+`all` means the union of the curated agent, advanced, and debug profiles. It does not expose retired schematic generation or connection paths.

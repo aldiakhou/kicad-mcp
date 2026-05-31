@@ -1,8 +1,8 @@
 # KiCad Creation and PCB Authoring Guide
 
-This guide covers the MCP tools for creating KiCad projects, authoring schematics, and adding conservative PCB layout primitives.
+This guide covers the MCP tools for creating KiCad projects, resolving libraries, and adding conservative PCB layout primitives.
 
-Most tools in this guide are hidden from the default `KICAD_MCP_TOOL_PROFILE=agent` surface. Use `advanced` for manual schematic authoring, `debug` for raw schematic geometry diagnostics, or `all` for PCB/export/BOM/netlist tooling.
+Most tools in this guide are hidden from the default `KICAD_MCP_TOOL_PROFILE=agent` surface. Schematic generation is handled by `schematic_apply_design_intent`; alternate schematic builders and low-level connection tools are not part of the installed MCP surface.
 
 ## Project creation
 
@@ -27,16 +27,6 @@ Symbols and footprints are resolved from installed KiCad libraries. The resolver
 - `KICAD_FOOTPRINT_PATHS`
 
 On Windows it also searches versioned KiCad installations such as `C:\Program Files\KiCad\10.0\share\kicad`.
-
-## Schematic authoring
-
-- `schematic_add_symbol(...)`
-- `schematic_add_wire(...)`
-- `schematic_add_label(...)`
-- `schematic_connect_points(...)`
-- `schematic_delete_item(...)`
-
-Schematic writes use the same transactional pattern as the cleanup tools: backup, parse, mutate, validate, optional KiCad CLI SVG export, and rollback on failure.
 
 ## PCB authoring
 

@@ -5,7 +5,7 @@ Transactional editing helpers for safe KiCad schematic modifications.
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from difflib import unified_diff
 import hashlib
@@ -88,10 +88,8 @@ def _transactional_lock_path(file_path: str | Path) -> Path:
     digest = hashlib.sha256(target_key.encode("utf-8", "surrogatepass")).hexdigest()
     lock_dir = Path(get_application_temp_root()) / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    try:
+    with suppress(OSError):
         os.chmod(lock_dir, 0o700)
-    except OSError:
-        pass
     return lock_dir / f"{digest}.lock"
 
 
@@ -112,10 +110,8 @@ def atomic_write_text(file_path: str | Path, text: str, *, encoding: str = "utf-
         os.replace(temp_name, target)
         _fsync_directory(target.parent)
     except Exception:
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
         raise
 
 
@@ -133,10 +129,8 @@ def _atomic_copy2(source: str, destination: str) -> None:
         os.replace(temp_name, destination)
         _fsync_directory(target.parent)
     except Exception:
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
         raise
 
 

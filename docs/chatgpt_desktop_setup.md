@@ -124,20 +124,20 @@ Some MCP clients launch local stdio servers directly. For those clients, use thi
 
 Replace the placeholder paths with your local repository path and KiCad CLI path.
 
-## Recommended cleanup workflow
+## Recommended schematic workflow
 
-For safe schematic cleanup, use the high-level workflow in this order:
+For generated schematics, use the netlist-first workflow in this order:
 
-1. `schematic_cleanup_report(...)`
-2. `schematic_preview_cleanup(...)`
-3. `schematic_apply_cleanup(...)`
+1. `schematic_engine_status`
+2. `find_symbols` / `resolve_symbols`
+3. `schematic_preview_design_intent`
+4. `schematic_apply_design_intent`
+5. `schematic_validate_generated_schematic`
+6. `export_schematic_preview`
 
-This lets ChatGPT inspect the schematic, preview conservative cleanup changes, apply only safe block/property edits, and export a final SVG preview.
+The apply step is always atomic: it writes through the required SKiDL/KiUtils/kicad-skip engine, verifies with KiCad CLI, and rolls back on failure.
 
 ## Current limitations
 
 - No PCB routing yet.
-- No automatic symbol rotation with attached wires.
-- No complex multi-segment boundary wire movement yet.
-- No mid-segment label movement yet.
-- Block detection is geometric and heuristic, not full ERC/netlist-aware.
+- Manual schematic edit and cleanup tools are not exposed by the installed server.

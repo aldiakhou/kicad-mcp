@@ -16,7 +16,12 @@ from kicad_mcp.utils.kicad_cli import KiCadCLIError
 from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
 from kicad_mcp.utils.preview_metadata import SVG_MIME_TYPE, svg_preview_metadata
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
-from kicad_mcp.utils.transactional_edit import validate_local_path
+from kicad_mcp.utils.transactional_edit import (
+    export_schematic_svg_file,
+    validate_local_path,
+    validate_schematic_file_safely,
+    validate_schematic_with_cli_export,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +132,89 @@ def register_export_tools(mcp: FastMCP) -> None:
         )
         return await _generate_pcb_thumbnail_impl(project_path, ctx)
 
+    @mcp.tool()
+    async def export_schematic_svg(
+        schematic_path: str,
+        output_path: str | None = None,
+        ctx: Context | None = None,
+    ) -> dict[str, object]:
+        """Export a generated schematic SVG preview using KiCad CLI."""
+        try:
+            validated_path = validate_local_path(schematic_path, "schematic", must_exist=True)
+            if ctx:
+                await ctx.report_progress(10, 100)
+                await ctx.info(f"Exporting schematic SVG for {os.path.basename(validated_path)}")
+            export_result = _export_schematic_svg(validated_path, output_path)
+            if ctx:
+                await ctx.report_progress(100, 100)
+            return export_result
+        except Exception as exc:
+            logger.exception("Failed to export schematic SVG")
+            return {"success": False, "schematic_path": schematic_path, "error": str(exc)}
+
+    @mcp.tool()
+    async def export_schematic_preview(
+        project_path: str,
+        ctx: Context | None = None,
+    ) -> dict[str, object]:
+        """Export and return a generated schematic preview for a KiCad project."""
+        try:
+            validated_project = validate_local_path(project_path, "project", must_exist=True)
+        except Exception as exc:
+            return {"success": False, "project_path": project_path, "error": str(exc)}
+
+        files = get_project_files(validated_project)
+        if "schematic" not in files:
+            return {
+                "success": False,
+                "project_path": validated_project,
+                "error": "No schematic file found in project",
+            }
+
+        if ctx:
+            await ctx.report_progress(10, 100)
+            await ctx.info(f"Exporting schematic preview for {os.path.basename(files['schematic'])}")
+        export_result = _export_schematic_svg(files["schematic"], None)
+        if not export_result.get("success"):
+            export_result["project_path"] = validated_project
+            return export_result
+        if ctx:
+            await ctx.report_progress(100, 100)
+
+        return {
+            "success": True,
+            "project_path": validated_project,
+            "schematic_path": files["schematic"],
+            "svg_path": export_result["svg_path"],
+            "preview": export_result["preview"],
+        }
+
 
 # Helper functions for thumbnail generation
+def _export_schematic_svg(schematic_path: str, output_path: str | None) -> dict[str, object]:
+    validation = validate_schematic_file_safely(schematic_path)
+    if not validation["success"]:
+        return validation
+
+    cli_validation = validate_schematic_with_cli_export(schematic_path)
+    if not cli_validation["success"]:
+        return {
+            "success": False,
+            "schematic_path": schematic_path,
+            "error": cli_validation.get("stderr") or "KiCad CLI export validation failed",
+        }
+
+    export_result = export_schematic_svg_file(schematic_path, output_path)
+    if not export_result["success"]:
+        return export_result
+    return {
+        "success": True,
+        "schematic_path": schematic_path,
+        "svg_path": export_result["svg_path"],
+        "preview": svg_preview_metadata(export_result["svg_path"]),
+    }
+
+
 async def generate_thumbnail_with_cli(pcb_file: str, ctx: Context | None):
     """Generate PCB thumbnail using command line tools.
     This is a fallback method when the kicad Python module is not available or fails.

@@ -42,15 +42,15 @@ def apply_design_intent_netlist_first(
     project_path: str,
     intent: dict[str, Any],
     *,
-    mode: str = "update",
+    mode: str = "replace",
     atomic: bool = True,
     visual_style: str = "professional_blocks",
     run_erc: bool = True,
     export_svg: bool = True,
     max_inline_bytes: int = 50_000,
-    strict: bool = False,
-    require_netlist_match: bool = False,
-    require_kicad_cli_verification: bool = False,
+    strict: bool = True,
+    require_netlist_match: bool = True,
+    require_kicad_cli_verification: bool = True,
     job_id: str | None = None,
     cancel_check: Any | None = None,
 ) -> dict[str, Any]:
@@ -61,17 +61,17 @@ def apply_design_intent_netlist_first(
     Args:
         project_path: Path to the KiCad project file (.kicad_pro).
         intent: Design intent dictionary.
-        mode: "update" or "replace".
+        mode: Internal build mode. The public MCP tool always uses replace semantics.
         atomic: If True, use transaction model (default).
         visual_style: Layout style for schematic generation.
         run_erc: Whether to run KiCad CLI ERC.
         export_svg: Whether to export SVG preview.
         max_inline_bytes: Max bytes for inline SVG in response.
-        strict: If True, any ERC error or netlist mismatch blocks commit.
-        require_netlist_match: If True, netlist mismatch always blocks commit
-            regardless of strict setting. Used by the safe tool.
+        strict: If True, any ERC error, netlist mismatch, or blocking generation issue
+            blocks commit.
+        require_netlist_match: If True, netlist mismatch always blocks commit.
         require_kicad_cli_verification: If True, KiCad CLI netlist export must
-            succeed for commit to proceed. Used by the safe tool.
+            succeed for commit to proceed.
         job_id: Optional job ID for progress tracking.
         cancel_check: Optional callable that returns True if job is cancelled.
 
@@ -134,6 +134,7 @@ def apply_design_intent_netlist_first(
         except RuntimeError as e:
             result.error = str(e)
             result.stage = "engine_not_ready"
+            result.rolled_back = True
             return result.to_dict()
 
         if not compile_result.success:
@@ -226,6 +227,7 @@ def apply_design_intent_netlist_first(
 
             cli_verification_success = True
             kicad_cli_available = True
+            cli_failure_stage = "kicad_cli_verification_failed"
             if run_erc or export_svg or require_kicad_cli_verification:
                 result.stage = "kicad_cli_verification"
                 result.progress = {
@@ -254,6 +256,7 @@ def apply_design_intent_netlist_first(
 
                     if verify_result.erc_errors > 0 and strict:
                         cli_verification_success = False
+                        cli_failure_stage = "erc_failed"
                         result.error = (
                             f"ERC found {verify_result.erc_errors} error(s)"
                         )
@@ -334,7 +337,7 @@ def apply_design_intent_netlist_first(
                 result.stage = "netlist_mismatch"
             if not cli_verification_success and (strict or require_kicad_cli_verification):
                 should_commit = False
-                result.stage = "erc_failed"
+                result.stage = cli_failure_stage
             if lint_result.blocking_count > 0 and strict:
                 should_commit = False
                 result.stage = "visual_lint_failed"

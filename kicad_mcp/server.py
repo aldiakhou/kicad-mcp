@@ -609,14 +609,10 @@ def _apply_tool_profile(mcp: FastMCP, profile: str) -> None:
 
     tool_names = [t.name for t in tools]
 
-    if profile == "all":
-        logging.info("Using all tool profile; all %d tools are exposed.", len(tool_names))
-        return
-
     allowed_tools = set(AGENT_PROFILE_TOOLS)
-    if profile in {"advanced", "debug"}:
+    if profile in {"advanced", "debug", "all"}:
         allowed_tools.update(ADVANCED_PROFILE_TOOLS)
-    if profile == "debug":
+    if profile in {"debug", "all"}:
         allowed_tools.update(DEBUG_PROFILE_TOOLS)
 
     hidden = []

@@ -101,7 +101,7 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "schematic_get_job_status" not in tools
     assert "schematic_get_job_result" not in tools
     assert "schematic_cancel_job" not in tools
-    # Legacy build/connection tools moved to advanced profile
+    # Legacy build/connection tools are not registered for the installed server.
     assert "schematic_apply_expanded_spec" not in tools
     assert "schematic_build_from_spec_v2" not in tools
     assert "schematic_apply_connection_plan" not in tools
@@ -138,58 +138,57 @@ async def test_agent_profile_tools_have_callable_handlers():
 
 @pytest.mark.asyncio
 async def test_create_server_advanced_profile_exposes_manual_schematic_tools(monkeypatch):
-    """Advanced profile adds manual schematic tools without raw geometry/debug aliases."""
+    """Advanced profile adds library listings and PCB workflow tools."""
     monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "advanced")
     server = create_server()
     tools = await server.get_tools()
 
     assert get_tool_profile() == "advanced"
     assert set(tools) == AGENT_PROFILE_TOOLS | ADVANCED_PROFILE_TOOLS
-    assert "schematic_add_symbol" in tools
-    assert "schematic_snap_to_grid" in tools
+    assert "project_completion_report" in tools
+    assert "project_next_actions" in tools
     assert "list_symbol_libraries" in tools
-    assert "schematic_apply_expanded_spec" in tools
-    assert "schematic_build_from_spec_v2" in tools
-    assert "schematic_apply_connection_plan" in tools
-    assert "schematic_connect_pin_to_net" in tools
-    assert "schematic_connect_pins" in tools
-    assert "schematic_add_wire" not in tools
-    assert "schematic_get_pin_map" not in tools
-    assert "schematic_build_from_spec" not in tools
-    assert "pcb_add_track" not in tools
+    assert "list_footprint_libraries" in tools
+    assert "pcb_complete_from_schematic" in tools
+    assert "pcb_get_ratsnest" in tools
+    assert "schematic_apply_design_intent" in tools
+    assert "schematic_apply_design_intent_safe" not in tools
 
     server_module.shutdown_server()
 
 
 @pytest.mark.asyncio
-async def test_create_server_debug_profile_exposes_raw_schematic_tools(monkeypatch):
-    """Debug profile adds raw schematic geometry and compatibility tools."""
+async def test_create_server_debug_profile_exposes_debug_tools(monkeypatch):
+    """Debug profile adds netlist inspection and explicit PCB primitives."""
     monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "debug")
     server = create_server()
     tools = await server.get_tools()
 
     assert get_tool_profile() == "debug"
     assert set(tools) == AGENT_PROFILE_TOOLS | ADVANCED_PROFILE_TOOLS | DEBUG_PROFILE_TOOLS
-    assert "schematic_add_wire" in tools
-    assert "schematic_get_pin_map" in tools
-    assert "schematic_build_from_spec" in tools
+    assert "extract_schematic_netlist" in tools
+    assert "pcb_add_track" in tools
     assert "list_symbol_libraries" in tools
-    assert "pcb_add_track" not in tools
+    assert "schematic_list_symbols" not in tools
+    assert "schematic_connectivity_snapshot" not in tools
+    assert "schematic_apply_connection_plan" not in tools
 
     server_module.shutdown_server()
 
 
 @pytest.mark.asyncio
-async def test_create_server_all_profile_exposes_full_legacy_surface(monkeypatch):
-    """All profile keeps every registered tool available for broad regression coverage."""
+async def test_create_server_all_profile_exposes_curated_surface(monkeypatch):
+    """All profile is the curated union, not retired schematic generation paths."""
     monkeypatch.setenv("KICAD_MCP_TOOL_PROFILE", "all")
     server = create_server()
     tools = await server.get_tools()
 
     assert get_tool_profile() == "all"
-    assert "schematic_add_wire" in tools
-    assert "schematic_get_pin_map" in tools
-    assert "schematic_build_from_spec" in tools
+    assert set(tools) == AGENT_PROFILE_TOOLS | ADVANCED_PROFILE_TOOLS | DEBUG_PROFILE_TOOLS
+    assert "schematic_apply_design_intent" in tools
+    assert "schematic_apply_expanded_spec" not in tools
+    assert "schematic_build_from_spec_v2" not in tools
+    assert "schematic_apply_connection_plan" not in tools
     assert "list_symbol_libraries" in tools
     assert "pcb_add_track" in tools
     assert "extract_schematic_netlist" in tools
@@ -239,6 +238,34 @@ def test_require_schematic_runtime_reports_missing_dependency(monkeypatch):
     monkeypatch.setattr(server_module.importlib, "import_module", fake_import)
 
     with pytest.raises(RuntimeError, match="Missing required schematic dependencies: kiutils"):
+        require_schematic_runtime()
+
+
+def test_require_schematic_runtime_reports_missing_skidl(monkeypatch):
+    """SKiDL is mandatory at server startup."""
+
+    def fake_import(name: str):
+        if name == "skidl":
+            raise ImportError("missing skidl")
+        return object()
+
+    monkeypatch.setattr(server_module.importlib, "import_module", fake_import)
+
+    with pytest.raises(RuntimeError, match="Missing required schematic dependencies: skidl"):
+        require_schematic_runtime()
+
+
+def test_require_schematic_runtime_reports_missing_kicad_skip(monkeypatch):
+    """kicad-skip is mandatory at server startup."""
+
+    def fake_import(name: str):
+        if name == "skip":
+            raise ImportError("missing skip")
+        return object()
+
+    monkeypatch.setattr(server_module.importlib, "import_module", fake_import)
+
+    with pytest.raises(RuntimeError, match="Missing required schematic dependencies: kicad-skip"):
         require_schematic_runtime()
 
 

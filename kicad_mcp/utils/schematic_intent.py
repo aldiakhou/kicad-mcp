@@ -307,7 +307,7 @@ def apply_connection_plan_v2(
             erc = verification.get("erc", erc)
         return {
             **result,
-            "tool": "schematic_apply_connection_plan",
+            "tool": "schematic_apply_design_intent",
             "stage": "schematic_wiring",
             "changed": True,
             "planned_connections": _public_connections(normalized["connections"]),
@@ -321,18 +321,18 @@ def apply_connection_plan_v2(
             "native_verification": native_verification,
             "erc": erc,
             "warnings": _verification_warnings(native_verification, erc),
-            "recommended_next_tool": "schematic_quality_report",
+            "recommended_next_tool": "schematic_validate_generated_schematic",
             "recommended_next_arguments": {"project_path": schematic_path},
         }
 
     failed = _missing_from_failed_transaction(schematic_path, normalized["connections"])
     return {
         **result,
-        "tool": "schematic_apply_connection_plan",
+        "tool": "schematic_apply_design_intent",
         "stage": "schematic_wiring",
         "changed": False,
         "failed_connections": failed or _public_connections(normalized["connections"]),
-        "recommended_next_tool": "schematic_quality_report",
+        "recommended_next_tool": "schematic_validate_generated_schematic",
         "recommended_next_arguments": {"project_path": schematic_path},
         "recoverable": True,
     }
@@ -911,7 +911,7 @@ def _missing_connection_error(
         "likely_reason": likely_reason,
         "connection": connection,
         "reason": f"Pin {ref}.{pin} could not be verified on net {net_name}",
-        "suggested_next_tool": "schematic_apply_connection_plan",
+        "suggested_next_tool": "schematic_apply_design_intent",
         "suggested_next_arguments": {"replace_existing": True},
     }
 
@@ -1072,14 +1072,14 @@ def _failure_response(
 ) -> dict[str, Any]:
     return {
         "success": False,
-        "tool": "schematic_apply_connection_plan",
+        "tool": "schematic_apply_design_intent",
         "stage": "schematic_wiring",
         "schematic_path": schematic_path,
         "error": error,
         "rolled_back": rolled_back,
         "recoverable": True,
         "failed_connections": failed_connections,
-        "recommended_next_tool": "schematic_quality_report",
+        "recommended_next_tool": "schematic_validate_generated_schematic",
         "recommended_next_arguments": {"project_path": schematic_path},
         "debug": debug or {},
     }
