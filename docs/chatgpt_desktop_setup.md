@@ -131,11 +131,13 @@ For generated schematics, use the netlist-first workflow in this order:
 1. `schematic_engine_status`
 2. `find_symbols` / `resolve_symbols`
 3. `schematic_preview_design_intent`
-4. `schematic_apply_design_intent`
-5. `schematic_validate_generated_schematic`
-6. `export_schematic_preview`
+4. `schematic_start_design_intent_job`
+5. `schematic_get_job_status` until the job reaches `succeeded`, `failed`, or `cancelled`
+6. `schematic_get_job_result`
+7. `schematic_validate_generated_schematic`
+8. `export_schematic_preview`
 
-The apply step is always atomic: it writes through the required SKiDL/KiUtils/kicad-skip engine, verifies with KiCad CLI, and rolls back on failure.
+The apply job is always atomic: it writes through the required SKiDL/KiUtils/kicad-skip engine, verifies with KiCad CLI, and rolls back on failure. `schematic_cancel_job` can cancel queued work and requests cooperative rollback for running work.
 
 ## Current limitations
 

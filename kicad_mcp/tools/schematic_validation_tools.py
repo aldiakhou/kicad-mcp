@@ -77,7 +77,7 @@ def register_schematic_validation_tools(mcp: FastMCP) -> None:
                     }
                 else:
                     result["visual_lint"] = {
-                        "note": "Visual lint skipped: no engine artifacts found. Run schematic_apply_design_intent for full validation.",
+                        "note": "Visual lint skipped: no engine artifacts found. Run schematic_start_design_intent_job for full validation.",
                     }
 
             return result

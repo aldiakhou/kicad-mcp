@@ -13,48 +13,48 @@ import kicad_mcp.tools.creation_tools as creation_tools
 
 
 @pytest.mark.asyncio
-async def test_apply_design_intent_signature_is_simple():
+async def test_start_design_intent_job_signature_is_simple():
     server = create_server()
     tools = await server.get_tools()
 
-    assert list(signature(tools["schematic_apply_design_intent"].fn).parameters) == [
+    assert list(signature(tools["schematic_start_design_intent_job"].fn).parameters) == [
         "project_path",
         "intent",
     ]
 
 
 @pytest.mark.asyncio
-async def test_apply_design_intent_routes_to_required_engine(tmp_path: Path):
+async def test_start_design_intent_job_routes_to_job_manager(tmp_path: Path):
     server = create_server()
     tools = await server.get_tools()
 
-    with patch("kicad_mcp.tools.creation_tools._apply_via_netlist_first_engine") as mock_engine:
-        mock_engine.return_value = {"success": True, "engine": "skidl_kiutils_kicad_cli"}
+    with patch("kicad_mcp.tools.design_intent_tools.start_apply_job") as mock_start:
+        mock_start.return_value = {"success": True, "job_id": "apply-test", "status": "queued"}
 
-        tools["schematic_apply_design_intent"].fn(
+        tools["schematic_start_design_intent_job"].fn(
             str(tmp_path),
             {"parts": [{"ref": "U1", "value": "MCU", "lib_id": "MCU:TEST"}]},
         )
 
-        mock_engine.assert_called_once()
-        assert mock_engine.call_args.args[0] == str(tmp_path)
-        assert mock_engine.call_args.args[1] == {
+        mock_start.assert_called_once()
+        assert mock_start.call_args.args[0] == str(tmp_path)
+        assert mock_start.call_args.args[1] == {
             "parts": [{"ref": "U1", "value": "MCU", "lib_id": "MCU:TEST"}]
         }
-        assert mock_engine.call_args.kwargs == {}
+        assert mock_start.call_args.kwargs == {}
 
 
 @pytest.mark.asyncio
 async def test_agent_profile_exposes_single_schematic_apply_surface():
-    assert "schematic_apply_design_intent" in AGENT_PROFILE_TOOLS
+    assert "schematic_apply_design_intent" not in AGENT_PROFILE_TOOLS
     assert "schematic_preview_design_intent" in AGENT_PROFILE_TOOLS
     assert "schematic_engine_status" in AGENT_PROFILE_TOOLS
     assert "schematic_validate_generated_schematic" in AGENT_PROFILE_TOOLS
     assert "schematic_apply_design_intent_safe" not in AGENT_PROFILE_TOOLS
-    assert "schematic_start_design_intent_job" not in AGENT_PROFILE_TOOLS
-    assert "schematic_get_job_status" not in AGENT_PROFILE_TOOLS
-    assert "schematic_get_job_result" not in AGENT_PROFILE_TOOLS
-    assert "schematic_cancel_job" not in AGENT_PROFILE_TOOLS
+    assert "schematic_start_design_intent_job" in AGENT_PROFILE_TOOLS
+    assert "schematic_get_job_status" in AGENT_PROFILE_TOOLS
+    assert "schematic_get_job_result" in AGENT_PROFILE_TOOLS
+    assert "schematic_cancel_job" in AGENT_PROFILE_TOOLS
 
 
 @pytest.mark.asyncio
@@ -112,4 +112,6 @@ async def test_schema_includes_recommended_apply_tool():
     schema = tools["schematic_design_intent_schema"].fn("all")
 
     assert schema["success"] is True
-    assert schema["recommended_apply_tool"] == "schematic_apply_design_intent"
+    assert schema["recommended_apply_tool"] == "schematic_start_design_intent_job"
+    assert schema["recommended_status_tool"] == "schematic_get_job_status"
+    assert schema["recommended_result_tool"] == "schematic_get_job_result"

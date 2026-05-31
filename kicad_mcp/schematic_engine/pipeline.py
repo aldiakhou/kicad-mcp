@@ -17,6 +17,7 @@ Orchestrates the full netlist-first workflow:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 import os
 import shutil
@@ -58,6 +59,7 @@ def apply_design_intent_netlist_first(
     require_kicad_cli_verification: bool = True,
     job_id: str | None = None,
     cancel_check: Any | None = None,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Apply design intent using the netlist-first pipeline.
 
@@ -79,6 +81,8 @@ def apply_design_intent_netlist_first(
             succeed for commit to proceed.
         job_id: Optional job ID for progress tracking.
         cancel_check: Optional callable that returns True if job is cancelled.
+        progress_callback: Optional callback called as ``(stage, progress)`` at
+            pipeline checkpoints.
 
     Returns:
         Dict with success status, verification results, and artifacts.
@@ -95,10 +99,15 @@ def apply_design_intent_netlist_first(
             return cancel_check()
         return False
 
+    def _set_progress(stage: str, step: int, message: str) -> None:
+        result.stage = stage
+        result.progress = {"step": step, "step_count": 12, "message": message}
+        if progress_callback:
+            progress_callback(stage, dict(result.progress))
+
     try:
         # --- Stage 1: Normalize intent ---
-        result.stage = "normalizing"
-        result.progress = {"step": 1, "step_count": 12, "message": "Normalizing design intent"}
+        _set_progress("normalizing", 1, "Normalizing design intent")
 
         try:
             effective_intent, intent_action = prepare_intent_for_action(project_path, intent)
@@ -116,8 +125,7 @@ def apply_design_intent_netlist_first(
             return _cancelled_result(result, "after_normalize")
 
         # --- Stage 2-3: Compile canonical circuit ---
-        result.stage = "compiling"
-        result.progress = {"step": 2, "step_count": 12, "message": "Compiling circuit"}
+        _set_progress("compiling", 2, "Compiling circuit")
 
         # Determine artifact directory
         project_dir = os.path.dirname(os.path.abspath(project_path))
@@ -128,12 +136,7 @@ def apply_design_intent_netlist_first(
         result.artifact_dir = artifact_dir
 
         # --- Stage 4: SKiDL compile + expected netlist ---
-        result.stage = "skidl_compile"
-        result.progress = {
-            "step": 4,
-            "step_count": 12,
-            "message": "Compiling SKiDL circuit and generating expected netlist",
-        }
+        _set_progress("skidl_compile", 4, "Compiling SKiDL circuit and generating expected netlist")
 
         compiler = SkidlCompiler(artifact_dir=artifact_dir)
         try:
@@ -156,12 +159,7 @@ def apply_design_intent_netlist_first(
             return _cancelled_result(result, "after_skidl_compile")
 
         # --- Stage 5: Sheet planning ---
-        result.stage = "planning_sheets"
-        result.progress = {
-            "step": 5,
-            "step_count": 12,
-            "message": "Planning schematic sheets and placement",
-        }
+        _set_progress("planning_sheets", 5, "Planning schematic sheets and placement")
 
         sheet_plan = plan_sheets(canonical, style=visual_style)
         result.sheets = list(sheet_plan.sheets.keys())
@@ -170,12 +168,7 @@ def apply_design_intent_netlist_first(
             return _cancelled_result(result, "after_planning")
 
         # --- Stage 6: Visual lint (pre-write) ---
-        result.stage = "visual_lint_prewrite"
-        result.progress = {
-            "step": 6,
-            "step_count": 12,
-            "message": "Running pre-write visual lint",
-        }
+        _set_progress("visual_lint_prewrite", 6, "Running pre-write visual lint")
 
         lint_result = visual_lint(canonical, sheet_plan)
         result.visual_lint = {
@@ -204,12 +197,7 @@ def apply_design_intent_netlist_first(
             return _cancelled_result(result, "after_visual_lint")
 
         # --- Stage 7: Write schematic (in transaction) ---
-        result.stage = "writing_schematic"
-        result.progress = {
-            "step": 7,
-            "step_count": 12,
-            "message": "Writing schematic to temporary project",
-        }
+        _set_progress("writing_schematic", 7, "Writing schematic to temporary project")
 
         with SchematicBuildTransaction(project_path, job_id=job_id) as tx:
             temp_dir = tx.create_worktree()
@@ -253,12 +241,7 @@ def apply_design_intent_netlist_first(
             kicad_cli_available = True
             cli_failure_stage = "kicad_cli_verification_failed"
             if run_erc or export_svg or require_kicad_cli_verification:
-                result.stage = "kicad_cli_verification"
-                result.progress = {
-                    "step": 8,
-                    "step_count": 12,
-                    "message": "Running KiCad CLI verification",
-                }
+                _set_progress("kicad_cli_verification", 8, "Running KiCad CLI verification")
 
                 verifier = KicadCliVerifier(output_dir=artifact_dir)
                 try:
@@ -304,12 +287,7 @@ def apply_design_intent_netlist_first(
             # --- Stage 9: Netlist comparison ---
             netlist_match = True
             if compile_result.expected_netlist and result.kicad_netlist_path:
-                result.stage = "netlist_comparison"
-                result.progress = {
-                    "step": 9,
-                    "step_count": 12,
-                    "message": "Comparing expected vs KiCad netlist",
-                }
+                _set_progress("netlist_comparison", 9, "Comparing expected vs KiCad netlist")
 
                 actual_netlist = parse_kicad_netlist(result.kicad_netlist_path)
                 compare_result = compare_netlists(
@@ -348,12 +326,7 @@ def apply_design_intent_netlist_first(
                 result.expected_netlist_match = None  # Could not compare
 
             # --- Stage 10-11: Commit or rollback decision ---
-            result.stage = "commit_decision"
-            result.progress = {
-                "step": 11,
-                "step_count": 12,
-                "message": "Making commit/rollback decision",
-            }
+            _set_progress("commit_decision", 11, "Making commit/rollback decision")
 
             should_commit = True
             if not netlist_match and (strict or require_netlist_match):
@@ -378,12 +351,7 @@ def apply_design_intent_netlist_first(
                 return result.to_dict()
 
             # --- Stage 12: Commit ---
-            result.stage = "committing"
-            result.progress = {
-                "step": 12,
-                "step_count": 12,
-                "message": "Committing schematic to project",
-            }
+            _set_progress("committing", 12, "Committing schematic to project")
 
             if atomic:
                 commit_result = tx.commit()

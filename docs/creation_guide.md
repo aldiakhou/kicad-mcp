@@ -2,7 +2,7 @@
 
 This guide covers the MCP tools for creating KiCad projects, resolving libraries, and adding conservative PCB layout primitives.
 
-Most tools in this guide are hidden from the default `KICAD_MCP_TOOL_PROFILE=agent` surface. Schematic generation is handled by `schematic_apply_design_intent`; alternate schematic builders and low-level connection tools are not part of the installed MCP surface.
+Most tools in this guide are hidden from the default `KICAD_MCP_TOOL_PROFILE=agent` surface. Schematic generation is handled by `schematic_start_design_intent_job` plus status/result polling; alternate schematic builders and low-level connection tools are not part of the installed MCP surface.
 
 ## Project creation
 

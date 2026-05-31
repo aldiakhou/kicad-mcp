@@ -19,7 +19,10 @@ The public schematic tools are:
 - `schematic_engine_status`
 - `schematic_design_intent_schema`
 - `schematic_preview_design_intent`
-- `schematic_apply_design_intent`
+- `schematic_start_design_intent_job`
+- `schematic_get_job_status`
+- `schematic_get_job_result`
+- `schematic_cancel_job`
 - `schematic_validate_generated_schematic`
 - `export_schematic_preview`
 - `export_schematic_svg`
@@ -33,7 +36,7 @@ Symbol and footprint discovery tools remain public:
 - `resolve_footprint`
 - `resolve_footprints`
 
-`schematic_apply_design_intent` always uses the required SKiDL, KiUtils, kicad-skip, and KiCad CLI verification path. It does not expose engine mode, unsafe apply, partial write, or validation-level parameters.
+`schematic_start_design_intent_job` always uses the required SKiDL, KiUtils, kicad-skip, and KiCad CLI verification path. It does not expose engine mode, unsafe apply, partial write, or validation-level parameters. The old blocking apply tool is not exposed in the default agent profile; agents should always start a job and poll it.
 
 ## Recommended Order
 
@@ -42,11 +45,13 @@ Symbol and footprint discovery tools remain public:
 3. `find_symbols` / `resolve_symbols`
 4. `find_footprints` / `resolve_footprints`
 5. `schematic_preview_design_intent`
-6. `schematic_apply_design_intent`
-7. `schematic_validate_generated_schematic`
-8. `export_schematic_preview`
+6. `schematic_start_design_intent_job`
+7. `schematic_get_job_status` until `status` is `succeeded`, `failed`, or `cancelled`
+8. `schematic_get_job_result`
+9. `schematic_validate_generated_schematic`
+10. `export_schematic_preview`
 
-The apply tool writes in a temporary worktree first. If KiCad CLI export, ERC, or netlist comparison fails, the live project is not changed.
+The apply job writes in a temporary worktree first. If KiCad CLI export, ERC, or netlist comparison fails, the live project is not changed. `schematic_cancel_job` is cooperative: it cancels queued work immediately and requests rollback at the next pipeline checkpoint for running work. If KiCad CLI is already running, that command may finish before the job rolls back.
 
 ## Design Intent Shape
 

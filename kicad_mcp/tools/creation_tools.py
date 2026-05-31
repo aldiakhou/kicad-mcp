@@ -484,7 +484,8 @@ def _preview_design_intent_netlist_first(
             "warning_count": lint_result.warning_count,
             "issues": issues,
         },
-        "recommended_apply_tool": "schematic_apply_design_intent",
+        "recommended_apply_tool": "schematic_start_design_intent_job",
+        "recommended_status_tool": "schematic_get_job_status",
     }
 
 
@@ -745,7 +746,7 @@ async def _project_design_state(
     blocking: list[str] = []
     if symbol_count == 0 and component_count == 0:
         stage = "empty_project"
-        next_tool = "schematic_apply_design_intent"
+        next_tool = "schematic_start_design_intent_job"
         next_args = {"project_path": report["project_path"]}
     elif not status.get("schematic_complete"):
         stage = "schematic_invalid"
@@ -820,7 +821,7 @@ def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[st
             _next_action(
                 "resolve_schematic_erc_errors",
                 "Resolve schematic ERC errors",
-                "schematic_apply_design_intent",
+                "schematic_start_design_intent_job",
                 "high",
                 "Generated schematic validation found ERC errors; rebuild from explicit design intent.",
                 {"erc_errors": erc_error_count, "erc": erc},
@@ -842,7 +843,7 @@ def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[st
             _next_action(
                 "complete_native_netlist",
                 "Rebuild schematic from intent",
-                "schematic_apply_design_intent",
+                "schematic_start_design_intent_job",
                 "high",
                 "Native KiCad netlist extraction is incomplete; use the single netlist-first generation path.",
                 {},

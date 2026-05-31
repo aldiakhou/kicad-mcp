@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 import re
 
@@ -16,6 +17,24 @@ pytestmark = [
     pytest.mark.requires_kicad,
     pytest.mark.skipif(not _kicad_cli_available(), reason="KiCad CLI not available"),
 ]
+
+
+async def _apply_intent_async(tools: dict, project_path: str, intent: dict) -> dict:
+    started = tools["schematic_start_design_intent_job"].fn(project_path, intent)
+    assert started["success"] is True
+    job_id = started["job_id"]
+
+    status = started
+    for _ in range(180):
+        status = tools["schematic_get_job_status"].fn(job_id)
+        if status["status"] in {"succeeded", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.5)
+
+    assert status["status"] == "succeeded", status
+    result = tools["schematic_get_job_result"].fn(job_id)
+    assert result["success"] is True, result
+    return result["result"]
 
 
 @pytest.mark.asyncio
@@ -73,7 +92,7 @@ async def test_custom_sensor_schematic_end_to_end(tmp_path: Path):
     assert preview["success"] is True
     assert preview["ready_to_apply"] is True
 
-    applied = tools["schematic_apply_design_intent"].fn(project["project_path"], intent)
+    applied = await _apply_intent_async(tools, project["project_path"], intent)
     assert applied["success"] is True
     assert applied["stage"] == "schematic_committed"
     assert applied["expected_netlist_match"] is True

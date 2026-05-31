@@ -4,6 +4,12 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from kicad_mcp.schematic_engine.apply_jobs import (
+    cancel_job,
+    get_job_result,
+    get_job_status,
+    start_apply_job,
+)
 from kicad_mcp.tools import creation_tools as ct
 from kicad_mcp.utils.design_intent_compiler import design_intent_schema
 
@@ -29,12 +35,36 @@ def register_design_intent_tools(mcp: FastMCP) -> None:
         project_path: str,
         intent: dict[str, Any],
     ) -> dict[str, Any]:
-        """Create or replace a schematic from high-level design intent."""
+        """Blocking compatibility apply; agents should use schematic_start_design_intent_job."""
         resolved_project = ct._resolve_project_alias(project_path, None, None)
         return ct._apply_via_netlist_first_engine(
             resolved_project,
             intent or {},
         )
+
+    @mcp.tool()
+    def schematic_start_design_intent_job(
+        project_path: str,
+        intent: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Start an asynchronous, cancellable schematic apply job."""
+        resolved_project = ct._resolve_project_alias(project_path, None, None)
+        return start_apply_job(resolved_project, intent or {})
+
+    @mcp.tool()
+    def schematic_get_job_status(job_id: str) -> dict[str, Any]:
+        """Poll progress for an asynchronous schematic apply job."""
+        return get_job_status(job_id)
+
+    @mcp.tool()
+    def schematic_get_job_result(job_id: str) -> dict[str, Any]:
+        """Fetch the final result for a completed schematic apply job."""
+        return get_job_result(job_id)
+
+    @mcp.tool()
+    def schematic_cancel_job(job_id: str) -> dict[str, Any]:
+        """Request cooperative cancellation for a queued or running schematic apply job."""
+        return cancel_job(job_id)
 
     @mcp.tool()
     def schematic_engine_status() -> dict[str, Any]:
@@ -81,5 +111,5 @@ def register_design_intent_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def schematic_design_intent_schema(section: str = "all") -> dict[str, Any]:
-        """Return compact schema examples for schematic_apply_design_intent."""
+        """Return compact schema examples for asynchronous design-intent apply jobs."""
         return design_intent_schema(section)

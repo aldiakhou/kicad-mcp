@@ -84,8 +84,11 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "create_kicad_project" in tools
     assert "discover_projects" in tools
     assert "get_project_structure" in tools
-    assert "schematic_apply_design_intent" in tools
     assert "schematic_preview_design_intent" in tools
+    assert "schematic_start_design_intent_job" in tools
+    assert "schematic_get_job_status" in tools
+    assert "schematic_get_job_result" in tools
+    assert "schematic_cancel_job" in tools
     assert "schematic_engine_status" in tools
     assert "schematic_validate_generated_schematic" in tools
     assert "export_schematic_preview" in tools
@@ -96,11 +99,8 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "resolve_symbols" in tools
     assert "resolve_footprint" in tools
     assert "resolve_footprints" in tools
+    assert "schematic_apply_design_intent" not in tools
     assert "schematic_apply_design_intent_safe" not in tools
-    assert "schematic_start_design_intent_job" not in tools
-    assert "schematic_get_job_status" not in tools
-    assert "schematic_get_job_result" not in tools
-    assert "schematic_cancel_job" not in tools
     # Legacy build/connection tools are not registered for the installed server.
     assert "schematic_apply_expanded_spec" not in tools
     assert "schematic_build_from_spec_v2" not in tools
@@ -151,7 +151,8 @@ async def test_create_server_advanced_profile_exposes_manual_schematic_tools(mon
     assert "list_footprint_libraries" in tools
     assert "pcb_complete_from_schematic" in tools
     assert "pcb_get_ratsnest" in tools
-    assert "schematic_apply_design_intent" in tools
+    assert "schematic_start_design_intent_job" in tools
+    assert "schematic_apply_design_intent" not in tools
     assert "schematic_apply_design_intent_safe" not in tools
 
     server_module.shutdown_server()
@@ -185,7 +186,8 @@ async def test_create_server_all_profile_exposes_curated_surface(monkeypatch):
 
     assert get_tool_profile() == "all"
     assert set(tools) == AGENT_PROFILE_TOOLS | ADVANCED_PROFILE_TOOLS | DEBUG_PROFILE_TOOLS
-    assert "schematic_apply_design_intent" in tools
+    assert "schematic_start_design_intent_job" in tools
+    assert "schematic_apply_design_intent" not in tools
     assert "schematic_apply_expanded_spec" not in tools
     assert "schematic_build_from_spec_v2" not in tools
     assert "schematic_apply_connection_plan" not in tools
