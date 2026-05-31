@@ -73,6 +73,7 @@ DESIGN_INTENT_TOP_LEVEL_SCHEMA = {
         "layout_hints": {},
         "paper": "A4",
         "allow_hidden_power": False,
+        "action": "replace | merge",
     },
     "alternate_flat_shape": {
         "interfaces": [{"type": "i2c"}],
@@ -93,6 +94,12 @@ DESIGN_INTENT_SCHEMA = {
         ],
         "required_fields": ["ref", "lib_id or pins", "value", "footprint for non-power parts"],
         "optional_fields": ["pins", "x", "y", "angle", "properties"],
+    },
+    "action": {
+        "example": "merge",
+        "values": ["replace", "merge", "add", "update", "patch"],
+        "default": "replace",
+        "notes": "Use merge/add/update/patch to combine the supplied intent with the last successfully committed intent for the project.",
     },
     "rails": {
         "example": {

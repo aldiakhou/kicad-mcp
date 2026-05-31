@@ -134,6 +134,20 @@ class TestParseSexprNetlist:
         assert NetlistEntry("C1", "1") in netlist.nets["+3V3"]
         assert NetlistEntry("U1", "4") in netlist.nets["GND"]
 
+    def test_decorated_pinfunction_alias(self):
+        """Decorated KiCad pin functions expose plain-name aliases."""
+        content = '''
+        (export (version "E")
+          (nets
+            (net (code 1) (name "RESET_N")
+              (node (ref "U1") (pin "4") (pinfunction "~{NRST}_4"))
+            )
+          )
+        )
+        '''
+        netlist = _parse_sexpr_netlist(content)
+        assert NetlistEntry("U1", "NRST") in netlist.nets["RESET_N"]
+
     def test_empty_content(self):
         """Empty content produces empty netlist."""
         netlist = _parse_sexpr_netlist("")

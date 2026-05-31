@@ -29,9 +29,14 @@ class KiCadLibraryError(FileNotFoundError):
 def list_symbol_libraries(query: str | None = None) -> list[dict[str, Any]]:
     """List available KiCad symbol library files."""
     libraries = []
+    seen: set[Path] = set()
     normalized_query = query.lower() if query else None
     for root in _symbol_roots():
         for library_file in sorted(root.glob("*.kicad_sym")):
+            resolved_file = library_file.resolve()
+            if resolved_file in seen:
+                continue
+            seen.add(resolved_file)
             name = library_file.stem
             if normalized_query and normalized_query not in name.lower():
                 continue
@@ -42,9 +47,14 @@ def list_symbol_libraries(query: str | None = None) -> list[dict[str, Any]]:
 def list_footprint_libraries(query: str | None = None) -> list[dict[str, Any]]:
     """List available KiCad footprint library directories."""
     libraries = []
+    seen: set[Path] = set()
     normalized_query = query.lower() if query else None
     for root in _footprint_roots():
         for library_dir in sorted(root.glob("*.pretty")):
+            resolved_dir = library_dir.resolve()
+            if resolved_dir in seen:
+                continue
+            seen.add(resolved_dir)
             name = library_dir.stem
             if normalized_query and normalized_query not in name.lower():
                 continue
@@ -57,30 +67,58 @@ def find_symbols(
     query: str, max_results: int = 10, library: str | None = None
 ) -> list[dict[str, Any]]:
     """Fuzzy-search installed KiCad symbols by library, symbol name, and metadata."""
-    normalized_query = _normalize_search_text(query)
+    return find_symbols_batch((query,), max_results=max_results, library=library).get(query, [])
+
+
+@lru_cache(maxsize=64)
+def find_symbols_batch(
+    queries: tuple[str, ...], max_results: int = 10, library: str | None = None
+) -> dict[str, list[dict[str, Any]]]:
+    """Search several symbol queries from one cached library index pass."""
+    requested = tuple(str(query).strip() for query in queries if str(query).strip())
+    max_count = max(1, int(max_results))
     normalized_library = _normalize_search_text(library or "")
-    if not normalized_query:
-        return []
-    matches: list[tuple[float, dict[str, Any]]] = []
-    for library in list_symbol_libraries():
-        library_name = library["name"]
-        if normalized_library and normalized_library not in _normalize_search_text(library_name):
+    query_state = {
+        query: {
+            "normalized": _normalize_search_text(query),
+            "lower": query.lower(),
+            "matches": [],
+        }
+        for query in requested
+        if _normalize_search_text(query)
+    }
+    if not query_state:
+        return {query: [] for query in requested}
+
+    for library_info in list_symbol_libraries():
+        library_name = library_info["name"]
+        normalized_library_name = _normalize_search_text(library_name)
+        if normalized_library and normalized_library not in normalized_library_name:
             continue
-        library_query_match = normalized_query in _normalize_search_text(library_name)
+
         try:
-            library_text = Path(library["path"]).read_text(encoding="utf-8")
-            if (
-                not library_query_match
-                and query.lower() not in library_text.lower()
-                and SequenceMatcher(
-                    None, normalized_query, _normalize_search_text(library_name)
-                ).ratio()
-                < 0.62
-            ):
-                continue
-            root = parse_s_expression(library_text)
-        except (OSError, UnicodeDecodeError, SExpressionError):
+            library_text = Path(library_info["path"]).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
+
+        library_text_lower = library_text.lower()
+        candidate_queries = []
+        for query, state in query_state.items():
+            library_query_match = state["normalized"] in normalized_library_name
+            if (
+                library_query_match
+                or state["lower"] in library_text_lower
+                or SequenceMatcher(None, state["normalized"], normalized_library_name).ratio() >= 0.62
+            ):
+                candidate_queries.append(query)
+        if not candidate_queries:
+            continue
+
+        try:
+            root = parse_s_expression(library_text)
+        except SExpressionError:
+            continue
+
         for symbol in root.child_lists("symbol"):
             symbol_name = _atom_text(symbol.items[1] if len(symbol.items) > 1 else None) or ""
             lib_id = f"{library_name}:{symbol_name}"
@@ -101,27 +139,29 @@ def find_symbols(
                     default_footprint,
                 ]
             )
-            score = _search_score(normalized_query, searchable, lib_id)
-            if score <= 0:
-                continue
-            matches.append(
-                (
-                    score,
-                    {
-                        "lib_id": lib_id,
-                        "library": library_name,
-                        "symbol": symbol_name,
-                        "description": properties.get("Description")
-                        or properties.get("ki_description", ""),
-                        "keywords": properties.get("Keywords")
-                        or properties.get("ki_keywords", ""),
-                        "footprint_filters": footprint_filters,
-                        "default_footprint": default_footprint,
-                    },
-                )
-            )
-    matches.sort(key=lambda item: (-item[0], item[1]["lib_id"]))
-    return [item for _, item in matches[: max(1, int(max_results))]]
+            public = {
+                "lib_id": lib_id,
+                "library": library_name,
+                "symbol": symbol_name,
+                "description": properties.get("Description")
+                or properties.get("ki_description", ""),
+                "keywords": properties.get("Keywords")
+                or properties.get("ki_keywords", ""),
+                "footprint_filters": footprint_filters,
+                "default_footprint": default_footprint,
+            }
+            for query in candidate_queries:
+                state = query_state[query]
+                score = _search_score(state["normalized"], searchable, lib_id)
+                if score > 0:
+                    state["matches"].append((score, public))
+
+    results: dict[str, list[dict[str, Any]]] = {}
+    for query in requested:
+        matches = query_state.get(query, {}).get("matches", [])
+        matches.sort(key=lambda item: (-item[0], item[1]["lib_id"]))
+        results[query] = [deepcopy(item) for _score, item in matches[:max_count]]
+    return results
 
 
 @lru_cache(maxsize=256)
@@ -332,6 +372,18 @@ def _normalize_search_text(value: str) -> str:
 def _search_score(normalized_query: str, searchable: str, identifier: str) -> float:
     normalized_searchable = _normalize_search_text(searchable)
     normalized_identifier = _normalize_search_text(identifier)
+    return _search_score_from_normalized(
+        normalized_query,
+        normalized_searchable,
+        normalized_identifier,
+    )
+
+
+def _search_score_from_normalized(
+    normalized_query: str,
+    normalized_searchable: str,
+    normalized_identifier: str,
+) -> float:
     if normalized_query in normalized_identifier:
         return 100.0 - (len(normalized_identifier) - len(normalized_query)) * 0.01
     if normalized_query in normalized_searchable:
@@ -340,6 +392,58 @@ def _search_score(normalized_query: str, searchable: str, identifier: str) -> fl
     if ratio >= 0.62:
         return ratio * 60.0
     return 0.0
+
+
+@lru_cache(maxsize=8)
+def _symbol_search_records() -> tuple[dict[str, Any], ...]:
+    records: list[dict[str, Any]] = []
+    for library in list_symbol_libraries():
+        library_name = library["name"]
+        try:
+            library_text = Path(library["path"]).read_text(encoding="utf-8")
+            root = parse_s_expression(library_text)
+        except (OSError, UnicodeDecodeError, SExpressionError):
+            continue
+        for symbol in root.child_lists("symbol"):
+            symbol_name = _atom_text(symbol.items[1] if len(symbol.items) > 1 else None) or ""
+            lib_id = f"{library_name}:{symbol_name}"
+            properties = _symbol_properties(symbol)
+            default_footprint = properties.get("Footprint", "")
+            footprint_filters = _split_footprint_filters(properties.get("ki_fp_filters", ""))
+            searchable = " ".join(
+                [
+                    lib_id,
+                    library_name,
+                    symbol_name,
+                    properties.get("Value", ""),
+                    properties.get("Description", ""),
+                    properties.get("ki_description", ""),
+                    properties.get("Keywords", ""),
+                    properties.get("ki_keywords", ""),
+                    properties.get("ki_fp_filters", ""),
+                    default_footprint,
+                ]
+            )
+            public = {
+                "lib_id": lib_id,
+                "library": library_name,
+                "symbol": symbol_name,
+                "description": properties.get("Description")
+                or properties.get("ki_description", ""),
+                "keywords": properties.get("Keywords")
+                or properties.get("ki_keywords", ""),
+                "footprint_filters": footprint_filters,
+                "default_footprint": default_footprint,
+            }
+            records.append(
+                {
+                    "normalized_library": _normalize_search_text(library_name),
+                    "normalized_searchable": _normalize_search_text(searchable),
+                    "normalized_identifier": _normalize_search_text(lib_id),
+                    "public": public,
+                }
+            )
+    return tuple(records)
 
 
 def _find_symbol_library(library_name: str) -> Path | None:

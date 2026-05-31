@@ -69,6 +69,14 @@ def _patch_pipeline(monkeypatch, tmp_path: Path, verifier):
     )
     monkeypatch.setattr("kicad_mcp.schematic_engine.pipeline.SchematicWriter", FakeWriter)
     monkeypatch.setattr("kicad_mcp.schematic_engine.pipeline.KicadCliVerifier", verifier)
+    monkeypatch.setattr(
+        "kicad_mcp.schematic_engine.pipeline._count_symbols_in_paths",
+        lambda paths: 1,
+    )
+    monkeypatch.setattr(
+        "kicad_mcp.schematic_engine.pipeline._count_symbols_in_project",
+        lambda project_path: 1,
+    )
 
 
 def test_apply_rolls_back_on_kicad_cli_failure(tmp_path: Path, monkeypatch):
@@ -119,4 +127,38 @@ def test_apply_success_requires_kicad_netlist_output(tmp_path: Path, monkeypatch
     assert result["rolled_back"] is True
     assert result["stage"] == "netlist_mismatch"
     assert "netlist export did not produce output" in result["error"]
+    assert (tmp_path / "demo.kicad_sch").read_text(encoding="utf-8") == "original schematic"
+
+
+def test_apply_rolls_back_on_empty_generated_schematic(tmp_path: Path, monkeypatch):
+    project_path = _write_project(tmp_path)
+
+    class Verifier:
+        def __init__(self, output_dir=None):
+            self.output_dir = output_dir
+
+        def verify(self, *args, **kwargs):
+            return SimpleNamespace(
+                erc_errors=0,
+                erc_warnings=0,
+                erc_total=0,
+                erc_path=None,
+                svg_dir=None,
+                netlist_path=str(tmp_path / "actual.net"),
+            )
+
+    _patch_pipeline(monkeypatch, tmp_path, Verifier)
+    monkeypatch.setattr(
+        "kicad_mcp.schematic_engine.pipeline._count_symbols_in_paths",
+        lambda paths: 0,
+    )
+
+    result = apply_design_intent_netlist_first(str(project_path), {"parts": []})
+
+    assert result["success"] is False
+    assert result["changed"] is False
+    assert result["rolled_back"] is True
+    assert result["stage"] == "persistence_verification_failed"
+    assert result["output_symbol_count"] == 0
+    assert "expected at least 1 symbol" in result["error"]
     assert (tmp_path / "demo.kicad_sch").read_text(encoding="utf-8") == "original schematic"

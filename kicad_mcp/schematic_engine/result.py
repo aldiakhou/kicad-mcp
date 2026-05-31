@@ -40,6 +40,9 @@ class EngineResult:
     part_count: int = 0
     net_count: int = 0
     endpoint_count: int = 0
+    output_symbol_count: int = 0
+    intent_action: str | None = None
+    intent_state_path: str | None = None
 
     # Job progress
     progress: dict[str, Any] = field(default_factory=dict)
@@ -85,6 +88,11 @@ class EngineResult:
             result["part_count"] = self.part_count
             result["net_count"] = self.net_count
             result["endpoint_count"] = self.endpoint_count
+        result["output_symbol_count"] = self.output_symbol_count
+        if self.intent_action:
+            result["intent_action"] = self.intent_action
+        if self.intent_state_path:
+            result["intent_state_path"] = self.intent_state_path
         if self.recommended_next_tool:
             result["recommended_next_tool"] = self.recommended_next_tool
         return result

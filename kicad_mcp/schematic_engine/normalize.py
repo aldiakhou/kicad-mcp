@@ -10,6 +10,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from kicad_mcp.schematic_engine.custom_symbols import (
+    CUSTOM_PINS_PROPERTY,
+    custom_lib_id,
+    encode_custom_pins,
+    normalize_custom_pins,
+)
 from kicad_mcp.schematic_engine.models import (
     CanonicalCircuit,
     CircuitEndpoint,
@@ -85,12 +91,12 @@ def normalize_design_intent(
     ref_allocator = GeneratedRefAllocator({part.ref for part in parts})
 
     # --- Extract rails ---
-    for rail_spec in intent.get("rails", []):
+    for rail_spec in _normalize_rail_specs(intent.get("rails", [])):
         rail_name = rail_spec.get("net") or rail_spec.get("name", "")
         if not rail_name:
             continue
         rails.add(rail_name)
-        for connection in rail_spec.get("connections", []):
+        for connection in _rail_connections(rail_spec):
             ref = connection.get("ref", "")
             pins = connection.get("pins", [])
             if isinstance(pins, str):
@@ -125,11 +131,13 @@ def normalize_design_intent(
             endpoints.extend(iface_endpoints)
 
     # --- Extract bulk_connections ---
-    for bulk in intent.get("bulk_connections", []):
+    for bulk in _normalize_object_list(intent.get("bulk_connections", []), "bulk_connections"):
         net_name = bulk.get("net", "")
+        if not net_name and bulk.get("type") == "pin_to_net":
+            net_name = bulk.get("net_name", "")
         if not net_name:
             continue
-        for conn in bulk.get("endpoints", []):
+        for conn in _bulk_connections(bulk):
             ref = conn.get("ref", "")
             pin = conn.get("pin", "")
             if ref and pin:
@@ -143,7 +151,11 @@ def normalize_design_intent(
                 ))
 
     # --- Extract support_circuits ---
-    for sc in intent.get("support_circuits", []):
+    for sc in _normalize_grouped_entries(
+        intent.get("support_circuits", []),
+        "support_circuits",
+        type_key="type",
+    ):
         sc_parts, sc_endpoints = _normalize_support_circuit(sc, ref_allocator)
         parts.extend(sc_parts)
         endpoints.extend(sc_endpoints)
@@ -151,12 +163,12 @@ def normalize_design_intent(
             blocks.setdefault(p.block, []).append(p.ref)
 
     # --- Extract pin_rules ---
-    for rule in intent.get("pin_rules", []):
+    for rule in _normalize_object_list(intent.get("pin_rules", []), "pin_rules"):
         rule_endpoints = _normalize_pin_rule(rule)
         endpoints.extend(rule_endpoints)
 
     # --- Extract no_connect_rules ---
-    for nc_rule in intent.get("no_connect_rules", []):
+    for nc_rule in _normalize_object_list(intent.get("no_connect_rules", []), "no_connect_rules"):
         ref = nc_rule.get("ref", "")
         pins = nc_rule.get("pins", [])
         if isinstance(pins, str):
@@ -184,18 +196,25 @@ def normalize_design_intent(
 
 def _normalize_part(part_spec: dict[str, Any]) -> CircuitPart:
     """Convert a part spec dict to a CircuitPart."""
+    if not isinstance(part_spec, dict):
+        raise ValueError(f"Part entry must be an object: {part_spec!r}")
     ref = part_spec.get("ref", "")
     if not ref:
         raise ValueError(f"Part missing 'ref': {part_spec}")
     lib_id = part_spec.get("lib_id", "")
-    if not lib_id:
-        raise ValueError(f"Part '{ref}' missing 'lib_id'")
-
     value = part_spec.get("value", "")
+    properties = {}
+    if not lib_id:
+        if "pins" not in part_spec:
+            raise ValueError(f"Part '{ref}' missing 'lib_id' or custom 'pins'")
+        custom_pins = normalize_custom_pins(part_spec.get("pins"), ref=ref)
+        lib_id = custom_lib_id(ref, value or ref)
+        properties[CUSTOM_PINS_PROPERTY] = encode_custom_pins(custom_pins)
+        properties["KICAD_MCP_CUSTOM_SYMBOL"] = "true"
+
     footprint = part_spec.get("footprint")
     block = part_spec.get("block", "default")
     role = part_spec.get("role")
-    properties = {}
 
     # Apply default footprint for passives
     if not footprint:
@@ -207,6 +226,8 @@ def _normalize_part(part_spec: dict[str, Any]) -> CircuitPart:
     for key in ("position", "angle", "mirror"):
         if key in part_spec:
             properties[key] = str(part_spec[key])
+    for key, value_item in (part_spec.get("properties") or {}).items():
+        properties[str(key)] = str(value_item)
 
     return CircuitPart(
         ref=ref,
@@ -221,6 +242,8 @@ def _normalize_part(part_spec: dict[str, Any]) -> CircuitPart:
 
 def _normalize_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
     """Convert an interface spec to endpoints."""
+    if not isinstance(iface_spec, dict):
+        raise ValueError(f"Interface entry must be an object: {iface_spec!r}")
     endpoints: list[CircuitEndpoint] = []
     iface_type = iface_spec.get("type", "")
     connections = iface_spec.get("connections", [])
@@ -242,6 +265,9 @@ def _normalize_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
                     source=f"interface:{iface_type}",
                 ))
 
+    if str(iface_type).lower() == "i2c":
+        endpoints.extend(_normalize_i2c_interface(iface_spec))
+
     # Handle shorthand interface definitions
     signals = iface_spec.get("signals", {})
     for signal_name, signal_def in signals.items():
@@ -262,14 +288,71 @@ def _normalize_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
     return endpoints
 
 
+def _normalize_i2c_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
+    """Normalize the public schema's controller/devices I2C shorthand."""
+    endpoints: list[CircuitEndpoint] = []
+    controller = iface_spec.get("controller")
+    devices = iface_spec.get("devices", [])
+    if not isinstance(controller, dict) or not isinstance(devices, list):
+        return endpoints
+
+    iface_name = str(iface_spec.get("name") or "I2C").upper()
+    scl_net = str(iface_spec.get("scl_net") or f"{iface_name}_SCL")
+    sda_net = str(iface_spec.get("sda_net") or f"{iface_name}_SDA")
+    controller_ref = str(controller.get("ref") or "")
+    if controller_ref:
+        if controller.get("scl"):
+            endpoints.append(CircuitEndpoint(
+                ref=controller_ref,
+                pin=str(controller["scl"]),
+                net=scl_net,
+                required=True,
+                source=f"interface:{iface_spec.get('type', 'i2c')}:controller",
+            ))
+        if controller.get("sda"):
+            endpoints.append(CircuitEndpoint(
+                ref=controller_ref,
+                pin=str(controller["sda"]),
+                net=sda_net,
+                required=True,
+                source=f"interface:{iface_spec.get('type', 'i2c')}:controller",
+            ))
+
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        ref = str(device.get("ref") or "")
+        if not ref:
+            continue
+        if device.get("scl"):
+            endpoints.append(CircuitEndpoint(
+                ref=ref,
+                pin=str(device["scl"]),
+                net=scl_net,
+                required=True,
+                source=f"interface:{iface_spec.get('type', 'i2c')}:device",
+            ))
+        if device.get("sda"):
+            endpoints.append(CircuitEndpoint(
+                ref=ref,
+                pin=str(device["sda"]),
+                net=sda_net,
+                required=True,
+                source=f"interface:{iface_spec.get('type', 'i2c')}:device",
+            ))
+    return endpoints
+
+
 def _normalize_support_circuit(
     sc_spec: dict[str, Any],
     ref_allocator: GeneratedRefAllocator,
 ) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Convert a support circuit spec to parts and endpoints."""
+    if not isinstance(sc_spec, dict):
+        raise ValueError(f"Support circuit entry must be an object: {sc_spec!r}")
     parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
-    sc_type = sc_spec.get("type", "")
+    sc_type = _canonical_support_type(str(sc_spec.get("type", "")))
     target = sc_spec.get("target", "")
 
     if sc_type == "decoupling":
@@ -286,6 +369,12 @@ def _normalize_support_circuit(
         parts, endpoints = _normalize_led(sc_spec, target, ref_allocator)
     elif sc_type == "ferrite":
         parts, endpoints = _normalize_ferrite(sc_spec, target, ref_allocator)
+    elif sc_type == "power_flag":
+        parts, endpoints = _normalize_power_flag(sc_spec, ref_allocator)
+    elif sc_type == "connector_header":
+        parts, endpoints = _normalize_connector_header(sc_spec, ref_allocator)
+    elif sc_type:
+        raise ValueError(f"Unsupported support circuit type '{sc_spec.get('type')}'")
 
     return parts, endpoints
 
@@ -536,8 +625,19 @@ def _normalize_pull_resistors(
     endpoints: list[CircuitEndpoint] = []
 
     rail = spec.get("rail", "+3V3" if pull_type == "pullup" else "GND")
+    if pull_type == "pulldown":
+        rail = spec.get("ground", rail)
     value = spec.get("value", "4.7k")
     signals = spec.get("signals", [])
+    if not signals:
+        signal = spec.get("net")
+        if signal:
+            signals = [signal]
+    target_pin = spec.get("pin") or spec.get("target_pin")
+    target_ref = spec.get("ref") or target
+    target_net = spec.get("net")
+    if target_pin and target_ref and target_net and target_net not in signals:
+        signals = [*signals, target_net]
     if isinstance(signals, str):
         signals = [signals]
 
@@ -575,6 +675,12 @@ def _normalize_pull_resistors(
             ref=ref, pin=signal_pin, net=net_name,
             required=True, source=f"support_circuit:{pull_type}",
         ))
+
+        if target_pin and target_ref and net_name == target_net:
+            endpoints.append(CircuitEndpoint(
+                ref=str(target_ref), pin=str(target_pin), net=net_name,
+                required=True, source=f"support_circuit:{pull_type}:target",
+            ))
 
     return parts, endpoints
 
@@ -727,6 +833,70 @@ def _normalize_ferrite(
     return parts, endpoints
 
 
+def _normalize_power_flag(
+    spec: dict[str, Any],
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
+    explicit_ref = spec.get("ref")
+    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("#FLG")
+    net = spec.get("net") or spec.get("rail") or "+3V3"
+    part = CircuitPart(
+        ref=ref,
+        lib_id="power:PWR_FLAG",
+        value="PWR_FLAG",
+        footprint=None,
+        block="power",
+        role="power_flag",
+        properties={"KICAD_MCP_ROLE": "power_flag"},
+    )
+    return [part], [
+        CircuitEndpoint(
+            ref=ref,
+            pin="1",
+            net=str(net),
+            required=True,
+            allow_hidden=True,
+            source="support_circuit:power_flag",
+        )
+    ]
+
+
+def _normalize_connector_header(
+    spec: dict[str, Any],
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
+    explicit_ref = spec.get("ref")
+    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("J")
+    nets = spec.get("pins") or spec.get("nets") or []
+    if isinstance(nets, str):
+        nets = [nets]
+    pin_count = int(spec.get("pin_count") or len(nets) or 1)
+    part = CircuitPart(
+        ref=ref,
+        lib_id=spec.get("lib_id", f"Connector_Generic:Conn_01x{pin_count:02d}"),
+        value=spec.get("value") or spec.get("name") or f"Conn_01x{pin_count:02d}",
+        footprint=spec.get(
+            "footprint",
+            f"Connector_PinHeader_2.54mm:PinHeader_1x{pin_count:02d}_P2.54mm_Vertical",
+        ),
+        block=spec.get("target") or "interfaces",
+        role="connector_header",
+        properties={"KICAD_MCP_ROLE": "connector_header"},
+    )
+    endpoints = [
+        CircuitEndpoint(
+            ref=ref,
+            pin=str(index),
+            net=str(net),
+            required=True,
+            source="support_circuit:connector_header",
+        )
+        for index, net in enumerate(nets, start=1)
+        if str(net)
+    ]
+    return [part], endpoints
+
+
 def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
     """Convert a pin rule into explicit endpoints.
 
@@ -738,11 +908,23 @@ def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
     against actual symbol pins at compilation time.
     """
     endpoints: list[CircuitEndpoint] = []
+    if not isinstance(rule, dict):
+        raise ValueError(f"Pin rule entry must be an object: {rule!r}")
     ref = rule.get("ref", "")
     net = rule.get("net", "")
 
     # Direct pin list format
     pins = rule.get("pins", [])
+    pin = rule.get("pin") or rule.get("number") or rule.get("name")
+    if pin:
+        pins = [pin, *pins] if isinstance(pins, list) else [pin, pins]
+    names = rule.get("names", [])
+    numbers = rule.get("numbers", [])
+    for extra in (names, numbers):
+        if isinstance(extra, str):
+            pins = [*pins, extra] if isinstance(pins, list) else [pins, extra]
+        elif isinstance(extra, list):
+            pins = [*pins, *extra] if isinstance(pins, list) else [pins, *extra]
     if isinstance(pins, str):
         pins = [pins]
 
@@ -759,8 +941,16 @@ def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
 
     # Match format: resolve regex patterns to pin names
     match_spec = rule.get("match")
+    if not match_spec:
+        match_spec = {
+            key: rule.get(key)
+            for key in ("name_regex", "number_regex", "pin_type", "name_contains")
+            if rule.get(key)
+        }
     if match_spec and isinstance(match_spec, dict) and ref and net:
         name_regex = match_spec.get("name_regex", "")
+        if not name_regex and match_spec.get("name"):
+            name_regex = f"^{re.escape(str(match_spec['name']))}$"
         if name_regex:
             # Store as a special endpoint with the regex pattern
             # The pin field contains the regex for later resolution
@@ -774,6 +964,125 @@ def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
             ))
 
     return endpoints
+
+
+def _normalize_object_list(raw: Any, path: str) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{path} must be a list")
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"{path}[{index}] must be an object")
+        result.append(dict(item))
+    return result
+
+
+def _normalize_grouped_entries(raw: Any, path: str, *, type_key: str) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, list):
+        entries = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"{path}[{index}] must be an object")
+            entries.append(dict(item))
+        return entries
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} must be a list or grouped object")
+
+    entries: list[dict[str, Any]] = []
+    for group, group_value in raw.items():
+        if group_value in (None, ""):
+            continue
+        items = group_value if isinstance(group_value, list) else [group_value]
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError(f"{path}.{group}[{index}] must be an object")
+            normalized = dict(item)
+            normalized.setdefault(type_key, group)
+            entries.append(normalized)
+    return entries
+
+
+def _normalize_rail_specs(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, list):
+        return _normalize_object_list(raw, "rails")
+    if not isinstance(raw, dict):
+        raise ValueError("rails must be a list or object")
+    result: list[dict[str, Any]] = []
+    for rail_name, spec in raw.items():
+        if isinstance(spec, dict):
+            normalized = dict(spec)
+        elif isinstance(spec, list):
+            normalized = {"pins": spec}
+        else:
+            raise ValueError(f"rails.{rail_name} must be an object or pins list")
+        normalized.setdefault("name", str(rail_name))
+        result.append(normalized)
+    return result
+
+
+def _rail_connections(rail_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    connections = rail_spec.get("connections", [])
+    if connections:
+        if not isinstance(connections, list):
+            raise ValueError("rail connections must be a list")
+        return [dict(item) for item in connections if isinstance(item, dict)]
+
+    pins = rail_spec.get("pins", [])
+    if isinstance(pins, str):
+        pins = [pins]
+    result: list[dict[str, Any]] = []
+    for item in pins:
+        if isinstance(item, dict):
+            result.append(dict(item))
+        elif isinstance(item, list | tuple) and len(item) >= 2:
+            result.append({"ref": item[0], "pins": [item[1]]})
+        elif isinstance(item, str) and ":" in item:
+            ref, pin = item.split(":", 1)
+            result.append({"ref": ref, "pins": [pin]})
+        else:
+            raise ValueError(f"Invalid rail pin entry: {item!r}")
+    return result
+
+
+def _bulk_connections(bulk: dict[str, Any]) -> list[dict[str, Any]]:
+    if bulk.get("ref") and bulk.get("pin"):
+        return [{"ref": bulk["ref"], "pin": bulk["pin"]}]
+
+    endpoints = bulk.get("endpoints", [])
+    if endpoints:
+        if not isinstance(endpoints, list):
+            raise ValueError("bulk connection endpoints must be a list")
+        return [dict(item) for item in endpoints if isinstance(item, dict)]
+
+    pins = bulk.get("pins", [])
+    if isinstance(pins, str):
+        pins = [pins]
+    result: list[dict[str, Any]] = []
+    for item in pins:
+        if isinstance(item, dict):
+            result.append(dict(item))
+        elif isinstance(item, list | tuple) and len(item) >= 2:
+            result.append({"ref": item[0], "pin": item[1]})
+        elif isinstance(item, str) and ":" in item:
+            ref, pin = item.split(":", 1)
+            result.append({"ref": ref, "pin": pin})
+        else:
+            raise ValueError(f"Invalid bulk connection pin entry: {item!r}")
+    return result
+
+
+def _canonical_support_type(raw_type: str) -> str:
+    aliases = {
+        "led_indicator": "led",
+        "ferrite_filter": "ferrite",
+    }
+    return aliases.get(raw_type, raw_type)
 
 
 def _validate_no_duplicate_refs(parts: list[CircuitPart]) -> None:

@@ -248,4 +248,14 @@ def _pinfunction_aliases(pinfunction: str, pin_number: str) -> set[str]:
     suffix = f"_{pin_number}"
     if pinfunction.endswith(suffix) and len(pinfunction) > len(suffix):
         aliases.add(pinfunction[: -len(suffix)])
+    for alias in list(aliases):
+        stripped = (
+            alias.replace("~{", "")
+            .replace("}", "")
+            .replace("{", "")
+            .replace("~", "")
+            .replace("/", "")
+        )
+        if stripped:
+            aliases.add(stripped)
     return aliases

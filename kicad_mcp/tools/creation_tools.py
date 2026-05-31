@@ -35,6 +35,9 @@ from kicad_mcp.utils.library_resolver import (
     find_symbols as search_symbols,
 )
 from kicad_mcp.utils.library_resolver import (
+    find_symbols_batch as search_symbols_batch,
+)
+from kicad_mcp.utils.library_resolver import (
     resolve_footprint as resolve_footprint_node,
 )
 from kicad_mcp.utils.library_resolver import (
@@ -290,7 +293,25 @@ def _find_symbols_batch_for_tool(
     library: str | None,
 ) -> dict[str, Any]:
     requested = [str(item) for item in queries if str(item).strip()]
-    results = [_find_symbols_for_tool(item, max_results, library) for item in requested]
+    batch_matches = search_symbols_batch(tuple(requested), max_results=max_results, library=library)
+    results = [
+        {
+            "success": True,
+            "query": item,
+            "library": library,
+            "count": len(batch_matches.get(item, [])),
+            "matches": batch_matches.get(item, []),
+            "suggested_queries": (
+                _suggested_library_queries(item, "symbol")
+                if not batch_matches.get(item, [])
+                else []
+            ),
+            "recommended_next_tool": (
+                "resolve_symbols" if len(batch_matches.get(item, [])) > 1 else "resolve_symbol"
+            ),
+        }
+        for item in requested
+    ]
     return {
         "success": bool(results),
         "queries": requested,
@@ -403,13 +424,15 @@ def _preview_design_intent_netlist_first(
     Runs: normalize → resolve symbols → SKiDL compile → sheet planning → visual lint
     Returns a summary without writing any schematic files.
     """
+    from kicad_mcp.schematic_engine.intent_state import prepare_intent_for_action
     from kicad_mcp.schematic_engine.normalize import normalize_design_intent
     from kicad_mcp.schematic_engine.sheet_planner import plan_sheets
     from kicad_mcp.schematic_engine.skidl_compiler import SkidlCompiler
     from kicad_mcp.schematic_engine.visual_lint import visual_lint
 
     try:
-        canonical = normalize_design_intent(project_path, intent)
+        effective_intent, intent_action = prepare_intent_for_action(project_path, intent)
+        canonical = normalize_design_intent(project_path, effective_intent)
     except (ValueError, KeyError) as e:
         return {
             "success": False,
@@ -463,6 +486,7 @@ def _preview_design_intent_netlist_first(
         "stage": "preview",
         "changed": False,
         "engine": "skidl_kiutils_kicad_cli",
+        "intent_action": intent_action,
         "ready_to_apply": len(blocking_issues) == 0,
         "blocking_issue_count": len(blocking_issues),
         "issues": issues,

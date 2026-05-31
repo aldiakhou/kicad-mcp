@@ -47,11 +47,35 @@ class TestNormalizeDesignIntent:
         with pytest.raises(ValueError, match="missing 'ref'"):
             normalize_design_intent("/tmp/test.kicad_pro", intent)
 
-    def test_missing_lib_id_raises(self):
-        """Parts without lib_id raise ValueError."""
+    def test_missing_lib_id_or_pins_raises(self):
+        """Parts without lib_id or custom pins raise ValueError."""
         intent = {"parts": [{"ref": "R1", "value": "10k"}]}
-        with pytest.raises(ValueError, match="missing 'lib_id'"):
+        with pytest.raises(ValueError, match="missing 'lib_id' or custom 'pins'"):
             normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+    def test_pins_only_custom_part(self):
+        """Pins-only custom parts are accepted and converted to inline symbols."""
+        intent = {
+            "parts": [
+                {
+                    "ref": "U3",
+                    "value": "DPS310",
+                    "footprint": "Package_LGA:LGA-8_2x2mm_P0.5mm",
+                    "pins": [
+                        {"number": "1", "name": "SCL", "pintype": "input"},
+                        {"number": "2", "name": "SDA", "pintype": "bidirectional"},
+                        {"number": "3", "name": "GND", "pintype": "power_in"},
+                    ],
+                }
+            ]
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        part = canonical.part_by_ref("U3")
+        assert part is not None
+        assert part.lib_id == "kicad_mcp:DPS310"
+        assert "KICAD_MCP_CUSTOM_PINS" in part.properties
 
     def test_rails(self):
         """Rails generate correct endpoints."""
@@ -72,6 +96,20 @@ class TestNormalizeDesignIntent:
         assert len(vdd_eps) == 2
         assert vdd_eps[0].ref == "U1"
         assert vdd_eps[0].pin == "VDD"
+
+    def test_object_style_rails(self):
+        """Object-style rails from the public schema are accepted."""
+        intent = {
+            "parts": [{"ref": "U1", "lib_id": "Device:R", "value": "10k"}],
+            "rails": {
+                "+3V3": {"pins": [["U1", "1"]]},
+                "GND": {"pins": [["U1", "2"]]},
+            },
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert {ep.net for ep in canonical.endpoints} == {"+3V3", "GND"}
 
     def test_interfaces(self):
         """Interfaces with connections generate endpoints."""
@@ -116,6 +154,38 @@ class TestNormalizeDesignIntent:
         assert len(canonical.endpoints) == 1
         assert canonical.endpoints[0].net == "MY_NET"
 
+    def test_bulk_connections_public_pins_shorthand(self):
+        """Public schema pins shorthand generates endpoints."""
+        intent = {
+            "parts": [{"ref": "U1", "lib_id": "Device:R", "value": "10k"}],
+            "bulk_connections": [{"net": "MY_NET", "pins": [["U1", "1"], "U1:2"]}],
+        }
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        assert {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints} == {
+            ("U1", "1", "MY_NET"),
+            ("U1", "2", "MY_NET"),
+        }
+
+    def test_i2c_interface_public_schema(self):
+        """Controller/devices I2C schema generates SCL/SDA endpoints."""
+        intent = {
+            "parts": [
+                {"ref": "U1", "lib_id": "Device:R", "value": "MCU"},
+                {"ref": "U2", "lib_id": "Device:R", "value": "Sensor"},
+            ],
+            "interfaces": [
+                {
+                    "type": "i2c",
+                    "name": "SENSOR_I2C",
+                    "controller": {"ref": "U1", "scl": "1", "sda": "2"},
+                    "devices": [{"ref": "U2", "scl": "1", "sda": "2"}],
+                }
+            ],
+        }
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        assert len([ep for ep in canonical.endpoints if ep.net == "SENSOR_I2C_SCL"]) == 2
+        assert len([ep for ep in canonical.endpoints if ep.net == "SENSOR_I2C_SDA"]) == 2
+
     def test_no_connect_rules(self):
         """No-connect rules are captured."""
         intent = {
@@ -148,6 +218,26 @@ class TestNormalizeDesignIntent:
         decap_parts = [p for p in canonical.parts if p.role == "decoupling"]
         assert len(decap_parts) == 2
         assert decap_parts[0].properties["KICAD_MCP_TARGET"] == "U2"
+
+    def test_grouped_support_circuits_do_not_crash(self):
+        """Grouped support_circuits object is normalized before expansion."""
+        intent = {
+            "parts": [{"ref": "U1", "lib_id": "Device:R", "value": "10k"}],
+            "support_circuits": {
+                "decoupling": [
+                    {"target": "U1", "rail": "+3V3", "ground": "GND", "capacitors": ["100n"]}
+                ],
+                "pullup": [
+                    {"target": "U1", "pin": "1", "net": "RESET_N", "rail": "+3V3", "value": "10k"}
+                ],
+            },
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert [part.ref for part in canonical.parts if part.role == "decoupling"] == ["C1"]
+        assert [part.ref for part in canonical.parts if part.role == "pullup"] == ["R1"]
+        assert any(ep.ref == "U1" and ep.pin == "1" and ep.net == "RESET_N" for ep in canonical.endpoints)
 
     def test_crystal_support_circuit(self):
         """Crystal support circuits generate crystal + load caps."""

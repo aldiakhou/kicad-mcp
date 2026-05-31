@@ -13,8 +13,10 @@ import logging
 import os
 from typing import Any
 
+from kicad_mcp.schematic_engine.custom_symbols import is_custom_lib_id
 from kicad_mcp.schematic_engine.library_map import resolve_lib_id
 from kicad_mcp.schematic_engine.models import CanonicalCircuit, NetlistEntry, NormalizedNetlist
+from kicad_mcp.utils.schematic_pins import _resolve_symbol_pins
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +84,23 @@ class SkidlCompiler:
 
             circuit = Circuit()
             parts_by_ref: dict[str, Any] = {}
+            part_defs_by_ref = {part.ref: part for part in canonical.parts}
+            pin_aliases_by_ref: dict[str, dict[str, str]] = {}
             nets_by_name: dict[str, Any] = {}
             erc_warnings: list[str] = []
             erc_errors: list[str] = []
 
             # Create parts
             parts_failed = 0
+            custom_refs: set[str] = set()
             for part_def in canonical.parts:
+                if is_custom_lib_id(part_def.lib_id):
+                    custom_refs.add(part_def.ref)
+                    erc_warnings.append(
+                        f"Using inline custom symbol for {part_def.ref}; "
+                        "KiCad CLI netlist export is authoritative for this part"
+                    )
+                    continue
                 lib, name = resolve_lib_id(part_def.lib_id)
                 try:
                     skidl_part = Part(
@@ -100,6 +112,7 @@ class SkidlCompiler:
                         circuit=circuit,
                     )
                     parts_by_ref[part_def.ref] = skidl_part
+                    pin_aliases_by_ref[part_def.ref] = _pin_alias_lookup(part_def.lib_id)
                 except Exception as e:
                     parts_failed += 1
                     erc_warnings.append(
@@ -109,7 +122,12 @@ class SkidlCompiler:
 
             # If most parts failed to load, SKiDL libraries are not available
             # Fall back to pure-Python netlist generation
-            if parts_failed > 0 and parts_failed >= len(canonical.parts) * 0.5:
+            library_part_count = max(0, len(canonical.parts) - len(custom_refs))
+            if (
+                library_part_count > 0
+                and parts_failed > 0
+                and parts_failed >= library_part_count * 0.5
+            ):
                 return SkidlCompileResult(
                     success=False,
                     error="SKiDL library loading failed for most parts",
@@ -119,6 +137,8 @@ class SkidlCompiler:
 
             # Create nets and connect endpoints
             for endpoint in canonical.endpoints:
+                if endpoint.ref in custom_refs:
+                    continue
                 if endpoint.ref not in parts_by_ref:
                     if endpoint.required:
                         erc_errors.append(
@@ -135,15 +155,34 @@ class SkidlCompiler:
                 try:
                     pin = part[endpoint.pin]
                     net += pin
-                except Exception as e:
+                    continue
+                except Exception as original_error:
+                    last_error: Exception = original_error
+                    fallback_selector = pin_aliases_by_ref.get(endpoint.ref, {}).get(
+                        _pin_lookup_key(endpoint.pin)
+                    )
+                    if fallback_selector and fallback_selector != endpoint.pin:
+                        try:
+                            pin = part[fallback_selector]
+                            net += pin
+                            continue
+                        except Exception as alias_error:
+                            last_error = alias_error
                     if endpoint.required and not endpoint.allow_hidden:
                         erc_errors.append(
-                            f"Pin {endpoint.pin} not found on {endpoint.ref}: {e}"
+                            _pin_not_found_message(
+                                endpoint.ref,
+                                endpoint.pin,
+                                part_defs_by_ref.get(endpoint.ref).lib_id
+                                if part_defs_by_ref.get(endpoint.ref)
+                                else "",
+                                last_error,
+                            )
                         )
                     else:
                         erc_warnings.append(
                             f"Optional pin {endpoint.pin} on {endpoint.ref} "
-                            f"not resolved: {e}"
+                            f"not resolved: {last_error}"
                         )
 
             # Run ERC
@@ -248,3 +287,77 @@ class SkidlCompiler:
         except Exception as e:
             logger.warning("Failed to save expected netlist: %s", e)
             return None
+
+
+def _pin_alias_lookup(lib_id: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    try:
+        pins = _resolve_symbol_pins(lib_id)
+    except Exception:
+        return aliases
+    for pin in pins:
+        number = str(pin.get("number") or "")
+        name = str(pin.get("name") or "")
+        pinfunction = str(pin.get("pinfunction") or "")
+        selector = number or name or pinfunction
+        candidates = [
+            number,
+            name,
+            pinfunction,
+            *_pin_aliases(name, number),
+            *_pin_aliases(pinfunction, number),
+        ]
+        for candidate in candidates:
+            key = _pin_lookup_key(candidate)
+            if key and selector:
+                aliases.setdefault(key, selector)
+    return aliases
+
+
+def _pin_aliases(pin_name: str, pin_number: str = "") -> set[str]:
+    aliases: set[str] = set()
+    raw = str(pin_name or "")
+    if not raw:
+        return aliases
+    aliases.add(raw)
+    if pin_number:
+        suffix = f"_{pin_number}"
+        if raw.endswith(suffix) and len(raw) > len(suffix):
+            aliases.add(raw[: -len(suffix)])
+    for candidate in list(aliases):
+        stripped = (
+            candidate.replace("~{", "")
+            .replace("}", "")
+            .replace("{", "")
+            .replace("~", "")
+            .replace("/", "")
+        )
+        if stripped:
+            aliases.add(stripped)
+    return aliases
+
+
+def _pin_lookup_key(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _pin_not_found_message(
+    ref: str,
+    pin: str,
+    lib_id: str,
+    error: Exception,
+) -> str:
+    available: list[str] = []
+    if lib_id:
+        try:
+            for symbol_pin in _resolve_symbol_pins(lib_id):
+                name = str(symbol_pin.get("name") or "")
+                number = str(symbol_pin.get("number") or "")
+                if name and number:
+                    available.append(f"{name}({number})")
+                elif name or number:
+                    available.append(name or number)
+        except Exception:
+            available = []
+    suffix = f"; available pins include: {', '.join(available[:16])}" if available else ""
+    return f"Pin {pin} not found on {ref} ({lib_id}): {error}{suffix}"

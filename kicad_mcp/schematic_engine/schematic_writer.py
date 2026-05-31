@@ -23,6 +23,12 @@ import os
 from typing import Any
 import uuid
 
+from kicad_mcp.schematic_engine.custom_symbols import (
+    CUSTOM_PINS_PROPERTY,
+    build_custom_symbol_node,
+    decode_custom_pins,
+    is_custom_lib_id,
+)
 from kicad_mcp.schematic_engine.models import (
     CanonicalCircuit,
     CircuitPart,
@@ -84,7 +90,10 @@ def _resolve_real_pin_positions(
         return {}
 
     try:
-        pins = _resolve_symbol_pins(part.lib_id)
+        if is_custom_lib_id(part.lib_id):
+            pins = _custom_pin_dicts(part)
+        else:
+            pins = _resolve_symbol_pins(part.lib_id)
     except Exception:
         # Library not available or symbol not found - fall back
         return {}
@@ -110,7 +119,63 @@ def _resolve_real_pin_positions(
         if pin_name and pin_name != pin_number:
             # Also index by name — may have multiple entries for same name
             result.setdefault(pin_name, []).append(pin_coord)
+            for alias in _pin_selector_aliases(pin_name, pin_number):
+                if alias in {pin_name, pin_number}:
+                    continue
+                result.setdefault(alias, []).append(pin_coord)
 
+    return result
+
+
+def _pin_selector_aliases(pin_name: str, pin_number: str = "") -> set[str]:
+    """Return practical aliases for KiCad-decorated pin names."""
+    aliases: set[str] = set()
+    raw = str(pin_name or "")
+    if not raw:
+        return aliases
+    aliases.add(raw)
+    if pin_number:
+        suffix = f"_{pin_number}"
+        if raw.endswith(suffix) and len(raw) > len(suffix):
+            aliases.add(raw[: -len(suffix)])
+    for candidate in list(aliases):
+        stripped = (
+            candidate.replace("~{", "")
+            .replace("}", "")
+            .replace("{", "")
+            .replace("~", "")
+            .replace("/", "")
+        )
+        if stripped:
+            aliases.add(stripped)
+    return {alias for alias in aliases if alias}
+
+
+def _custom_pin_dicts(part: CircuitPart) -> list[dict[str, Any]]:
+    """Return schematic_pins-compatible pin dicts for a custom inline part."""
+    pins = decode_custom_pins(part.properties.get(CUSTOM_PINS_PROPERTY))
+    if not pins:
+        return []
+    pin_count = len(pins)
+    pins_per_side = max(1, (pin_count + 1) // 2)
+    result: list[dict[str, Any]] = []
+    for index, pin in enumerate(pins):
+        is_right = index >= pins_per_side
+        side_index = index - pins_per_side if is_right else index
+        y = ((pins_per_side - 1) / 2.0 - side_index) * _PIN_GRID_MM
+        x = _SYMBOL_HALF_WIDTH_MM + _PIN_GRID_MM if is_right else -_SYMBOL_HALF_WIDTH_MM - _PIN_GRID_MM
+        angle = 180.0 if is_right else 0.0
+        result.append(
+            {
+                "number": pin["number"],
+                "name": pin["name"],
+                "pinfunction": f"{pin['name']}_{pin['number']}",
+                "pintype": pin.get("pintype", "bidirectional"),
+                "shape": "line",
+                "hidden": False,
+                "local_position": {"x": x, "y": y, "angle": angle},
+            }
+        )
     return result
 
 
@@ -638,6 +703,15 @@ def _embed_required_lib_symbols(
     for ref in refs:
         part = canonical.part_by_ref(ref)
         if not part:
+            continue
+        if is_custom_lib_id(part.lib_id):
+            custom_pins = decode_custom_pins(part.properties.get(CUSTOM_PINS_PROPERTY))
+            if not custom_pins:
+                raise ValueError(f"Custom part {part.ref} has no embedded pin metadata")
+            schematic.embed_lib_symbol(
+                part.lib_id,
+                build_custom_symbol_node(part.lib_id, part.value, custom_pins, part.footprint),
+            )
             continue
         for lib_id, symbol_node in _resolve_symbol_embed_chain(part.lib_id):
             schematic.embed_lib_symbol(lib_id, deepcopy(symbol_node))

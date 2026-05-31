@@ -26,6 +26,10 @@ from kicad_mcp.schematic_engine.expected_netlist import (
     compare_netlists,
     parse_kicad_netlist,
 )
+from kicad_mcp.schematic_engine.intent_state import (
+    prepare_intent_for_action,
+    save_committed_intent,
+)
 from kicad_mcp.schematic_engine.kicad_cli_verifier import KicadCliVerifier
 from kicad_mcp.schematic_engine.normalize import normalize_design_intent
 from kicad_mcp.schematic_engine.result import EngineResult
@@ -96,7 +100,9 @@ def apply_design_intent_netlist_first(
         result.progress = {"step": 1, "step_count": 12, "message": "Normalizing design intent"}
 
         try:
-            canonical = normalize_design_intent(project_path, intent)
+            effective_intent, intent_action = prepare_intent_for_action(project_path, intent)
+            result.intent_action = intent_action
+            canonical = normalize_design_intent(project_path, effective_intent)
         except (ValueError, KeyError) as e:
             result.error = f"Intent normalization failed: {e}"
             result.stage = "normalize_failed"
@@ -214,6 +220,19 @@ def apply_design_intent_netlist_first(
             if not write_result.get("success"):
                 result.error = write_result.get("error", "Schematic write failed")
                 result.stage = "write_failed"
+                tx.rollback()
+                result.rolled_back = True
+                return result.to_dict()
+
+            generated_symbol_count = _count_symbols_in_paths(tx.list_generated_schematics())
+            result.output_symbol_count = generated_symbol_count
+            if len(canonical.parts) > 0 and generated_symbol_count < len(canonical.parts):
+                result.error = (
+                    "Generated schematic persistence check failed: "
+                    f"expected at least {len(canonical.parts)} symbol(s), "
+                    f"found {generated_symbol_count}"
+                )
+                result.stage = "persistence_verification_failed"
                 tx.rollback()
                 result.rolled_back = True
                 return result.to_dict()
@@ -367,6 +386,24 @@ def apply_design_intent_netlist_first(
             else:
                 tx.commit()
 
+            committed_symbol_count = _count_symbols_in_project(project_path)
+            result.output_symbol_count = committed_symbol_count
+            if len(canonical.parts) > 0 and committed_symbol_count < len(canonical.parts):
+                result.success = False
+                result.changed = True
+                result.error = (
+                    "Committed schematic persistence check failed: "
+                    f"expected at least {len(canonical.parts)} symbol(s), "
+                    f"found {committed_symbol_count}"
+                )
+                result.stage = "persistence_verification_failed"
+                return result.to_dict()
+
+            result.intent_state_path = save_committed_intent(
+                project_path,
+                effective_intent,
+                action=intent_action,
+            )
             result.success = True
             result.changed = True
             result.stage = "schematic_committed"
@@ -400,3 +437,29 @@ def _visual_issue_category(issue_type: str, severity: str) -> str:
     if severity == "blocking":
         return "blocking_connectivity_issue"
     return "visual_warning"
+
+
+def _count_symbols_in_project(project_path: str) -> int:
+    project_dir = os.path.dirname(os.path.abspath(project_path))
+    return _count_symbols_in_paths(
+        [
+            os.path.join(root, filename)
+            for root, _dirs, files in os.walk(project_dir)
+            if ".kicad_mcp" not in root.split(os.sep)
+            for filename in files
+            if filename.endswith(".kicad_sch")
+        ]
+    )
+
+
+def _count_symbols_in_paths(paths: list[str]) -> int:
+    from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
+
+    count = 0
+    for path in paths:
+        try:
+            schematic = KiCadSchematic.from_file(path)
+            count += len(schematic.list_symbols())
+        except Exception:
+            continue
+    return count
