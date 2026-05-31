@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
 import threading
 from typing import Any, cast
@@ -17,14 +16,12 @@ from fastmcp import FastMCP
 from kicad_mcp.config import TIMEOUT_CONSTANTS
 from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
 from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
-from kicad_mcp.utils.design_intent_compiler import compile_design_intent
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_cli_batch import validate_schematic_batch
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb, validate_pcb_text
 from kicad_mcp.utils.kicad_s_expr import (
     KiCadSchematic,
-    SExprAtom,
     SExprList,
     validate_schematic_text,
 )
@@ -43,21 +40,10 @@ from kicad_mcp.utils.library_resolver import (
 from kicad_mcp.utils.library_resolver import (
     resolve_symbol as resolve_symbol_node,
 )
-from kicad_mcp.utils.library_resolver import (
-    symbol_footprint_suggestions as resolve_symbol_footprint_suggestions,
-)
-from kicad_mcp.utils.native_netlist import export_native_netlist, run_erc_via_cli
+from kicad_mcp.utils.native_netlist import export_native_netlist
 from kicad_mcp.utils.path_validator import PathValidationError, PathValidator
-from kicad_mcp.utils.schematic_builder import (
-    build_schematic_from_spec_v2,
-)
-from kicad_mcp.utils.schematic_builder import (
-    schematic_quality_report as build_quality_report,
-)
 from kicad_mcp.utils.schematic_pins import (
-    SCHEMATIC_GRID_MM,
     _resolve_symbol_pins,
-    get_symbol_pin_map_from_schematic,
 )
 from kicad_mcp.utils.secure_subprocess import SecureSubprocessError, SecureSubprocessRunner
 from kicad_mcp.utils.transactional_edit import (
@@ -70,17 +56,6 @@ from kicad_mcp.utils.transactional_edit import (
     validate_local_path,
     validate_schematic_with_cli_export,
 )
-
-_DESIGN_INTENT_PROJECT_LOCKS: dict[str, Any] = {}
-_DESIGN_INTENT_PROJECT_LOCKS_LOCK = threading.Lock()
-_DESIGN_INTENT_PAYLOAD_KEYS = {
-    "support_circuits",
-    "pin_rules",
-    "rails",
-    "interfaces",
-    "bulk_connections",
-    "no_connect_rules",
-}
 
 
 def _heavy_tool_concurrency() -> int:
@@ -135,40 +110,6 @@ def _suggested_library_queries(query: str, kind: str) -> list[str]:
         if item and item not in deduped:
             deduped.append(item)
     return deduped[:5]
-
-
-def _looks_like_design_intent_payload(payload: dict[str, Any]) -> bool:
-    return any(key in payload for key in _DESIGN_INTENT_PAYLOAD_KEYS)
-
-
-def _compile_v2_or_intent_payload(
-    project_path: str,
-    payload: dict[str, Any],
-    *,
-    strict: bool = False,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    if not _looks_like_design_intent_payload(payload):
-        return payload, None
-    compiled = compile_design_intent(project_path, payload, strict=strict)
-    if not compiled.get("success") or not isinstance(compiled.get("expanded_spec"), dict):
-        return None, {
-            "success": False,
-            "project_path": project_path,
-            "stage": "compile_failed",
-            "error": "Design intent compilation failed",
-            "summary": compiled.get("summary", {}),
-            "warnings": compiled.get("warnings", []),
-            "errors": compiled.get("errors", []),
-            "recoverable": compiled.get("recoverable", True),
-            "expanded_spec_path": compiled.get("expanded_spec_path"),
-            "normalized_intent_path": compiled.get("normalized_intent_path"),
-            "report_path": compiled.get("report_path"),
-        }
-    return cast(dict[str, Any], compiled["expanded_spec"]), compiled
-
-
-
-
 
 
 def _symbol_extends_chain(lib_id: str) -> list[str]:
@@ -451,665 +392,6 @@ def register_creation_tools(mcp: FastMCP) -> None:
 
 
 
-def _schematic_file_path(project_or_schematic_path: str) -> str:
-    if project_or_schematic_path.endswith(".kicad_sch"):
-        return str(validate_local_path(project_or_schematic_path, "schematic", must_exist=True))
-    files = get_project_files(
-        validate_local_path(project_or_schematic_path, "project", must_exist=True)
-    )
-    if "schematic" not in files:
-        raise FileNotFoundError("Schematic file not found")
-    return files["schematic"]
-
-
-def _schematic_footprint_report(project_or_schematic_path: str) -> dict[str, Any]:
-    try:
-        schematic_path = _schematic_file_path(project_or_schematic_path)
-        schematic = KiCadSchematic.from_file(schematic_path)
-        symbols = [symbol for symbol in schematic.list_symbols() if _is_assignable_symbol(symbol)]
-        missing_footprints = [
-            symbol["reference"]
-            for symbol in symbols
-            if not str(symbol.get("footprint") or "").strip()
-        ]
-        invalid_footprints = []
-        for symbol in symbols:
-            footprint = str(symbol.get("footprint") or "").strip()
-            if not footprint:
-                continue
-            try:
-                resolve_footprint_node(footprint)
-            except Exception as exc:
-                invalid_footprints.append(
-                    {
-                        "ref": symbol["reference"],
-                        "footprint": footprint,
-                        "error": str(exc),
-                    }
-                )
-        suggested_assignments = []
-        for symbol in symbols:
-            if symbol["reference"] not in missing_footprints:
-                continue
-            suggestion = _symbol_default_footprint(symbol)
-            if suggestion is not None:
-                suggested_assignments.append(
-                    {
-                        "ref": symbol["reference"],
-                        "footprint": suggestion["footprint"],
-                        "source": suggestion["source"],
-                    }
-                )
-        return {
-            "success": True,
-            "project_path": project_or_schematic_path,
-            "schematic_path": schematic_path,
-            "symbol_count": len(symbols),
-            "missing_footprint_count": len(missing_footprints),
-            "missing_footprints": missing_footprints,
-            "invalid_footprints": invalid_footprints,
-            "invalid_footprint_count": len(invalid_footprints),
-            "suggested_assignments": suggested_assignments,
-        }
-    except Exception as exc:
-        return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
-
-
-def _schematic_assign_footprints(
-    project_or_schematic_path: str,
-    assignments: list[dict[str, str]],
-    *,
-    verify: bool,
-) -> dict[str, Any]:
-    try:
-        schematic_path = _schematic_file_path(project_or_schematic_path)
-        schematic = KiCadSchematic.from_file(schematic_path)
-        refs = {symbol["reference"] for symbol in schematic.list_symbols()}
-        normalized_assignments = []
-        malformed_assignments = []
-        missing_refs = []
-        invalid_footprints = []
-        for index, assignment in enumerate(assignments or []):
-            if not isinstance(assignment, dict):
-                malformed_assignments.append(
-                    {"index": index, "error": "assignment must be an object"}
-                )
-                continue
-            ref = str(assignment.get("ref") or assignment.get("reference") or "").strip()
-            footprint = str(assignment.get("footprint") or "").strip()
-            if not ref or not footprint:
-                malformed_assignments.append(
-                    {
-                        "index": index,
-                        "ref": ref,
-                        "footprint": footprint,
-                        "error": "assignment requires ref and footprint",
-                    }
-                )
-                continue
-            if ref not in refs:
-                missing_refs.append(ref)
-                continue
-            if verify:
-                try:
-                    resolve_footprint_node(footprint)
-                except Exception as exc:
-                    invalid_footprints.append(
-                        {"ref": ref, "footprint": footprint, "error": str(exc)}
-                    )
-                    continue
-            normalized_assignments.append({"ref": ref, "footprint": footprint})
-        if malformed_assignments or missing_refs or invalid_footprints:
-            return {
-                "success": False,
-                "project_path": project_or_schematic_path,
-                "schematic_path": schematic_path,
-                "assigned_count": 0,
-                "missing_refs": sorted(set(missing_refs)),
-                "invalid_footprints": invalid_footprints,
-                "malformed_assignments": malformed_assignments,
-                "footprint_report": _compact_footprint_report(
-                    _schematic_footprint_report(schematic_path)
-                ),
-            }
-
-        def mutate(target: KiCadSchematic) -> dict[str, Any]:
-            assigned = []
-            for assignment in normalized_assignments:
-                property_data = target.set_property(
-                    assignment["ref"], "Footprint", assignment["footprint"]
-                )
-                assigned.append({**assignment, "property": property_data})
-            return {"assigned": assigned, "assigned_count": len(assigned)}
-
-        result = _apply_transactional_schematic_authoring(schematic_path, mutate)
-        report = _schematic_footprint_report(schematic_path)
-        result.update(
-            {
-                "tool": "schematic_assign_footprints",
-                "project_path": project_or_schematic_path,
-                "schematic_path": schematic_path,
-                "assigned_count": result.get("changed_objects", {}).get("assigned_count", 0),
-                "missing_refs": [],
-                "invalid_footprints": [],
-                "footprint_report": _compact_footprint_report(report),
-            }
-        )
-        return result
-    except Exception as exc:
-        return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
-
-
-def _schematic_assign_default_footprints(
-    project_or_schematic_path: str,
-    refs: list[str] | None,
-    strategy: str,
-    dry_run: bool,
-) -> dict[str, Any]:
-    if strategy != "symbol_default_then_filter":
-        return {
-            "success": False,
-            "project_path": project_or_schematic_path,
-            "error": "strategy must be symbol_default_then_filter",
-        }
-    try:
-        schematic_path = _schematic_file_path(project_or_schematic_path)
-        schematic = KiCadSchematic.from_file(schematic_path)
-        wanted_refs = {str(ref) for ref in refs} if refs else None
-        assignments = []
-        skipped = []
-        missing_refs = []
-        symbols_by_ref = {
-            symbol["reference"]: symbol
-            for symbol in schematic.list_symbols()
-            if _is_assignable_symbol(symbol)
-        }
-        if wanted_refs is not None:
-            missing_refs = sorted(ref for ref in wanted_refs if ref not in symbols_by_ref)
-        request_status = _default_footprint_request_status(wanted_refs, missing_refs)
-        for symbol in symbols_by_ref.values():
-            ref = symbol["reference"]
-            if wanted_refs is not None and ref not in wanted_refs:
-                continue
-            if str(symbol.get("footprint") or "").strip():
-                skipped.append({"ref": ref, "reason": "footprint already assigned"})
-                continue
-            suggestion = _symbol_default_footprint(symbol)
-            if suggestion is None:
-                skipped.append(
-                    {"ref": ref, "reason": "no symbol default or matching footprint filter"}
-                )
-                continue
-            assignments.append(
-                {
-                    "ref": ref,
-                    "footprint": suggestion["footprint"],
-                    "source": suggestion["source"],
-                }
-            )
-        if request_status["all_requested_refs_missing"]:
-            return {
-                "success": False,
-                "project_path": project_or_schematic_path,
-                "schematic_path": schematic_path,
-                "dry_run": dry_run,
-                "assigned_count": 0,
-                "planned_assignments": assignments,
-                "planned_assignment_count": len(assignments),
-                "missing_refs": missing_refs,
-                "partial_success": False,
-                "skipped": skipped,
-                "footprint_report": _compact_footprint_report(
-                    _schematic_footprint_report(schematic_path)
-                ),
-                "error": "all requested refs were missing",
-            }
-        if dry_run:
-            return {
-                "success": True,
-                "project_path": project_or_schematic_path,
-                "schematic_path": schematic_path,
-                "dry_run": True,
-                "assigned_count": 0,
-                "planned_assignments": assignments,
-                "planned_assignment_count": len(assignments),
-                "missing_refs": missing_refs,
-                "partial_success": request_status["partial_success"],
-                "skipped": skipped,
-                "footprint_report": _compact_footprint_report(
-                    _schematic_footprint_report(schematic_path)
-                ),
-            }
-        assign_result = _schematic_assign_footprints(
-            schematic_path,
-            [{"ref": item["ref"], "footprint": item["footprint"]} for item in assignments],
-            verify=True,
-        )
-        assign_result["tool"] = "schematic_assign_default_footprints"
-        assign_result["dry_run"] = False
-        assign_result["planned_assignments"] = assignments
-        assign_result["planned_assignment_count"] = len(assignments)
-        assign_result["missing_refs"] = missing_refs or assign_result.get("missing_refs", [])
-        assign_result["partial_success"] = request_status["partial_success"]
-        assign_result["skipped"] = skipped
-        return assign_result
-    except Exception as exc:
-        return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
-
-
-def _compact_footprint_report(report: dict[str, Any]) -> dict[str, Any]:
-    if not report.get("success"):
-        return report
-    return {
-        "symbol_count": report.get("symbol_count", 0),
-        "missing_footprint_count": report.get("missing_footprint_count", 0),
-        "missing_footprints": report.get("missing_footprints", []),
-        "invalid_footprints": report.get("invalid_footprints", []),
-        "invalid_footprint_count": report.get("invalid_footprint_count", 0),
-    }
-
-
-def _default_footprint_request_status(
-    wanted_refs: set[str] | None, missing_refs: list[str]
-) -> dict[str, bool]:
-    if wanted_refs is None:
-        return {"all_requested_refs_missing": False, "partial_success": False}
-    missing = set(missing_refs)
-    return {
-        "all_requested_refs_missing": bool(wanted_refs) and missing == wanted_refs,
-        "partial_success": bool(missing) and missing != wanted_refs,
-    }
-
-
-def _symbol_default_footprint(symbol: dict[str, Any]) -> dict[str, str] | None:
-    lib_id = str(symbol.get("lib_id") or "")
-    if not lib_id:
-        return None
-    try:
-        for suggestion in resolve_symbol_footprint_suggestions(lib_id, max_results=5):
-            footprint = str(suggestion.get("footprint") or "").strip()
-            if not footprint:
-                continue
-            try:
-                resolve_footprint_node(footprint)
-            except Exception:
-                continue
-            return {
-                "footprint": footprint,
-                "source": str(suggestion.get("source") or "symbol_default"),
-            }
-    except Exception:
-        return None
-    return None
-
-
-def _is_assignable_symbol(symbol: dict[str, Any]) -> bool:
-    ref = str(symbol.get("reference") or "")
-    lib_id = str(symbol.get("lib_id") or "")
-    return bool(ref) and not ref.startswith("#") and not lib_id.startswith("power:")
-
-
-def _design_intent_artifact_dir(project_path: str) -> Path:
-    path = Path(project_path)
-    if path.suffix in {".kicad_pro", ".kicad_sch"}:
-        return path.parent / ".kicad_mcp"
-    return path / ".kicad_mcp"
-
-
-def _save_visual_expanded_spec(project_path: str, spec: dict[str, Any]) -> str:
-    artifact_dir = _design_intent_artifact_dir(project_path)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    output_path = artifact_dir / "design_intent.visual_expanded_spec.json"
-    atomic_write_text(output_path, json.dumps(spec, indent=2, sort_keys=True))
-    return str(output_path)
-
-
-def _native_dry_run_design_intent(
-    project_path: str,
-    expanded_spec: dict[str, Any],
-    mode: str,
-    strict: bool,
-    *,
-    apply_default_visual_layout: bool = True,
-    run_native_validation: bool = True,
-    run_cli_validation: bool = True,
-) -> dict[str, Any]:
-    try:
-        with tempfile.TemporaryDirectory(prefix="kicad_mcp_dry_run_") as temp_dir:
-            temp_project = _copy_project_for_dry_run(project_path, temp_dir)
-            built = build_schematic_from_spec_v2(
-                temp_project,
-                expanded_spec,
-                mode=mode,
-                run_erc=strict,
-                allow_destructive_replace=False,
-                detail="full" if run_native_validation else "compact",
-                include_diff=False,
-                include_preview=False,
-                include_full_native_netlist=False,
-                run_quality_report=False,
-                run_native_validation=run_native_validation,
-                apply_default_visual_layout=apply_default_visual_layout,
-                run_cli_validation=run_cli_validation,
-            )
-            validation = (
-                built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
-            )
-            post_write = (
-                validation.get("post_write", {})
-                if isinstance(validation.get("post_write"), dict)
-                else {}
-            )
-            native = post_write.get("native_verification", post_write)
-            return {
-                "mode": "native",
-                "success": bool(built.get("success")),
-                "stage": built.get("stage"),
-                "changed_original": False,
-                "temp_project_path": temp_project,
-                "native_verification": native,
-                "missing_connection_count": len(native.get("missing", []))
-                if isinstance(native, dict)
-                else 0,
-                "error": built.get("error"),
-            }
-    except Exception as exc:
-        return {
-            "mode": "native",
-            "success": False,
-            "changed_original": False,
-            "error": str(exc),
-        }
-
-
-def _copy_project_for_dry_run(project_path: str, temp_dir: str) -> str:
-    source = Path(project_path)
-    if source.suffix == ".kicad_sch":
-        temp_schematic = Path(temp_dir) / source.name
-        shutil.copy2(source, temp_schematic)
-        temp_project = temp_schematic.with_suffix(".kicad_pro")
-        if source.with_suffix(".kicad_pro").exists():
-            shutil.copy2(source.with_suffix(".kicad_pro"), temp_project)
-        else:
-            temp_project.write_text("{}", encoding="utf-8")
-        return str(temp_project)
-
-    files = get_project_files(str(source))
-    temp_project = Path(temp_dir) / source.name
-    if source.exists():
-        shutil.copy2(source, temp_project)
-    else:
-        temp_project.write_text("{}", encoding="utf-8")
-    if "schematic" in files and Path(files["schematic"]).exists():
-        shutil.copy2(files["schematic"], Path(temp_dir) / Path(files["schematic"]).name)
-    return str(temp_project)
-
-
-def _project_file_for_lock(project_path: str) -> str:
-    candidate = Path(os.path.realpath(os.path.expanduser(project_path)))
-    try:
-        if candidate.suffix == ".kicad_sch":
-            project_candidate = candidate.with_suffix(".kicad_pro")
-            if project_candidate.exists():
-                return str(project_candidate)
-        if candidate.is_dir():
-            projects = sorted(candidate.glob("*.kicad_pro"))
-            if len(projects) == 1:
-                return str(projects[0])
-    except OSError:
-        pass
-    return str(candidate)
-
-
-def _project_file_for_backup(project_path: str) -> str:
-    return _project_file_for_lock(project_path)
-
-
-def _design_intent_project_key(project_path: str) -> str:
-    return os.path.normcase(os.path.realpath(os.path.expanduser(_project_file_for_lock(project_path))))
-
-
-def _design_intent_project_lock(project_key: str) -> Any:
-    with _DESIGN_INTENT_PROJECT_LOCKS_LOCK:
-        lock = _DESIGN_INTENT_PROJECT_LOCKS.get(project_key)
-        if lock is None:
-            lock = threading.RLock()
-            _DESIGN_INTENT_PROJECT_LOCKS[project_key] = lock
-        return lock
-
-
-def _project_busy_response(
-    project_path: str,
-    tool_name: str,
-) -> dict[str, Any]:
-    return {
-        "success": False,
-        "tool": tool_name,
-        "stage": "project_busy",
-        "project_path": project_path,
-        "changed": False,
-        "recoverable": True,
-        "error": "project is already being modified",
-        "recommended_next_tool": "project_design_state",
-        "recommended_next_arguments": {"project_path": project_path},
-    }
-
-
-def _try_acquire_project_mutation_lock(
-    project_path: str,
-    tool_name: str,
-) -> tuple[Any | None, dict[str, Any] | None]:
-    project_key = _design_intent_project_key(project_path)
-    project_lock = _design_intent_project_lock(project_key)
-    acquired = project_lock.acquire(blocking=False)
-    if not acquired:
-        return None, _project_busy_response(project_path, tool_name)
-    return project_lock, None
-
-
-def _run_with_project_mutation_lock(
-    project_path: str,
-    tool_name: str,
-    operation: Callable[[], dict[str, Any]],
-) -> dict[str, Any]:
-    project_lock, busy = _try_acquire_project_mutation_lock(project_path, tool_name)
-    if busy is not None:
-        return busy
-    try:
-        return operation()
-    finally:
-        cast(Any, project_lock).release()
-
-
-def _update_design_intent_job_progress(
-    job_id: str | None,
-    *,
-    stage: str | None = None,
-    current_step: str | None = None,
-    **progress: Any,
-) -> None:
-    return None
-
-
-def _design_intent_job_cancel_requested(job_id: str | None) -> bool:
-    return False
-
-
-def _cancelled_before_write_response(project_path: str, stage: str) -> dict[str, Any]:
-    return {
-        "success": False,
-        "status": "cancelled",
-        "stage": "cancelled",
-        "cancel_stage": stage,
-        "project_path": project_path,
-        "changed": False,
-        "rolled_back": False,
-        "recoverable": True,
-        "error": "job cancelled before schematic write",
-    }
-
-
-def _without_default_visual_layout(spec: dict[str, Any]) -> dict[str, Any]:
-    updated = json.loads(json.dumps(spec))
-    layout_hints = updated.setdefault("layout_hints", {})
-    if isinstance(layout_hints, dict):
-        layout_hints.setdefault("label_strategy", "pin_anchor")
-        layout_hints.setdefault("connection_style", "label")
-        layout_hints["visual_layout"] = {"enabled": False}
-    return updated
-
-
-def _design_intent_counts(expanded_spec: dict[str, Any], summary: dict[str, Any]) -> dict[str, int]:
-    total_parts = int(summary.get("total_part_count") or len(expanded_spec.get("parts", [])) or 0)
-    connections = int(
-        summary.get("connection_count")
-        or sum(len(endpoints) for endpoints in expanded_spec.get("nets", {}).values())
-        or 0
-    )
-    return {"total_part_count": total_parts, "connection_count": connections}
-
-
-
-
-
-
-
-
-
-
-def _staged_failure_response(
-    project_path: str,
-    stage: str,
-    error: str,
-    backup: dict[str, Any] | None,
-    *,
-    status: str | None = None,
-    cancel_stage: str | None = None,
-    write_started: bool = False,
-    **details: Any,
-) -> dict[str, Any]:
-    restore_result: dict[str, Any] | None = None
-    if backup and backup.get("success") and backup.get("backup_path"):
-        restore_result = restore_backup_manifest(str(backup["backup_path"]))
-    rolled_back = bool(restore_result and restore_result.get("success"))
-    response: dict[str, Any] = {
-        "success": False,
-        "stage": stage,
-        "project_path": project_path,
-        "changed": bool(write_started and not rolled_back),
-        "rolled_back": rolled_back,
-        "backup_path": backup.get("backup_path") if backup else None,
-        "restore_result": restore_result,
-        "error": error,
-        "recoverable": status != "cancelled",
-    }
-    if status is not None:
-        response["status"] = status
-    if cancel_stage is not None:
-        response["cancel_stage"] = cancel_stage
-    response.update(details)
-    return response
-
-
-def _compact_staged_result(result: dict[str, Any], index: int, batch_size: int) -> dict[str, Any]:
-    return {
-        "batch_index": index,
-        "batch_size": batch_size,
-        "success": result.get("success"),
-        "applied_connection_count": result.get("applied_connection_count", 0),
-        "no_connect_count": result.get("plan_summary", {}).get("no_connect_count"),
-        "error": result.get("error"),
-    }
-
-
-def _resolve_expanded_spec_path(project_path: str, expanded_spec_path: str) -> Path:
-    candidate = Path(expanded_spec_path)
-    if candidate.is_absolute():
-        return candidate
-    project = Path(project_path)
-    project_dir = project.parent if project.suffix in {".kicad_pro", ".kicad_sch"} else project
-    return project_dir / candidate
-
-
-def _load_expanded_spec(
-    project_path: str, expanded_spec_path: str | None, spec: dict[str, Any] | None
-) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    if spec is not None:
-        return spec, None, None
-    if not expanded_spec_path:
-        default_path = (
-            _design_intent_artifact_dir(project_path) / "design_intent.visual_expanded_spec.json"
-        )
-        if not default_path.exists():
-            default_path = (
-                _design_intent_artifact_dir(project_path) / "design_intent.expanded_spec.json"
-            )
-        expanded_spec_path = str(default_path)
-    try:
-        path = _resolve_expanded_spec_path(project_path, expanded_spec_path)
-        return json.loads(path.read_text(encoding="utf-8")), str(path), None
-    except Exception as exc:
-        return None, expanded_spec_path, str(exc)
-
-
-
-
-def _verification_from_build_and_quality(
-    built: dict[str, Any],
-    quality: dict[str, Any] | None,
-) -> dict[str, Any]:
-    validation = built.get("validation", {}) if isinstance(built.get("validation"), dict) else {}
-    post_write = (
-        validation.get("post_write", {}) if isinstance(validation.get("post_write"), dict) else {}
-    )
-    native_source = quality if isinstance(quality, dict) else built
-    native = (
-        native_source.get("native_netlist", {})
-        if isinstance(native_source.get("native_netlist"), dict)
-        else {}
-    )
-    erc = (
-        quality.get("erc", {})
-        if isinstance(quality, dict) and isinstance(quality.get("erc"), dict)
-        else {}
-    )
-    gate = (
-        quality.get("quality_gate", {})
-        if isinstance(quality, dict) and isinstance(quality.get("quality_gate"), dict)
-        else {}
-    )
-    return {
-        "native_netlist_success": native.get("success"),
-        "native_netlist_skipped": bool(native.get("skipped", False)),
-        "missing_connection_count": len(post_write.get("missing", [])),
-        "erc_total_violations": erc.get("total_violations"),
-        "quality_gate_passed": gate.get("passed"),
-        "quality_report_skipped": quality is None,
-    }
-
-
-def _build_failure_diagnostics(built: dict[str, Any], detail: str) -> dict[str, Any]:
-    keys = (
-        "normalization_errors",
-        "normalization_warnings",
-        "symbol_errors",
-        "footprint_errors",
-        "visual_gate",
-        "recommended_next_arguments",
-    )
-    diagnostics = {key: built[key] for key in keys if key in built}
-    if detail == "full":
-        diagnostics["build_result"] = built
-    else:
-        diagnostics["build_result_summary"] = {
-            "tool": built.get("tool"),
-            "stage": built.get("stage"),
-            "error": built.get("error"),
-            "recoverable": built.get("recoverable"),
-        }
-    return diagnostics
-
-
 def _preview_design_intent_netlist_first(
     project_path: str,
     intent: dict[str, Any],
@@ -1233,798 +515,68 @@ def _preview_issue_category(issue_type: str, severity: str) -> str:
 
 
 
-def _format_quality_report(report: dict[str, Any], detail: str = "compact") -> dict[str, Any]:
-    normalized = str(detail or "compact").lower()
-    if normalized == "full":
-        return report
-    if normalized not in {"summary", "compact"}:
-        return {
-            "success": False,
-            "error": 'detail must be one of: "summary", "compact", "full"',
-            "detail": detail,
-        }
-
-    visual = (
-        report.get("visual_quality", {}) if isinstance(report.get("visual_quality"), dict) else {}
-    )
-    erc = report.get("erc", {}) if isinstance(report.get("erc"), dict) else {}
-    native = (
-        report.get("native_netlist", {}) if isinstance(report.get("native_netlist"), dict) else {}
-    )
-    compact = {
-        "success": report.get("success"),
-        "schematic_path": report.get("schematic_path"),
-        "detail": normalized,
-        "page": report.get("page"),
-        "symbol_count": report.get("symbol_count", 0),
-        "wire_count": report.get("wire_count", 0),
-        "label_count": report.get("label_count", 0),
-        "no_connect_count": report.get("no_connect_count", 0),
-        "missing_footprint_count": report.get("missing_footprint_count", 0),
-        "outside_page_count": report.get("outside_page_count", 0),
-        "off_grid_count": report.get("off_grid_count", 0),
-        "dangling_label_count": report.get("dangling_label_count", 0),
-        "isolated_label_count": report.get("isolated_label_count", 0),
-        "power_ground_mismatch_count": report.get("power_ground_mismatch_count", 0),
-        "quality_gate": report.get("quality_gate", {}),
-        "erc": {
-            "success": erc.get("success"),
-            "total_violations": erc.get("total_violations"),
-            "unacceptable_categories": erc.get("unacceptable_categories", {}),
-            "error": erc.get("error"),
-        },
-        "native_netlist": {
-            "success": native.get("success"),
-            "component_count": native.get("component_count"),
-            "net_count": native.get("net_count"),
-            "non_empty_nets": native.get("non_empty_nets"),
-            "error": native.get("error"),
-        },
-        "visual_quality": {
-            "readability_score": visual.get("readability_score"),
-            "blocking_count": visual.get("blocking_count"),
-            "warning_count": visual.get("warning_count"),
-            "symbol_overlap_count": visual.get("symbol_overlap_count"),
-            "label_inside_symbol_count": visual.get("label_inside_symbol_count"),
-            "floating_wire_count": visual.get("floating_wire_count"),
-        },
-        "recommended_next_tool": "schematic_validate_generated_schematic"
-        if report.get("quality_gate", {}).get("passed")
-        else "schematic_validate_generated_schematic",
-    }
-    if normalized == "compact":
-        compact.update(
-            {
-                "missing_footprints": report.get("missing_footprints", []),
-                "invalid_footprints": report.get("invalid_footprints", []),
-                "symbols_outside_page": report.get("symbols_outside_page", []),
-                "dangling_labels": report.get("dangling_labels", []),
-                "isolated_labels": report.get("isolated_labels", []),
-                "power_ground_mismatches": report.get("power_ground_mismatches", []),
-            }
-        )
-    return compact
-
-
-def _schematic_explain_erc(
-    project_or_schematic_path: str,
-    include_suggestions: bool = True,
-    timeout_seconds: float | None = None,
-    detail: str = "compact",
-) -> dict[str, Any]:
-    try:
-        schematic_path = _schematic_file_path(project_or_schematic_path)
-        erc = run_erc_via_cli(schematic_path, timeout_seconds=timeout_seconds)
-        if not erc.get("success"):
-            return {
-                "success": False,
-                "project_path": project_or_schematic_path,
-                "schematic_path": schematic_path,
-                "error": erc.get("error", "ERC failed"),
-                "erc": erc,
-            }
-        findings = [
-            _explain_erc_violation(violation, include_suggestions)
-            for violation in erc.get("violations", [])
-        ]
-        groups: dict[str, dict[str, Any]] = {}
-        for finding in findings:
-            group = groups.setdefault(
-                finding["type"],
-                {
-                    "type": finding["type"],
-                    "count": 0,
-                    "classification_counts": {},
-                    "severity_counts": {},
-                },
-            )
-            group["count"] += 1
-            classification = finding["classification"]
-            severity = finding["severity"]
-            group["classification_counts"][classification] = (
-                group["classification_counts"].get(classification, 0) + 1
-            )
-            group["severity_counts"][severity] = group["severity_counts"].get(severity, 0) + 1
-        classification_counts: dict[str, int] = {}
-        for finding in findings:
-            classification_counts[finding["classification"]] = (
-                classification_counts.get(finding["classification"], 0) + 1
-            )
-        result = {
-            "success": True,
-            "project_path": project_or_schematic_path,
-            "schematic_path": schematic_path,
-            "total_violations": len(findings),
-            "blocking_count": classification_counts.get("blocking", 0),
-            "manual_count": classification_counts.get("manual_decision", 0),
-            "accepted_warning_count": classification_counts.get("accepted_warning", 0),
-            "classification_counts": classification_counts,
-            "groups": sorted(groups.values(), key=lambda item: item["type"]),
-            "findings": findings,
-            "erc": {
-                "success": erc.get("success"),
-                "total_violations": erc.get("total_violations"),
-                "violation_categories": erc.get("violation_categories"),
-                "severity_counts": erc.get("severity_counts"),
-            },
-        }
-        return _format_erc_explanation(result, detail)
-    except Exception as exc:
-        return {"success": False, "project_path": project_or_schematic_path, "error": str(exc)}
-
-
-def _schematic_plan_erc_fixes(
-    project_or_schematic_path: str,
-    timeout_seconds: float | None = None,
-    detail: str = "compact",
-) -> dict[str, Any]:
-    explanation = _schematic_explain_erc(
-        project_or_schematic_path,
-        include_suggestions=True,
-        timeout_seconds=timeout_seconds,
-        detail="full",
-    )
-    if not explanation.get("success"):
-        return explanation
-    dangling_label_fixes = _unique_dangling_label_fixes(explanation["schematic_path"])
-    safe_auto_fixes = []
-    manual_decisions = []
-    accepted_warnings = []
-    blocked_reasons = []
-    for finding in explanation["findings"]:
-        action = finding.get("suggested_action", {})
-        if finding.get("type") == "label_dangling":
-            labels = finding.get("affected_labels", [])
-            if len(labels) == 1 and labels[0] in dangling_label_fixes:
-                matched = dangling_label_fixes[labels[0]]
-                action = {
-                    "kind": "delete_dangling_label",
-                    "auto_safe": True,
-                    "details": "Delete exactly matched dangling label that is not attached to a pin or wire.",
-                    "label_uuid": matched["label_uuid"],
-                }
-                finding["suggested_action"] = action
-        classification = finding["classification"]
-        if classification == "accepted_warning":
-            accepted_warnings.append(
-                {
-                    "type": finding["type"],
-                    "refs": finding["affected_refs"],
-                    "reason": finding["explanation"],
-                    "suggested_action": action,
-                }
-            )
-        elif action.get("auto_safe"):
-            safe_auto_fixes.append(
-                {
-                    "type": finding["type"],
-                    "refs": finding["affected_refs"],
-                    "labels": finding["affected_labels"],
-                    "label_uuid": action.get("label_uuid"),
-                    "action": action,
-                }
-            )
-        else:
-            manual_decisions.append(
-                {
-                    "type": finding["type"],
-                    "severity": finding["severity"],
-                    "refs": finding["affected_refs"],
-                    "labels": finding["affected_labels"],
-                    "reason": finding["explanation"],
-                    "suggested_action": action,
-                }
-            )
-            blocked_reasons.append(f"{finding['type']}: {finding['explanation']}")
-    result = {
-        "success": True,
-        "project_path": explanation["project_path"],
-        "schematic_path": explanation["schematic_path"],
-        "erc_total_violations": explanation["total_violations"],
-        "safe_auto_fixes": safe_auto_fixes,
-        "safe_auto_fix_count": len(safe_auto_fixes),
-        "manual_decisions": manual_decisions,
-        "manual_decision_count": len(manual_decisions),
-        "accepted_warnings": accepted_warnings,
-        "accepted_warning_count": len(accepted_warnings),
-        "blocked_reasons": blocked_reasons,
-        "blocked": bool(manual_decisions or safe_auto_fixes),
-        "explanation": explanation,
-    }
-    return _format_erc_plan(result, detail)
-
-
-def _format_erc_explanation(report: dict[str, Any], detail: str = "compact") -> dict[str, Any]:
-    normalized = str(detail or "compact").lower()
-    if normalized == "full":
-        return report
-    if normalized not in {"summary", "compact"}:
-        return {
-            "success": False,
-            "error": 'detail must be one of: "summary", "compact", "full"',
-            "detail": detail,
-        }
-    result = {
-        "success": report.get("success"),
-        "project_path": report.get("project_path"),
-        "schematic_path": report.get("schematic_path"),
-        "detail": normalized,
-        "total_violations": report.get("total_violations", 0),
-        "blocking_count": report.get("blocking_count", 0),
-        "manual_count": report.get("manual_count", 0),
-        "accepted_warning_count": report.get("accepted_warning_count", 0),
-        "classification_counts": report.get("classification_counts", {}),
-        "erc": report.get("erc", {}),
-        "recommended_next_tool": "schematic_validate_generated_schematic"
-        if report.get("blocking_count", 0) or report.get("manual_count", 0)
-        else "schematic_validate_generated_schematic",
-    }
-    if normalized == "compact":
-        result["groups"] = report.get("groups", [])
-        result["findings"] = report.get("findings", [])
-    return result
-
-
-def _format_erc_plan(plan: dict[str, Any], detail: str = "compact") -> dict[str, Any]:
-    normalized = str(detail or "compact").lower()
-    if normalized == "full":
-        return plan
-    if normalized not in {"summary", "compact"}:
-        return {
-            "success": False,
-            "error": 'detail must be one of: "summary", "compact", "full"',
-            "detail": detail,
-        }
-    result = {
-        "success": plan.get("success"),
-        "project_path": plan.get("project_path"),
-        "schematic_path": plan.get("schematic_path"),
-        "detail": normalized,
-        "erc_total_violations": plan.get("erc_total_violations", 0),
-        "safe_auto_fix_count": plan.get("safe_auto_fix_count", 0),
-        "manual_decision_count": plan.get("manual_decision_count", 0),
-        "accepted_warning_count": plan.get("accepted_warning_count", 0),
-        "blocked": plan.get("blocked", False),
-        "recommended_next_tool": "schematic_apply_design_intent"
-        if plan.get("safe_auto_fix_count", 0)
-        else "schematic_validate_generated_schematic",
-    }
-    if normalized == "compact":
-        result.update(
-            {
-                "safe_auto_fixes": plan.get("safe_auto_fixes", []),
-                "manual_decisions": plan.get("manual_decisions", []),
-                "accepted_warnings": plan.get("accepted_warnings", []),
-                "blocked_reasons": plan.get("blocked_reasons", []),
-            }
-        )
-    return result
-
-
-def _unique_dangling_label_fixes(schematic_path: str) -> dict[str, dict[str, Any]]:
-    try:
-        quality = build_quality_report(schematic_path, run_erc=False)
-    except Exception:
-        return {}
-    by_text: dict[str, list[dict[str, Any]]] = {}
-    for label in quality.get("dangling_labels", []):
-        text = str(label.get("text") or "")
-        label_uuid = label.get("uuid")
-        if text and label_uuid:
-            by_text.setdefault(text, []).append(label)
-    return {
-        text: {"label_uuid": labels[0]["uuid"], "label": labels[0]}
-        for text, labels in by_text.items()
-        if len(labels) == 1
-    }
-
-
-def _explain_erc_violation(violation: dict[str, Any], include_suggestions: bool) -> dict[str, Any]:
-    violation_type = violation.get("type", "unknown")
-    severity = violation.get("severity", "unknown")
-    description = violation.get("description") or violation.get("message") or ""
-    affected_refs, affected_pins, affected_labels = _erc_affected_objects(violation)
-    classification = _erc_classification(violation_type, severity)
-    explanation, action = _erc_explanation_and_action(
-        violation_type,
-        severity,
-        description,
-        affected_refs,
-        affected_pins,
-        affected_labels,
-    )
-    finding = {
-        "type": violation_type,
-        "severity": severity,
-        "classification": classification,
-        "description": description,
-        "affected_refs": affected_refs,
-        "affected_pins": affected_pins,
-        "affected_labels": affected_labels,
-        "explanation": explanation,
-        "items": violation.get("items", []),
-    }
-    if include_suggestions:
-        finding["suggested_action"] = action
-    return finding
-
-
-def _erc_classification(violation_type: str, severity: str) -> str:
-    if violation_type in {"lib_symbol_mismatch"} and severity == "warning":
-        return "accepted_warning"
-    if violation_type in {
-        "label_dangling",
-        "isolated_pin_label",
-        "endpoint_off_grid",
-        "pin_not_connected",
-        "ground_pin_not_ground",
-        "power_pin_not_driven",
-        "pin_to_pin",
-    }:
-        return "blocking"
-    if severity in {"error", "fatal"}:
-        return "blocking"
-    return "manual_decision"
-
-
-def _erc_explanation_and_action(
-    violation_type: str,
-    severity: str,
-    description: str,
-    affected_refs: list[str],
-    affected_pins: list[dict[str, str]],
-    affected_labels: list[str],
-) -> tuple[str, dict[str, Any]]:
-    if violation_type == "lib_symbol_mismatch":
-        return (
-            "The schematic embeds a symbol copy that differs from the installed library. "
-            "This is usually a warning, not a connectivity failure.",
-            {
-                "kind": "update_or_accept_library_symbol",
-                "auto_safe": False,
-                "details": "Update the embedded symbol from library if you want the warning gone, or accept it when the local copy is intentional.",
-            },
-        )
-    if violation_type == "label_dangling":
-        return (
-            "A label is not attached to a pin or wire endpoint, so KiCad ignores it electrically.",
-            {
-                "kind": "reattach_label_to_pin_or_wire",
-                "auto_safe": False,
-                "labels": affected_labels,
-                "details": "Move the label to the exact pin coordinate or a wire endpoint using pin-aware attachment tools.",
-            },
-        )
-    if violation_type == "pin_not_connected":
-        return (
-            "A symbol pin is electrically unconnected and has no no-connect marker.",
-            {
-                "kind": "connect_pin_or_add_no_connect",
-                "auto_safe": False,
-                "refs": affected_refs,
-                "pins": affected_pins,
-                "details": "Attach the pin to the intended net, or add a no-connect marker only if the design intentionally leaves it unused.",
-            },
-        )
-    if violation_type == "endpoint_off_grid":
-        return (
-            "A wire, label, or endpoint is off KiCad's schematic grid, which can break visual or electrical attachment.",
-            {
-                "kind": "snap_endpoint_to_grid",
-                "auto_safe": False,
-                "details": "Snap the affected endpoint/label/wire to the schematic grid, then rerun ERC.",
-            },
-        )
-    if violation_type in {"power_pin_not_driven", "pin_to_pin"}:
-        return (
-            "A power or driving-pin rule requires design intent before changing connectivity.",
-            {
-                "kind": "inspect_power_or_driver_intent",
-                "auto_safe": False,
-                "details": "Add a valid driver/PWR_FLAG only when the net is intentionally powered by that source.",
-            },
-        )
-    if "power" in violation_type or "ground" in violation_type:
-        return (
-            "ERC indicates a possible power/ground net mismatch.",
-            {
-                "kind": "fix_power_ground_assignment",
-                "auto_safe": False,
-                "details": "Use the pin map and native netlist to verify the pin is on the correct power or ground net.",
-            },
-        )
-    return (
-        f"KiCad reported {severity} ERC violation '{violation_type}'.",
-        {
-            "kind": "manual_inspection",
-            "auto_safe": False,
-            "details": description
-            or "Inspect the referenced schematic item and decide the intended fix.",
-        },
-    )
-
-
-def _erc_affected_objects(
-    violation: dict[str, Any],
-) -> tuple[list[str], list[dict[str, str]], list[str]]:
-    refs: set[str] = set()
-    labels: set[str] = set()
-    pins: list[dict[str, str]] = []
-    for item in violation.get("items", []):
-        text = item.get("description", "")
-        ref, pin = _parse_erc_symbol_pin(text)
-        if ref:
-            refs.add(ref)
-        if ref and pin:
-            pins.append({"ref": ref, "pin": pin})
-        label = _parse_erc_label(text)
-        if label:
-            labels.add(label)
-    return sorted(refs), pins, sorted(labels)
-
-
-def _parse_erc_symbol_pin(text: str) -> tuple[str | None, str | None]:
-    pin_match = re.search(r"Symbol\s+([#A-Za-z0-9_]+)\s+Pin\s+([^\s\[]+)", text)
-    if pin_match:
-        return pin_match.group(1), pin_match.group(2)
-    symbol_match = re.search(r"(?:Symbol|Symbole)\s+([#A-Za-z0-9_]+)", text)
-    if symbol_match:
-        return symbol_match.group(1), None
-    return None, None
-
-
-def _parse_erc_label(text: str) -> str | None:
-    label_match = re.search(r"Label(?:\s+\w+)?\s+'([^']+)'", text)
-    return label_match.group(1) if label_match else None
-
-
-def _apply_schematic_functional_layout(
-    schematic: KiCadSchematic,
-    schematic_path: str,
-    preserve_connectivity: bool,
-    arrange_properties: bool,
-    placement_rules: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    bounds = schematic.get_sheet_bounds()
-    width = float(bounds["width"])
-    height = float(bounds["height"])
-    symbols = sorted(
-        schematic.list_symbols(),
-        key=lambda symbol: _schematic_layout_priority(symbol),
-    )
-    occupied: list[dict[str, float]] = []
-    moved_symbols = []
-    label_moves = []
-    no_connect_moves = []
-    refusals = []
-
-    for index, symbol in enumerate(symbols):
-        reference = symbol["reference"]
-        role = _infer_component_role(reference, symbol)
-        target = _schematic_symbol_position(
-            symbol,
-            role,
-            index,
-            width,
-            height,
-            placement_rules,
-        )
-        target = _avoid_schematic_overlap(target, symbol.get("bounds", {}), occupied, width, height)
-        current = symbol["position"]
-        dx = target["x"] - current["x"]
-        dy = target["y"] - current["y"]
-        if abs(dx) < 1e-6 and abs(dy) < 1e-6 and target["angle"] == current.get("angle", 0.0):
-            occupied.append(_translated_bounds(symbol.get("bounds", {}), dx, dy))
-            continue
-
-        pin_points = _symbol_pin_points(schematic, schematic_path, reference)
-        labels_at_pins = _labels_at_points(schematic, pin_points)
-        no_connects_at_pins = _no_connects_at_points(schematic, pin_points)
-        try:
-            if preserve_connectivity:
-                move_result = schematic.move_symbol_with_connections(
-                    reference, target["x"], target["y"], target["angle"]
-                )
-            else:
-                move_result = {
-                    "symbol": schematic.move_symbol(
-                        reference, target["x"], target["y"], target["angle"]
-                    ),
-                    "moved_wire_endpoints": [],
-                    "moved_labels": [],
-                }
-            moved_label_ids = {
-                item.get("uuid") for item in move_result.get("moved_labels", []) if item.get("uuid")
-            }
-            for label in labels_at_pins:
-                if label.get("uuid") in moved_label_ids:
-                    continue
-                label_moves.append(
-                    schematic.move_label(
-                        label["uuid"],
-                        _snap_schematic(label["position"]["x"] + dx),
-                        _snap_schematic(label["position"]["y"] + dy),
-                        label["position"].get("angle", 0.0),
-                    )
-                )
-            no_connect_moves.extend(
-                _move_no_connects_at_points(schematic, no_connects_at_pins, dx, dy)
-            )
-            moved_symbols.append(
-                {
-                    "reference": reference,
-                    "role": role,
-                    "from": current,
-                    "to": target,
-                    "preserved_connectivity": preserve_connectivity,
-                    "moved_label_count": len(labels_at_pins),
-                    "moved_no_connect_count": len(no_connects_at_pins),
-                }
-            )
-            moved_bounds = schematic.get_symbol(reference)
-            if moved_bounds is not None:
-                occupied.append(moved_bounds.get("bounds", {}))
-        except Exception as exc:
-            refusals.append({"reference": reference, "role": role, "error": str(exc)})
-            occupied.append(symbol.get("bounds", {}))
-
-    property_moves = (
-        schematic.auto_arrange_symbol_properties_all()
-        if arrange_properties
-        else {"moves": [], "move_count": 0}
-    )
-    if refusals:
-        raise ValueError(f"Functional layout refused {len(refusals)} symbols: {refusals}")
-    return {
-        "sheet": bounds,
-        "moved_symbols": moved_symbols,
-        "moved_symbol_count": len(moved_symbols),
-        "moved_labels": label_moves,
-        "moved_label_count": len(label_moves),
-        "moved_no_connects": no_connect_moves,
-        "moved_no_connect_count": len(no_connect_moves),
-        "property_arrangement": property_moves,
-        "placement_style": "generic_functional_lanes",
-    }
-
-
-def _schematic_layout_priority(symbol: dict[str, Any]) -> tuple[int, str]:
-    role = _infer_component_role(symbol.get("reference", ""), symbol)
-    priorities = {
-        "usb_connector": 0,
-        "protection": 1,
-        "regulator": 2,
-        "primary_controller": 3,
-        "display": 4,
-        "connector": 5,
-        "button": 6,
-        "ic": 7,
-        "capacitor": 8,
-        "resistor": 9,
-        "power_symbol": 10,
-        "other": 11,
-    }
-    return (priorities.get(role, 11), symbol.get("reference", ""))
-
-
-def _schematic_symbol_position(
-    symbol: dict[str, Any],
-    role: str,
-    index: int,
-    width: float,
-    height: float,
-    placement_rules: dict[str, Any] | None,
-) -> dict[str, float]:
-    reference = symbol["reference"]
-    current_angle = symbol["position"].get("angle", 0.0)
-    rule = _placement_rule_position(reference, role, placement_rules, width, height)
-    if rule is not None:
-        return {
-            "x": _snap_schematic(rule[0]),
-            "y": _snap_schematic(rule[1]),
-            "angle": rule[2]
-            if _placement_rule_has_angle(reference, role, placement_rules)
-            else current_angle,
-        }
-    x, y, angle = _schematic_role_lane_position(role, index, width, height)
-    return {
-        "x": _snap_schematic(x),
-        "y": _snap_schematic(y),
-        "angle": current_angle if angle == 0.0 else angle,
-    }
-
-
-def _placement_rule_has_angle(
-    reference: str, role: str, placement_rules: dict[str, Any] | None
-) -> bool:
-    if not placement_rules:
-        return False
-    rule = None
-    references = placement_rules.get("references", {})
-    roles = placement_rules.get("roles", {})
-    if isinstance(references, dict):
-        rule = references.get(reference) or references.get(reference.upper())
-    if rule is None and reference in placement_rules:
-        rule = placement_rules.get(reference)
-    if rule is None and isinstance(roles, dict):
-        rule = roles.get(role)
-    return isinstance(rule, dict) and "angle" in rule
-
-
-def _schematic_role_lane_position(
-    role: str, index: int, width: float, height: float
-) -> tuple[float, float, float]:
-    offset = index % 8
-    row = index // 8
-    if role == "usb_connector":
-        return width * 0.12, height * 0.24 + offset * 12.0, 0.0
-    if role == "protection":
-        return width * 0.22, height * 0.20 + offset * 10.0, 0.0
-    if role == "regulator":
-        return width * 0.30, height * 0.22 + offset * 10.0, 0.0
-    if role == "primary_controller":
-        return width * 0.48, height * 0.38 + offset * 6.0, 0.0
-    if role == "display":
-        return width * 0.76, height * 0.34 + offset * 8.0, 0.0
-    if role == "connector":
-        return width * (0.34 + (offset % 4) * 0.16), height * 0.76 + row * 10.0, 0.0
-    if role == "button":
-        return width * (0.34 + offset * 0.08), height * 0.64 + row * 10.0, 0.0
-    if role == "capacitor":
-        return width * 0.34 + offset * 12.0, height * 0.34 + row * 9.0, 0.0
-    if role == "resistor":
-        return width * 0.34 + offset * 12.0, height * 0.50 + row * 9.0, 0.0
-    if role == "power_symbol":
-        return width * 0.18 + offset * 10.0, height * 0.12 + row * 8.0, 0.0
-    if role == "ic":
-        return width * 0.50 + (offset % 3) * 18.0, height * 0.50 + row * 12.0, 0.0
-    return width * 0.52 + (offset % 4) * 14.0, height * 0.58 + row * 10.0, 0.0
-
-
-def _avoid_schematic_overlap(
-    target: dict[str, float],
-    original_bounds: dict[str, float],
-    occupied: list[dict[str, float]],
-    width: float,
-    height: float,
-) -> dict[str, float]:
-    if not original_bounds:
-        return target
-    current = dict(target)
-    for _attempt in range(40):
-        dx = current["x"] - (original_bounds["left"] + original_bounds["right"]) / 2.0
-        dy = current["y"] - (original_bounds["top"] + original_bounds["bottom"]) / 2.0
-        candidate_bounds = _translated_bounds(original_bounds, dx, dy)
-        if not any(_bounds_intersect(candidate_bounds, other, padding=2.0) for other in occupied):
-            return current
-        current["y"] = _snap_schematic(current["y"] + 12.7)
-        if current["y"] > height - 15.0:
-            current["y"] = 15.24
-            current["x"] = _snap_schematic(current["x"] + 17.78)
-        if current["x"] > width - 15.0:
-            current["x"] = 15.24
-    return current
-
-
-def _translated_bounds(bounds: dict[str, float], dx: float, dy: float) -> dict[str, float]:
-    if not bounds:
-        return {}
-    return {
-        "left": bounds["left"] + dx,
-        "right": bounds["right"] + dx,
-        "top": bounds["top"] + dy,
-        "bottom": bounds["bottom"] + dy,
-    }
-
-
-def _symbol_pin_points(
-    schematic: KiCadSchematic, schematic_path: str, reference: str
-) -> set[tuple[float, float]]:
-    pin_map = get_symbol_pin_map_from_schematic(schematic, schematic_path, reference)
-    if not pin_map.get("success"):
-        return set()
-    return {
-        (pin["connection_point"]["x"], pin["connection_point"]["y"])
-        for pin in pin_map.get("pins", [])
-    }
-
-
-def _labels_at_points(
-    schematic: KiCadSchematic, points: set[tuple[float, float]]
-) -> list[dict[str, Any]]:
-    labels = []
-    for label in schematic.list_labels():
-        position = label["position"]
-        if (position["x"], position["y"]) in points and label.get("uuid"):
-            labels.append(label)
-    return labels
-
-
-def _no_connects_at_points(
-    schematic: KiCadSchematic, points: set[tuple[float, float]]
-) -> list[dict[str, Any]]:
-    markers = []
-    for marker in schematic.list_no_connects():
-        position = marker["position"]
-        if (position["x"], position["y"]) in points:
-            markers.append(marker)
-    return markers
-
-
-def _move_no_connects_at_points(
-    schematic: KiCadSchematic, markers: list[dict[str, Any]], dx: float, dy: float
-) -> list[dict[str, Any]]:
-    moved = []
-    for marker in markers:
-        old = marker["position"]
-        for node in schematic._top_level("no_connect"):
-            position = schematic._parse_at(node)
-            if position["x"] == old["x"] and position["y"] == old["y"]:
-                new_x = _snap_schematic(old["x"] + dx)
-                new_y = _snap_schematic(old["y"] + dy)
-                _set_no_connect_at(node, new_x, new_y)
-                moved.append(
-                    {
-                        "uuid": marker.get("uuid"),
-                        "from": old,
-                        "to": {"x": new_x, "y": new_y},
-                    }
-                )
-                break
-    return moved
-
-
-def _set_no_connect_at(node: SExprList, x: float, y: float) -> None:
-    replacement = SExprList(
-        [
-            SExprAtom("at"),
-            SExprAtom(_format_schematic_number(x)),
-            SExprAtom(_format_schematic_number(y)),
-        ]
-    )
-    at_expr = node.first_child("at")
-    if at_expr is None:
-        node.items.append(replacement)
-        return
-    for index, item in enumerate(node.items):
-        if item is at_expr:
-            node.items[index] = replacement
-            return
-
-
-def _format_schematic_number(value: float) -> str:
-    return f"{value:.6f}".rstrip("0").rstrip(".")
-
-
-def _snap_schematic(value: float, grid: float = SCHEMATIC_GRID_MM) -> float:
-    return round(round(value / grid) * grid, 6)
-
-
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _generated_schematic_report(schematic_path: str, *, run_erc: bool) -> dict[str, Any]:
+    native = _native_netlist_for_tool(schematic_path)
+    erc: dict[str, Any] = {"success": True, "skipped": True, "errors": 0, "warnings": 0}
+
+    if run_erc:
+        try:
+            from kicad_mcp.schematic_engine.kicad_cli_verifier import KicadCliVerifier
+
+            verified = KicadCliVerifier().verify(
+                schematic_path,
+                run_netlist=False,
+                run_erc=True,
+                export_svg=False,
+            )
+            erc = {
+                "success": verified.erc_errors == 0,
+                "skipped": False,
+                "errors": verified.erc_errors,
+                "warnings": verified.erc_warnings,
+                "total": verified.erc_total,
+                "path": verified.erc_path,
+            }
+        except Exception as exc:
+            erc = {
+                "success": False,
+                "skipped": False,
+                "errors": 1,
+                "warnings": 0,
+                "error": str(exc),
+            }
+
+    component_count = _safe_int(native.get("component_count"))
+    net_count = _safe_int(native.get("net_count"))
+    erc_errors = _safe_int(erc.get("errors", erc.get("total_violations")))
+    blocking_counts: dict[str, int] = {}
+    if not native.get("success"):
+        blocking_counts["netlist_export_failed"] = 1
+    if erc_errors:
+        blocking_counts["erc_errors"] = erc_errors
+    quality_passed = not blocking_counts
+
+    return {
+        "success": bool(native.get("success")) and (erc.get("skipped") or erc.get("success")),
+        "schematic_path": schematic_path,
+        "symbol_count": component_count,
+        "component_count": component_count,
+        "net_count": net_count,
+        "quality_gate": {
+            "passed": quality_passed,
+            "blocking_counts": blocking_counts,
+        },
+        "erc": erc,
+        "native_netlist": native,
+        "validation_source": "skidl_kiutils_kicad_cli",
+    }
 
 
 async def _project_completion_report(
@@ -2037,27 +589,16 @@ async def _project_completion_report(
         validated_project = validate_local_path(project_path, "project", must_exist=True)
         files = get_project_files(validated_project)
         schematic_report = (
-            build_quality_report(validated_project, run_erc=run_erc)
+            _generated_schematic_report(files["schematic"], run_erc=run_erc)
             if "schematic" in files
             else {"success": False, "error": "Schematic file not found"}
         )
         native = (
-            _native_netlist_for_tool(files["schematic"])
-            if "schematic" in files
-            else {"success": False, "error": "Schematic file not found"}
+            schematic_report.get("native_netlist", {})
+            if isinstance(schematic_report.get("native_netlist"), dict)
+            else {}
         )
-        erc_plan = (
-            _schematic_plan_erc_fixes(files["schematic"], timeout_seconds)
-            if run_erc and "schematic" in files
-            else {
-                "success": True,
-                "skipped": True,
-                "safe_auto_fix_count": 0,
-                "manual_decision_count": 0,
-                "accepted_warning_count": 0,
-                "blocked": False,
-            }
-        )
+        erc = schematic_report.get("erc", {}) if isinstance(schematic_report.get("erc"), dict) else {}
         pcb_quality = None
         ratsnest = None
         drc = {"success": True, "skipped": True, "reason": "run_drc=False"}
@@ -2072,23 +613,21 @@ async def _project_completion_report(
             ratsnest = {"success": False, "error": "PCB file not found"}
 
         quality_gate = schematic_report.get("quality_gate", {})
-        erc = schematic_report.get("erc", {})
-        unacceptable_erc = erc.get("unacceptable_categories", {})
-        erc_blocked = bool(
-            erc_plan.get("safe_auto_fix_count", 0) or erc_plan.get("manual_decision_count", 0)
-        )
         symbol_count = _safe_int(schematic_report.get("symbol_count"))
         component_count = _safe_int(native.get("component_count"))
         schematic_has_design_content = symbol_count > 0 or component_count > 0
         schematic_syntax_valid = bool(schematic_report.get("success"))
+        erc_clean = bool(
+            erc.get("skipped")
+            or (erc.get("success") and _safe_int(erc.get("errors", erc.get("total_violations"))) == 0)
+        )
         schematic_complete = bool(
             schematic_has_design_content
             and schematic_syntax_valid
             and quality_gate.get("passed")
             and native.get("success")
             and native.get("connectivity_complete", False)
-            and not unacceptable_erc
-            and not erc_blocked
+            and erc_clean
         )
         pcb_synced = bool(
             pcb_quality
@@ -2129,15 +668,6 @@ async def _project_completion_report(
                 "connectivity_complete": native.get("connectivity_complete"),
                 "error": native.get("error"),
             },
-            "erc_plan": {
-                "success": erc_plan.get("success"),
-                "safe_auto_fix_count": erc_plan.get("safe_auto_fix_count"),
-                "manual_decision_count": erc_plan.get("manual_decision_count"),
-                "accepted_warning_count": erc_plan.get("accepted_warning_count"),
-                "blocked": erc_plan.get("blocked"),
-                "accepted_warnings": erc_plan.get("accepted_warnings", []),
-                "blocked_reasons": erc_plan.get("blocked_reasons", []),
-            },
             "pcb": pcb_quality,
             "ratsnest": {
                 "success": ratsnest.get("success"),
@@ -2155,7 +685,6 @@ async def _project_completion_report(
         }
     except Exception as exc:
         return {"success": False, "project_path": project_path, "error": str(exc)}
-
 
 async def _project_next_actions(
     project_path: str,
@@ -2270,35 +799,25 @@ async def _project_design_state(
 
 def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     actions = []
-    erc_plan = report.get("erc_plan", {})
     schematic = report.get("schematic", {})
     quality_gate = schematic.get("quality_gate", {})
     blocking_counts = quality_gate.get("blocking_counts", {})
+    erc = schematic.get("erc", {}) if isinstance(schematic.get("erc"), dict) else {}
     pcb = report.get("pcb", {}) or {}
     ratsnest = report.get("ratsnest", {}) or {}
     drc = report.get("drc", {}) or {}
     status = report.get("status", {})
 
-    if erc_plan.get("safe_auto_fix_count", 0) > 0:
+    erc_error_count = _safe_int(erc.get("errors", erc.get("total_violations")))
+    if erc_error_count > 0:
         actions.append(
             _next_action(
-                "fix_safe_erc_items",
-                "Validate generated schematic",
-                "schematic_validate_generated_schematic",
-                "high",
-                "The schematic has ERC findings; rerun generated schematic validation before rebuilding from design intent.",
-                {},
-            )
-        )
-    if erc_plan.get("manual_decision_count", 0) > 0:
-        actions.append(
-            _next_action(
-                "resolve_manual_erc_decisions",
-                "Resolve ERC items needing design intent",
+                "resolve_schematic_erc_errors",
+                "Resolve schematic ERC errors",
                 "schematic_apply_design_intent",
                 "high",
-                "Some ERC findings require intended circuit behavior; regenerate from explicit design intent.",
-                {"blocked_reasons": erc_plan.get("blocked_reasons", [])},
+                "Generated schematic validation found ERC errors; rebuild from explicit design intent.",
+                {"erc_errors": erc_error_count, "erc": erc},
             )
         )
     if not quality_gate.get("passed", False):
@@ -2381,15 +900,16 @@ def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[st
                 {"violation_categories": drc.get("violation_categories")},
             )
         )
-    if erc_plan.get("accepted_warning_count", 0) > 0:
+    erc_warning_count = _safe_int(erc.get("warnings"))
+    if erc_warning_count > 0:
         actions.append(
             _next_action(
-                "optional_review_accepted_erc_warnings",
-                "Review accepted ERC warnings",
+                "optional_review_erc_warnings",
+                "Review ERC warnings",
                 "schematic_validate_generated_schematic",
                 "low",
-                "Only non-blocking accepted ERC warnings remain.",
-                {"accepted_warnings": erc_plan.get("accepted_warnings", [])},
+                "KiCad ERC reported warnings for the generated schematic.",
+                {"erc_warnings": erc_warning_count, "erc": erc},
             )
         )
     if not actions and status.get("ready_for_release"):
@@ -3201,21 +1721,6 @@ def _create_pcb_file(
         }
     except Exception as exc:
         return {"success": False, "project_path": project_path, "error": str(exc)}
-
-
-def _apply_transactional_schematic_authoring(
-    schematic_path: str,
-    mutator: Callable[[KiCadSchematic], dict[str, Any]],
-    post_write_validator: Callable[[str], dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    from kicad_mcp.utils.transactional_edit import apply_transactional_schematic_edit
-
-    return apply_transactional_schematic_edit(
-        schematic_path,
-        mutator,
-        run_cli_validation=True,
-        post_write_validator=post_write_validator,
-    )
 
 
 def _apply_transactional_pcb_edit(
