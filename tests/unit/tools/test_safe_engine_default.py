@@ -10,6 +10,7 @@ import pytest
 from kicad_mcp.server import create_server
 from kicad_mcp.tools import AGENT_PROFILE_TOOLS
 import kicad_mcp.tools.creation_tools as creation_tools
+from kicad_mcp.tools.design_intent_tools import _promote_candidate_schematic
 
 
 @pytest.mark.asyncio
@@ -55,6 +56,8 @@ async def test_agent_profile_exposes_single_schematic_apply_surface():
     assert "schematic_get_job_status" in AGENT_PROFILE_TOOLS
     assert "schematic_get_job_result" in AGENT_PROFILE_TOOLS
     assert "schematic_cancel_job" in AGENT_PROFILE_TOOLS
+    assert "schematic_export_candidate_to_project" in AGENT_PROFILE_TOOLS
+    assert "schematic_compare_netlists" in AGENT_PROFILE_TOOLS
 
 
 @pytest.mark.asyncio
@@ -115,3 +118,46 @@ async def test_schema_includes_recommended_apply_tool():
     assert schema["recommended_apply_tool"] == "schematic_start_design_intent_job"
     assert schema["recommended_status_tool"] == "schematic_get_job_status"
     assert schema["recommended_result_tool"] == "schematic_get_job_result"
+
+
+@pytest.mark.asyncio
+async def test_schema_has_overview_and_full_example_sections():
+    server = create_server()
+    tools = await server.get_tools()
+
+    overview = tools["schematic_design_intent_schema"].fn("overview")
+    example = tools["schematic_design_intent_schema"].fn("full_example")
+
+    assert overview["success"] is True
+    assert overview["schema"]["candidate_artifacts"]["promotion_tool"] == (
+        "schematic_export_candidate_to_project"
+    )
+    assert example["success"] is True
+    assert "parts" in example["schema"]
+
+
+def test_promote_candidate_schematic_copies_candidate_and_keeps_backup(tmp_path: Path, monkeypatch):
+    project_path = tmp_path / "demo.kicad_pro"
+    schematic_path = tmp_path / "demo.kicad_sch"
+    project_path.write_text("{}", encoding="utf-8")
+    schematic_path.write_text("original", encoding="utf-8")
+    candidate_dir = tmp_path / ".kicad_mcp" / "engine_artifacts" / "apply-test" / "failed_schematics"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "demo.kicad_sch").write_text("candidate", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools._generated_schematic_report",
+        lambda schematic_path, run_erc: {"success": True, "schematic_path": schematic_path},
+    )
+
+    result = _promote_candidate_schematic(
+        str(project_path),
+        candidate_schematic_path=None,
+        job_id="apply-test",
+        run_erc=True,
+        force=False,
+    )
+
+    assert result["success"] is True
+    assert schematic_path.read_text(encoding="utf-8") == "candidate"
+    assert result["backup_paths"]

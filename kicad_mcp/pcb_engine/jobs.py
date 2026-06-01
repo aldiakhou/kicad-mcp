@@ -360,7 +360,15 @@ def _apply_layout_intent(
         return _cancelled_payload(project_path, "after_sync_and_place")
 
     files = ct.get_project_files(ct.validate_local_path(project_path, "project", must_exist=True))
-    routing = {"success": True, "skipped": True, "reason": "routing.mode is not auto"}
+    routing = {
+        "success": True,
+        "skipped": True,
+        "reason": (
+            "routing.mode=report_only; ratsnest/topology report is returned below"
+            if normalized["routing"]["mode"] == "report_only"
+            else "routing.mode is not auto"
+        ),
+    }
     if normalized["routing"]["mode"] == "auto":
         progress("autoroute", 4, "Routing assigned PCB ratsnest connections")
 

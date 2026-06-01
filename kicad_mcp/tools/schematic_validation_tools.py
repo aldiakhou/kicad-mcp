@@ -1,5 +1,7 @@
 """Generated schematic validation MCP tools."""
 
+import json
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
@@ -23,6 +25,7 @@ def register_schematic_validation_tools(mcp: FastMCP) -> None:
         resolved_project = ct._resolve_project_alias(project_path, schematic_path, path)
         try:
             from kicad_mcp.schematic_engine.expected_netlist import (
+                check_power_net_sanity,
                 compare_netlists,
                 load_expected_netlist,
                 parse_kicad_netlist,
@@ -57,8 +60,14 @@ def register_schematic_validation_tools(mcp: FastMCP) -> None:
                     "success": compare_result.success,
                     "missing_endpoints": compare_result.missing_endpoints[:10],
                     "extra_endpoints": compare_result.extra_endpoints[:10],
+                    "missing_endpoint_count": len(compare_result.missing_endpoints),
+                    "extra_endpoint_count": len(compare_result.extra_endpoints),
                 }
+                power_sanity = check_power_net_sanity(expected, actual)
+                result["power_net_sanity"] = power_sanity
                 if not compare_result.success:
+                    result["success"] = False
+                if not power_sanity.get("success", True):
                     result["success"] = False
 
             if run_visual_lint:
@@ -83,3 +92,55 @@ def register_schematic_validation_tools(mcp: FastMCP) -> None:
             return result
         except Exception as exc:
             return {"success": False, "error": str(exc)}
+
+    @mcp.tool()
+    def schematic_compare_netlists(
+        expected_netlist_path: str,
+        actual_netlist_path: str,
+        compare_mode: str = "permissive",
+        output_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare an expected JSON netlist with a KiCad S-expression netlist."""
+        try:
+            from kicad_mcp.schematic_engine.expected_netlist import (
+                check_power_net_sanity,
+                compare_netlists,
+                load_expected_netlist,
+                parse_kicad_netlist,
+            )
+
+            expected = load_expected_netlist(expected_netlist_path)
+            actual = parse_kicad_netlist(actual_netlist_path)
+            compare_result = compare_netlists(expected, actual, compare_mode=compare_mode)
+            power_sanity = check_power_net_sanity(expected, actual)
+            payload = {
+                "success": compare_result.success and power_sanity.get("success", True),
+                "tool": "schematic_compare_netlists",
+                "expected_netlist_path": expected_netlist_path,
+                "actual_netlist_path": actual_netlist_path,
+                "compare_mode": compare_mode,
+                "netlist_compare": {
+                    "success": compare_result.success,
+                    "missing_endpoints": compare_result.missing_endpoints,
+                    "extra_endpoints": compare_result.extra_endpoints,
+                    "mismatched_nets": compare_result.mismatched_nets,
+                    "expected_net_count": compare_result.expected_net_count,
+                    "actual_net_count": compare_result.actual_net_count,
+                },
+                "power_net_sanity": power_sanity,
+            }
+            diff_path = Path(output_path) if output_path else (
+                Path(actual_netlist_path).with_name("netlist_compare.diff.json")
+            )
+            diff_path.parent.mkdir(parents=True, exist_ok=True)
+            diff_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            payload["diff_path"] = str(diff_path)
+            return payload
+        except Exception as exc:
+            return {
+                "success": False,
+                "tool": "schematic_compare_netlists",
+                "expected_netlist_path": expected_netlist_path,
+                "actual_netlist_path": actual_netlist_path,
+                "error": str(exc),
+            }

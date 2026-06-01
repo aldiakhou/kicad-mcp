@@ -77,6 +77,24 @@ class TestNetlistComparison:
         )
         assert result.success
 
+    def test_pin_number_and_kicad_pinfunction_suffix_are_equivalent(self):
+        """KiCad-decorated pin functions compare equal to intent names/numbers."""
+        expected = NormalizedNetlist(nets={
+            "+3V3": {NetlistEntry("U4", "VOUT")},
+            "CONN": {NetlistEntry("J2", "Pin_1")},
+            "PLUS": {NetlistEntry("BZ1", "+")},
+        })
+        actual = NormalizedNetlist(nets={
+            "+3V3": {NetlistEntry("U4", "VOUT_5")},
+            "CONN": {NetlistEntry("J2", "Pin_1_1")},
+            "PLUS": {NetlistEntry("BZ1", "+_1")},
+        })
+
+        result = compare_netlists(expected, actual)
+
+        assert result.success
+        assert result.missing_endpoints == []
+
     def test_mismatched_nets_reported(self):
         """Mismatched nets are reported."""
         expected = NormalizedNetlist(nets={
@@ -170,3 +188,20 @@ class TestParseSexprNetlist:
         """Empty content produces empty netlist."""
         netlist = _parse_sexpr_netlist("")
         assert netlist.nets == {}
+
+
+def test_power_net_sanity_detects_ground_short():
+    from kicad_mcp.schematic_engine.expected_netlist import check_power_net_sanity
+
+    expected = NormalizedNetlist(nets={
+        "+5V": {NetlistEntry("J1", "1")},
+        "GND": {NetlistEntry("J1", "2")},
+    })
+    actual = NormalizedNetlist(nets={
+        "+5V": {NetlistEntry("J1", "1"), NetlistEntry("J1", "2")},
+    })
+
+    result = check_power_net_sanity(expected, actual)
+
+    assert result["success"] is False
+    assert result["issues"][0]["type"] == "power_ground_short"

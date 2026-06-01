@@ -114,6 +114,7 @@ def _resolve_real_pin_positions(
         # Index by pin number (primary) — numbers are unique per symbol
         pin_number = pin.get("number", "")
         pin_name = pin.get("name", "")
+        pinfunction = pin.get("pinfunction", "")
         if pin_number:
             result.setdefault(pin_number, []).append(pin_coord)
         if pin_name and pin_name != pin_number:
@@ -121,6 +122,12 @@ def _resolve_real_pin_positions(
             result.setdefault(pin_name, []).append(pin_coord)
             for alias in _pin_selector_aliases(pin_name, pin_number):
                 if alias in {pin_name, pin_number}:
+                    continue
+                result.setdefault(alias, []).append(pin_coord)
+        if pinfunction and pinfunction not in {pin_name, pin_number}:
+            result.setdefault(pinfunction, []).append(pin_coord)
+            for alias in _pin_selector_aliases(pinfunction, pin_number):
+                if alias in {pinfunction, pin_name, pin_number}:
                     continue
                 result.setdefault(alias, []).append(pin_coord)
 
@@ -328,6 +335,12 @@ class SchematicWriter:
             from kiutils.schematic import Schematic
 
             generated_files: list[str] = []
+            no_connect_summary: dict[str, Any] = {
+                "requested_count": len(canonical.no_connects),
+                "emitted_count": 0,
+                "skipped": [],
+                "markers": [],
+            }
 
             # Generate each sheet
             for sheet_name, refs in sheet_plan.sheets.items():
@@ -361,7 +374,18 @@ class SchematicWriter:
                 self._add_labels_kiutils(sch, canonical, refs, sheet_plan, sheet_name)
 
                 # Add no-connect markers
-                self._add_no_connects_kiutils(sch, canonical, refs, sheet_plan)
+                sheet_no_connects = self._add_no_connects_kiutils(
+                    sch,
+                    canonical,
+                    refs,
+                    sheet_plan,
+                )
+                no_connect_summary["emitted_count"] += sheet_no_connects.get(
+                    "emitted_count",
+                    0,
+                )
+                no_connect_summary["skipped"].extend(sheet_no_connects.get("skipped", []))
+                no_connect_summary["markers"].extend(sheet_no_connects.get("markers", []))
 
                 # KiCad CLI netlist export relies on symbol instance metadata.
                 for ref in refs:
@@ -406,6 +430,7 @@ class SchematicWriter:
                 "success": True,
                 "files": generated_files,
                 "method": "kiutils",
+                "no_connect_summary": no_connect_summary,
             }
         except Exception as e:
             logger.error("KiUtils write failed: %s", e)
@@ -603,13 +628,14 @@ class SchematicWriter:
         canonical: CanonicalCircuit,
         refs: list[str],
         sheet_plan: SheetPlan | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Add no-connect markers at exact pin positions.
 
         For each (ref, pin) in canonical.no_connects that belongs to this sheet,
         resolve the real pin coordinate and place a no_connect marker there.
         Falls back to estimated position if library resolution is unavailable.
         """
+        summary: dict[str, Any] = {"emitted_count": 0, "skipped": [], "markers": []}
         try:
             from kiutils.items.common import Position
             from kiutils.items.schitems import NoConnect
@@ -622,31 +648,44 @@ class SchematicWriter:
 
                 placement = sheet_plan.placements.get(nc_ref) if sheet_plan else None
                 if not placement:
+                    summary["skipped"].append(
+                        {"ref": nc_ref, "pin": nc_pin, "reason": "missing placement"}
+                    )
                     continue
 
-                # Try to resolve exact pin position
-                nc_x: float | None = None
-                nc_y: float | None = None
-
                 part = canonical.part_by_ref(nc_ref)
-                if part:
-                    pin_map = _resolve_real_pin_positions(part, placement)
-                    pin_entries = pin_map.get(nc_pin, [])
-                    if pin_entries:
-                        # Use first matching pin position for no-connect
-                        nc_x, nc_y, _ = pin_entries[0]
+                if not part:
+                    summary["skipped"].append(
+                        {"ref": nc_ref, "pin": nc_pin, "reason": "part not found"}
+                    )
+                    continue
 
-                if nc_x is None or nc_y is None:
-                    # Fallback: place near the symbol origin
-                    nc_x = placement.x - 5.08
-                    nc_y = placement.y
+                pin_map = _resolve_real_pin_positions(part, placement)
+                pin_entries = pin_map.get(nc_pin, [])
+                if not pin_entries:
+                    summary["skipped"].append(
+                        {"ref": nc_ref, "pin": nc_pin, "reason": "pin position not resolved"}
+                    )
+                    continue
 
-                no_connect = NoConnect()
-                no_connect.position = Position(X=nc_x, Y=nc_y, angle=0)
-                no_connect.uuid = str(uuid.uuid4())
-                sch.noConnects.append(no_connect)
+                for nc_x, nc_y, _ in pin_entries:
+                    no_connect = NoConnect()
+                    no_connect.position = Position(X=nc_x, Y=nc_y, angle=0)
+                    no_connect.uuid = str(uuid.uuid4())
+                    sch.noConnects.append(no_connect)
+                    summary["emitted_count"] += 1
+                    summary["markers"].append(
+                        {
+                            "ref": nc_ref,
+                            "pin": nc_pin,
+                            "x": nc_x,
+                            "y": nc_y,
+                        }
+                    )
         except Exception as e:
             logger.warning("Failed to add no-connects via KiUtils: %s", e)
+            summary["skipped"].append({"reason": f"writer exception: {e}"})
+        return summary
 
     def _add_hierarchical_sheets_kiutils(
         self,

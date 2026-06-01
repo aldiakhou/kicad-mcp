@@ -6,6 +6,17 @@ from copy import deepcopy
 from typing import Any
 
 PCB_INTENT_SCHEMA: dict[str, Any] = {
+    "overview": {
+        "description": "PCB layout intent syncs footprints from the committed schematic, places them, optionally routes, and reports ratsnest status.",
+        "workflow": [
+            "pcb_preview_layout_intent",
+            "pcb_start_layout_job",
+            "pcb_get_layout_job_status until terminal",
+            "pcb_get_layout_job_result",
+            "pcb_validate_layout",
+        ],
+        "recovery_note": "If schematic generation produced candidate_schematic_artifacts, first promote one with schematic_export_candidate_to_project, then run PCB preview/layout.",
+    },
     "board": {
         "description": "Physical board constraints.",
         "fields": {
@@ -40,6 +51,12 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
     },
     "routing": {
         "description": "Routing scope for the async PCB layout job.",
+        "capability_notes": [
+            "mode=report_only does not write routes; it reports ratsnest/topology after sync and placement.",
+            "mode=auto uses the bounded obstacle-aware grid router for ordinary point-to-point copper on one selected layer.",
+            "The router is not an RF, impedance, differential-pair, length-tuning, or dense mixed-signal signoff router.",
+            "Vias, advanced layer changes, and high-density escape routing require manual or external routing.",
+        ],
         "fields": {
             "mode": "none, report_only, or auto. auto runs the bounded obstacle-aware grid router.",
             "layer": "Copper layer to use for auto routing. Default: F.Cu.",
@@ -72,6 +89,23 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
             "run_drc": "Run DRC before generating fabrication artifacts.",
         },
         "example": {"include_step": False, "include_ipc2581": False, "run_drc": True},
+    },
+    "full_example": {
+        "description": "Medium board example using sync, functional placement, ratsnest report, and no automatic routing.",
+        "example": {
+            "board": {"width_mm": 70.0, "height_mm": 45.0, "shape": "rectangular"},
+            "placement": {
+                "style": "functional",
+                "preserve_existing_placement": True,
+                "components": [
+                    {"ref": "J1", "x": 6.0, "y": 22.0, "angle": 90},
+                    {"ref": "U1", "x": 35.0, "y": 22.0, "angle": 0},
+                    {"ref": "J2", "x": 64.0, "y": 22.0, "angle": 270},
+                ],
+            },
+            "routing": {"mode": "report_only", "layer": "F.Cu"},
+            "validation": {"run_drc": False, "require_clean_drc": False},
+        },
     },
 }
 

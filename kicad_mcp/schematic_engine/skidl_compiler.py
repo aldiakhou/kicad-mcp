@@ -163,15 +163,11 @@ class SkidlCompiler:
                             f"Optional pin {endpoint.pin} on {endpoint.ref} not resolved"
                         )
 
-            # Generate expected netlist from canonical (source of truth for comparison)
-            nets_dict: dict[str, set[NetlistEntry]] = defaultdict(set)
-            for endpoint in canonical.endpoints:
-                entry = NetlistEntry(ref=endpoint.ref, pin=endpoint.pin)
-                nets_dict[endpoint.net].add(entry)
-
-            expected = NormalizedNetlist(nets=dict(nets_dict))
-
             skidl_resolved = _resolved_selector_netlist(canonical, pin_aliases_by_ref)
+            # Use symbol-resolved selectors for comparison. KiCad's native
+            # netlist is pin-number centric, while design intent often uses
+            # readable pin names.
+            expected = skidl_resolved
 
             netlist_path = self._save_expected_netlist(canonical, expected)
 

@@ -28,6 +28,8 @@ class EngineResult:
     erc: dict[str, Any] = field(default_factory=dict)
     visual_lint: dict[str, Any] = field(default_factory=dict)
     netlist_compare: dict[str, Any] = field(default_factory=dict)
+    power_net_sanity: dict[str, Any] = field(default_factory=dict)
+    no_connect_summary: dict[str, Any] = field(default_factory=dict)
 
     # Artifact paths
     artifact_dir: str | None = None
@@ -35,7 +37,10 @@ class EngineResult:
     kicad_netlist_path: str | None = None
     svg_dir: str | None = None
     erc_path: str | None = None
+    netlist_compare_path: str | None = None
     generated_schematic_artifacts: list[str] = field(default_factory=list)
+    candidate_schematic_artifacts: list[str] = field(default_factory=list)
+    candidate_artifact_policy: str = "keep_on_failure"
 
     # Counts
     part_count: int = 0
@@ -75,6 +80,10 @@ class EngineResult:
             result["visual_lint"] = self.visual_lint
         if self.netlist_compare:
             result["netlist_compare"] = self.netlist_compare
+        if self.power_net_sanity:
+            result["power_net_sanity"] = self.power_net_sanity
+        if self.no_connect_summary:
+            result["no_connect_summary"] = self.no_connect_summary
         if self.artifact_dir:
             result["artifact_dir"] = self.artifact_dir
         if self.expected_netlist_path:
@@ -85,8 +94,14 @@ class EngineResult:
             result["svg_dir"] = self.svg_dir
         if self.erc_path:
             result["erc_path"] = self.erc_path
+        if self.netlist_compare_path:
+            result["netlist_compare_path"] = self.netlist_compare_path
         if self.generated_schematic_artifacts:
             result["generated_schematic_artifacts"] = self.generated_schematic_artifacts
+        if self.candidate_schematic_artifacts:
+            result["candidate_schematic_artifacts"] = self.candidate_schematic_artifacts
+            result["candidate_artifact_policy"] = self.candidate_artifact_policy
+            result["candidate_promotion_tool"] = "schematic_export_candidate_to_project"
         if self.part_count:
             result["part_count"] = self.part_count
             result["net_count"] = self.net_count

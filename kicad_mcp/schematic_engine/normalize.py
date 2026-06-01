@@ -13,7 +13,9 @@ from typing import Any
 from kicad_mcp.schematic_engine.custom_symbols import (
     CUSTOM_PINS_PROPERTY,
     custom_lib_id,
+    decode_custom_pins,
     encode_custom_pins,
+    is_custom_lib_id,
     normalize_custom_pins,
 )
 from kicad_mcp.schematic_engine.models import (
@@ -80,6 +82,16 @@ def normalize_design_intent(
     no_connects: list[tuple[str, str]] = []
     blocks: dict[str, list[str]] = {}
     rails: set[str] = set()
+    no_connect_summary: dict[str, Any] = {
+        "requested_count": 0,
+        "matched_count": 0,
+        "emitted_count": 0,
+        "skipped_connected_count": 0,
+        "skipped_hidden_count": 0,
+        "unmatched_rule_count": 0,
+        "rules": [],
+        "warnings": [],
+    }
 
     # --- Extract parts ---
     for part_spec in intent.get("parts", []):
@@ -162,19 +174,31 @@ def normalize_design_intent(
         for p in sc_parts:
             blocks.setdefault(p.block, []).append(p.ref)
 
+    parts_by_ref = {part.ref: part for part in parts}
+
     # --- Extract pin_rules ---
     for rule in _normalize_object_list(intent.get("pin_rules", []), "pin_rules"):
-        rule_endpoints = _normalize_pin_rule(rule)
+        rule_endpoints = _normalize_pin_rule(rule, parts_by_ref)
         endpoints.extend(rule_endpoints)
 
+    _validate_endpoint_conflicts(parts_by_ref, endpoints)
+    connected_keys = {
+        _resolved_endpoint_key(parts_by_ref, endpoint.ref, endpoint.pin)
+        for endpoint in endpoints
+    }
+
     # --- Extract no_connect_rules ---
-    for nc_rule in _normalize_object_list(intent.get("no_connect_rules", []), "no_connect_rules"):
-        ref = nc_rule.get("ref", "")
-        pins = nc_rule.get("pins", [])
-        if isinstance(pins, str):
-            pins = [pins]
-        for pin in pins:
-            no_connects.append((ref, str(pin)))
+    for index, nc_rule in enumerate(
+        _normalize_object_list(intent.get("no_connect_rules", []), "no_connect_rules")
+    ):
+        markers, rule_summary = _normalize_no_connect_rule(
+            nc_rule,
+            parts_by_ref,
+            connected_keys,
+            f"no_connect_rules[{index}]",
+        )
+        no_connects.extend(markers)
+        _merge_no_connect_summary(no_connect_summary, rule_summary)
 
     # Detect power nets from endpoint net names
     for ep in endpoints:
@@ -191,6 +215,7 @@ def normalize_design_intent(
         no_connects=no_connects,
         blocks=blocks,
         rails=rails,
+        no_connect_summary=no_connect_summary,
     )
 
 
@@ -897,15 +922,18 @@ def _normalize_connector_header(
     return [part], endpoints
 
 
-def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
+def _normalize_pin_rule(
+    rule: dict[str, Any],
+    parts_by_ref: dict[str, CircuitPart] | None = None,
+) -> list[CircuitEndpoint]:
     """Convert a pin rule into explicit endpoints.
 
     Supports two formats:
     1. Direct: {"ref": "U1", "pins": ["PA0", "PA1"], "net": "+3V3"}
     2. Match: {"ref": "U1", "match": {"name_regex": "^(VDD|VDDA)$"}, "net": "+3V3"}
 
-    For match format, the regex pattern is stored and will be resolved
-    against actual symbol pins at compilation time.
+    Match format is resolved during normalization so the writer, expected
+    netlist, no-connect handling, and pre-commit checks all use the same pins.
     """
     endpoints: list[CircuitEndpoint] = []
     if not isinstance(rule, dict):
@@ -939,24 +967,40 @@ def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
                 source="pin_rules",
             ))
 
-    # Match format: resolve regex patterns to pin names
+    # Match format: resolve selectors to concrete symbol pins.
     match_spec = rule.get("match")
-    if not match_spec:
+    if not match_spec and not pins:
         match_spec = {
             key: rule.get(key)
-            for key in ("name_regex", "number_regex", "pin_type", "name_contains")
+            for key in (
+                "pin",
+                "pins",
+                "name",
+                "number",
+                "names",
+                "numbers",
+                "name_regex",
+                "number_regex",
+                "pin_type",
+                "name_contains",
+            )
             if rule.get(key)
         }
     if match_spec and isinstance(match_spec, dict) and ref and net:
-        name_regex = match_spec.get("name_regex", "")
-        if not name_regex and match_spec.get("name"):
-            name_regex = f"^{re.escape(str(match_spec['name']))}$"
-        if name_regex:
-            # Store as a special endpoint with the regex pattern
-            # The pin field contains the regex for later resolution
+        if parts_by_ref is None:
+            raise ValueError("pin_rules match selectors require part metadata")
+        part = parts_by_ref.get(str(ref))
+        if part is None:
+            raise ValueError(f"pin_rules ref not found: {ref}")
+        pins_matched = _select_part_pins(part, match_spec)
+        if not pins_matched:
+            raise ValueError(
+                f"pin_rules selector matched zero pins for {ref}: {match_spec}"
+            )
+        for pin_info in pins_matched:
             endpoints.append(CircuitEndpoint(
                 ref=ref,
-                pin=f"__regex__:{name_regex}",
+                pin=_pin_identifier(part, pin_info),
                 net=net,
                 required=rule.get("required", True),
                 allow_hidden=rule.get("allow_hidden", True),
@@ -964,6 +1008,299 @@ def _normalize_pin_rule(rule: dict[str, Any]) -> list[CircuitEndpoint]:
             ))
 
     return endpoints
+
+
+def _normalize_no_connect_rule(
+    rule: dict[str, Any],
+    parts_by_ref: dict[str, CircuitPart],
+    connected_keys: set[tuple[str, str]],
+    path: str,
+) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+    if not isinstance(rule, dict):
+        raise ValueError(f"{path} must be an object")
+    if rule.get("action", "mark_no_connect") != "mark_no_connect":
+        raise ValueError(f"{path} action must be 'mark_no_connect'")
+
+    ref = str(rule.get("ref") or "")
+    markers: list[tuple[str, str]] = []
+    summary: dict[str, Any] = {
+        "path": path,
+        "ref": ref,
+        "selector": rule.get("match"),
+        "requested_count": 0,
+        "matched_count": 0,
+        "emitted_count": 0,
+        "skipped_connected": [],
+        "skipped_hidden": [],
+        "unmatched": False,
+        "warnings": [],
+    }
+    if not ref:
+        raise ValueError(f"{path} missing ref")
+
+    candidate_pins: list[tuple[str, dict[str, Any] | None]] = []
+    direct_pins = _rule_pin_list(rule)
+    for pin in direct_pins:
+        candidate_pins.append((pin, None))
+
+    match_spec = rule.get("match")
+    if match_spec:
+        part = parts_by_ref.get(ref)
+        if part is None:
+            raise ValueError(f"{path} ref not found: {ref}")
+        matched = _select_part_pins(part, match_spec)
+        if not matched:
+            summary["unmatched"] = True
+            summary["warnings"].append("selector matched zero pins")
+        for pin_info in matched:
+            candidate_pins.append((_pin_identifier(part, pin_info), pin_info))
+
+    except_pins = {str(item) for item in rule.get("except", [])}
+    include_hidden = bool(rule.get("include_hidden", False))
+    summary["requested_count"] = len(candidate_pins)
+    summary["matched_count"] = len(candidate_pins)
+
+    seen: set[tuple[str, str]] = set()
+    for pin, pin_info in candidate_pins:
+        if pin in except_pins:
+            continue
+        if pin_info is not None and (
+            str(pin_info.get("name") or "") in except_pins
+            or str(pin_info.get("number") or "") in except_pins
+        ):
+            continue
+        if pin_info is not None and _pin_is_hidden(pin_info) and not include_hidden:
+            summary["skipped_hidden"].append(
+                {
+                    "pin": pin,
+                    "name": str(pin_info.get("name") or ""),
+                    "number": str(pin_info.get("number") or ""),
+                }
+            )
+            continue
+        marker_key = _resolved_endpoint_key(parts_by_ref, ref, pin)
+        if marker_key in connected_keys:
+            summary["skipped_connected"].append({"ref": ref, "pin": pin})
+            continue
+        marker = (ref, pin)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        markers.append(marker)
+
+    summary["emitted_count"] = len(markers)
+    return markers, summary
+
+
+def _rule_pin_list(rule: dict[str, Any]) -> list[str]:
+    pins = rule.get("pins", [])
+    pin = rule.get("pin") or rule.get("number") or rule.get("name")
+    if pin:
+        pins = [pin, *pins] if isinstance(pins, list) else [pin, pins]
+    for key in ("names", "numbers"):
+        extra = rule.get(key, [])
+        if isinstance(extra, str):
+            pins = [*pins, extra] if isinstance(pins, list) else [pins, extra]
+        elif isinstance(extra, list):
+            pins = [*pins, *extra] if isinstance(pins, list) else [pins, *extra]
+    if isinstance(pins, str):
+        pins = [pins]
+    return [str(item) for item in pins if str(item)]
+
+
+def _merge_no_connect_summary(target: dict[str, Any], rule_summary: dict[str, Any]) -> None:
+    target["rules"].append(rule_summary)
+    target["requested_count"] += int(rule_summary.get("requested_count", 0))
+    target["matched_count"] += int(rule_summary.get("matched_count", 0))
+    target["emitted_count"] += int(rule_summary.get("emitted_count", 0))
+    target["skipped_connected_count"] += len(rule_summary.get("skipped_connected", []))
+    target["skipped_hidden_count"] += len(rule_summary.get("skipped_hidden", []))
+    if rule_summary.get("unmatched"):
+        target["unmatched_rule_count"] += 1
+    for warning in rule_summary.get("warnings", []):
+        target["warnings"].append(
+            {
+                "path": rule_summary.get("path"),
+                "ref": rule_summary.get("ref"),
+                "warning": warning,
+                "selector": rule_summary.get("selector"),
+            }
+        )
+
+
+def _validate_endpoint_conflicts(
+    parts_by_ref: dict[str, CircuitPart],
+    endpoints: list[CircuitEndpoint],
+) -> None:
+    assignments: dict[tuple[str, str], CircuitEndpoint] = {}
+    for endpoint in endpoints:
+        key = _resolved_endpoint_key(parts_by_ref, endpoint.ref, endpoint.pin)
+        existing = assignments.get(key)
+        if existing and existing.net != endpoint.net:
+            raise ValueError(
+                "same ref/pin assigned to multiple nets: "
+                f"{endpoint.ref}.{endpoint.pin} is on both "
+                f"{existing.net} and {endpoint.net}"
+            )
+        assignments[key] = endpoint
+
+
+def _resolved_endpoint_key(
+    parts_by_ref: dict[str, CircuitPart],
+    ref: str,
+    pin: str,
+) -> tuple[str, str]:
+    part = parts_by_ref.get(str(ref))
+    if part is None:
+        return str(ref), _pin_lookup_key(pin)
+    matches = _exact_pin_matches(part, str(pin))
+    if len(matches) == 1:
+        number = str(matches[0].get("number") or "")
+        name = str(matches[0].get("name") or "")
+        return str(ref), _pin_lookup_key(number or name or pin)
+    return str(ref), _pin_lookup_key(pin)
+
+
+def _exact_pin_matches(part: CircuitPart, requested_pin: str) -> list[dict[str, Any]]:
+    requested = str(requested_pin)
+    try:
+        pins = _part_pins(part)
+    except ValueError:
+        return []
+    return [
+        pin
+        for pin in pins
+        if requested in _pin_values(pin)
+    ]
+
+
+def _select_part_pins(part: CircuitPart, selector: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(selector, dict):
+        return []
+    exclude = selector.get("exclude")
+    positive = {key: value for key, value in selector.items() if key != "exclude"}
+    try:
+        matches = [pin for pin in _part_pins(part) if _pin_matches(pin, positive)]
+        if isinstance(exclude, dict):
+            matches = [pin for pin in matches if not _pin_matches(pin, exclude)]
+    except re.error as exc:
+        raise ValueError(f"invalid pin selector regex for {part.ref}: {exc}") from exc
+    return matches
+
+
+def _part_pins(part: CircuitPart) -> list[dict[str, Any]]:
+    if is_custom_lib_id(part.lib_id):
+        return [
+            {
+                "number": pin["number"],
+                "name": pin["name"],
+                "pinfunction": f"{pin['name']}_{pin['number']}",
+                "pintype": pin.get("pintype", "bidirectional"),
+                "hidden": False,
+            }
+            for pin in decode_custom_pins(part.properties.get(CUSTOM_PINS_PROPERTY))
+        ]
+    try:
+        from kicad_mcp.utils.schematic_pins import _resolve_symbol_pins
+
+        return _resolve_symbol_pins(part.lib_id)
+    except Exception as exc:
+        raise ValueError(f"Symbol {part.lib_id} for {part.ref} could not be resolved") from exc
+
+
+def _pin_matches(pin: dict[str, Any], selector: dict[str, Any]) -> bool:
+    if not selector:
+        return True
+    for key, expected in selector.items():
+        if key == "pin":
+            if str(expected) not in _pin_values(pin):
+                return False
+        elif key == "pins":
+            expected_values = (
+                {str(item) for item in expected}
+                if isinstance(expected, list)
+                else {str(expected)}
+            )
+            if not expected_values.intersection(_pin_values(pin)):
+                return False
+        elif key == "name":
+            if str(pin.get("name") or "") != str(expected):
+                return False
+        elif key == "number":
+            if str(pin.get("number") or "") != str(expected):
+                return False
+        elif key == "names":
+            expected_values = (
+                {str(item) for item in expected}
+                if isinstance(expected, list)
+                else {str(expected)}
+            )
+            if str(pin.get("name") or "") not in expected_values:
+                return False
+        elif key == "numbers":
+            expected_values = (
+                {str(item) for item in expected}
+                if isinstance(expected, list)
+                else {str(expected)}
+            )
+            if str(pin.get("number") or "") not in expected_values:
+                return False
+        elif key == "name_regex":
+            if not re.search(str(expected), str(pin.get("name") or "")):
+                return False
+        elif key == "number_regex":
+            if not re.search(str(expected), str(pin.get("number") or "")):
+                return False
+        elif key == "pin_type":
+            pin_type = str(pin.get("pintype") or pin.get("type") or "").lower()
+            if pin_type != str(expected).lower():
+                return False
+        elif key == "name_contains":
+            if str(expected).lower() not in str(pin.get("name") or "").lower():
+                return False
+        else:
+            return False
+    return True
+
+
+def _pin_values(pin: dict[str, Any]) -> set[str]:
+    return {
+        str(value)
+        for value in (pin.get("name"), pin.get("number"), pin.get("pinfunction"))
+        if value is not None and str(value)
+    }
+
+
+def _pin_identifier(part: CircuitPart, pin: dict[str, Any]) -> str:
+    name = str(pin.get("name") or "")
+    number = str(pin.get("number") or "")
+    if name and _pin_name_counts(part).get(name, 0) == 1:
+        return name
+    return number or name
+
+
+def _pin_name_counts(part: CircuitPart) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for pin in _part_pins(part):
+        name = str(pin.get("name") or "")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _pin_is_hidden(pin: dict[str, Any]) -> bool:
+    return bool(pin.get("hidden"))
+
+
+def _pin_lookup_key(value: str) -> str:
+    cleaned = (
+        str(value or "")
+        .replace("~{", "")
+        .replace("}", "")
+        .replace("{", "")
+        .replace("~", "")
+    )
+    return "".join(ch for ch in cleaned.lower() if ch.isalnum())
 
 
 def _normalize_object_list(raw: Any, path: str) -> list[dict[str, Any]]:

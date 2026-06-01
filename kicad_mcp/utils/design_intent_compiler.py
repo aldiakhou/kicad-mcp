@@ -81,6 +81,122 @@ DESIGN_INTENT_TOP_LEVEL_SCHEMA = {
     },
 }
 
+DESIGN_INTENT_OVERVIEW = {
+    "description": "High-level schematic intent compiled by schematic_start_design_intent_job.",
+    "workflow": [
+        "resolve_symbols/resolve_footprints when using installed libraries",
+        "schematic_preview_design_intent",
+        "schematic_start_design_intent_job",
+        "schematic_get_job_status until terminal",
+        "schematic_get_job_result",
+        "pcb_preview_layout_intent or schematic_export_candidate_to_project on recoverable failure",
+    ],
+    "symbol_resolution_detail_values": ["compact", "pins", "full"],
+    "candidate_artifacts": {
+        "policy": "failed generated schematics are preserved as candidate_schematic_artifacts",
+        "promotion_tool": "schematic_export_candidate_to_project",
+    },
+}
+
+DESIGN_INTENT_FULL_EXAMPLE = {
+    "name": "mcu_usb_spi_i2c_debug",
+    "parts": [
+        {
+            "ref": "U1",
+            "lib_id": "MCU_ST_STM32G4:STM32G431KBTx",
+            "value": "STM32G431KBTx",
+            "footprint": "Package_QFP:LQFP-32_7x7mm_P0.8mm",
+            "block": "mcu",
+        },
+        {
+            "ref": "U2",
+            "lib_id": "Regulator_Linear:AP2112K-3.3",
+            "value": "AP2112K-3.3",
+            "footprint": "Package_TO_SOT_SMD:SOT-23-5",
+            "block": "power",
+        },
+        {
+            "ref": "J1",
+            "lib_id": "Connector:USB_C_Receptacle_USB2.0",
+            "value": "USB-C",
+            "footprint": "Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+            "block": "power",
+        },
+        {
+            "ref": "J2",
+            "lib_id": "Connector_Generic:Conn_01x05",
+            "value": "DEBUG",
+            "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
+            "block": "interfaces",
+        },
+        {
+            "ref": "U3",
+            "value": "I2C_SENSOR",
+            "footprint": "Package_LGA:LGA-8_2x2mm_P0.5mm",
+            "pins": [
+                {"number": "1", "name": "SCL", "pintype": "bidirectional"},
+                {"number": "2", "name": "SDA", "pintype": "bidirectional"},
+                {"number": "3", "name": "VDD", "pintype": "power_in"},
+                {"number": "4", "name": "GND", "pintype": "power_in"},
+                {"number": "5", "name": "INT", "pintype": "output"},
+            ],
+            "block": "sensors",
+        },
+        {
+            "ref": "U4",
+            "lib_id": "Memory_Flash:W25Q32JVSS",
+            "value": "W25Q32",
+            "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+            "block": "memory",
+        },
+    ],
+    "rails": {
+        "+5V": {"pins": [["J1", "A4"], ["J1", "B9"], ["U2", "VIN"]]},
+        "+3V3": {"pins": [["U2", "VOUT"], ["U1", "VDD"], ["U3", "VDD"], ["U4", "VCC"]]},
+        "GND": {"pins": [["J1", "A1"], ["J1", "B1"], ["U2", "GND"], ["U1", "VSS"], ["U3", "GND"], ["U4", "GND"], ["J2", "3"]]},
+    },
+    "interfaces": [
+        {
+            "type": "i2c",
+            "name": "SENSOR_I2C",
+            "controller": {"ref": "U1", "scl": "PB6", "sda": "PB7"},
+            "devices": [{"ref": "U3", "scl": "SCL", "sda": "SDA"}],
+        },
+        {
+            "type": "spi",
+            "name": "FLASH_SPI",
+            "controller": {"ref": "U1", "sck": "PA5", "miso": "PA6", "mosi": "PA7"},
+            "devices": [{"ref": "U4", "sck": "CLK", "miso": "DO", "mosi": "DI", "cs": "FLASH_CS", "cs_pin": "~{CS}"}],
+        },
+    ],
+    "bulk_connections": [
+        {"net": "SWDIO", "pins": [["U1", "PA13"], ["J2", "2"]]},
+        {"net": "SWCLK", "pins": [["U1", "PA14"], ["J2", "4"]]},
+        {"net": "RESET_N", "pins": [["U1", "NRST"], ["J2", "5"]]},
+        {"net": "SENSOR_INT", "pins": [["U3", "INT"], ["U1", "PB8"]]},
+    ],
+    "support_circuits": {
+        "decoupling": [
+            {"target": "U1", "rail": "+3V3", "ground": "GND", "capacitors": ["100n", "1u"]},
+            {"target": "U3", "rail": "+3V3", "ground": "GND", "capacitors": ["100n"]},
+        ],
+        "reset_button": [{"target": "U1", "pin": "NRST", "net": "RESET_N", "ground": "GND"}],
+        "pullup": [
+            {"net": "SENSOR_I2C_SCL", "rail": "+3V3", "value": "4.7k"},
+            {"net": "SENSOR_I2C_SDA", "rail": "+3V3", "value": "4.7k"},
+        ],
+        "power_flag": [{"net": "+5V"}, {"net": "+3V3"}, {"net": "GND"}],
+    },
+    "no_connect_rules": [
+        {
+            "ref": "U1",
+            "match": {"name_regex": "^(PA|PB)[0-9]+$"},
+            "except": ["PA5", "PA6", "PA7", "PA13", "PA14", "PB6", "PB7"],
+            "action": "mark_no_connect",
+        }
+    ],
+}
+
 
 DESIGN_INTENT_SCHEMA = {
     "parts": {
@@ -264,8 +380,22 @@ def design_intent_schema(section: str = "all") -> dict[str, Any]:
     base: dict[str, Any]
     if normalized == "all":
         schemas = {"intent": deepcopy(DESIGN_INTENT_TOP_LEVEL_SCHEMA)}
+        schemas["overview"] = deepcopy(DESIGN_INTENT_OVERVIEW)
+        schemas["full_example"] = deepcopy(DESIGN_INTENT_FULL_EXAMPLE)
         schemas.update(deepcopy(DESIGN_INTENT_SCHEMA))
         base = {"success": True, "section": "all", "schemas": schemas}
+    elif normalized == "overview":
+        base = {
+            "success": True,
+            "section": "overview",
+            "schema": deepcopy(DESIGN_INTENT_OVERVIEW),
+        }
+    elif normalized in {"full_example", "example"}:
+        base = {
+            "success": True,
+            "section": "full_example",
+            "schema": deepcopy(DESIGN_INTENT_FULL_EXAMPLE),
+        }
     elif normalized in {"intent", "top_level", "top-level"}:
         base = {
             "success": True,
@@ -286,7 +416,9 @@ def design_intent_schema(section: str = "all") -> dict[str, Any]:
                 "success": False,
                 "section": normalized,
                 "error": "unknown design-intent schema section",
-                "available_sections": sorted(DESIGN_INTENT_SCHEMA),
+                "available_sections": sorted(
+                    [*DESIGN_INTENT_SCHEMA, "intent", "overview", "full_example"]
+                ),
             }
 
     base["recommended_apply_tool"] = "schematic_start_design_intent_job"

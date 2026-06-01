@@ -198,6 +198,56 @@ class TestNormalizeDesignIntent:
         assert ("U1", "NC1") in canonical.no_connects
         assert ("U1", "NC2") in canonical.no_connects
 
+    def test_no_connect_rules_match_expand_and_skip_connected_pins(self):
+        """Match-based no-connect rules resolve symbol pins before writing."""
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "CUSTOM_MCU",
+                    "pins": [
+                        {"number": "1", "name": "PB6", "pintype": "bidirectional"},
+                        {"number": "2", "name": "PB7", "pintype": "bidirectional"},
+                        {"number": "3", "name": "PA5", "pintype": "bidirectional"},
+                    ],
+                }
+            ],
+            "bulk_connections": [{"net": "I2C_SCL", "pins": [["U1", "PB6"]]}],
+            "no_connect_rules": [
+                {
+                    "ref": "U1",
+                    "match": {"name_regex": "^(PA|PB)[0-9]+$"},
+                    "except": ["PB7"],
+                    "action": "mark_no_connect",
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert canonical.no_connects == [("U1", "PA5")]
+        assert canonical.no_connect_summary["emitted_count"] == 1
+        assert canonical.no_connect_summary["skipped_connected_count"] == 1
+
+    def test_conflicting_pin_alias_assignments_raise(self):
+        """The same physical pin cannot be assigned to two different nets."""
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "REG",
+                    "pins": [{"number": "5", "name": "VOUT", "pintype": "power_out"}],
+                }
+            ],
+            "bulk_connections": [
+                {"net": "+3V3", "pins": [["U1", "VOUT"]]},
+                {"net": "GND", "pins": [["U1", "5"]]},
+            ],
+        }
+
+        with pytest.raises(ValueError, match="same ref/pin assigned to multiple nets"):
+            normalize_design_intent("/tmp/test.kicad_pro", intent)
+
     def test_decoupling_support_circuit(self):
         """Decoupling support circuits generate parts and endpoints."""
         intent = {

@@ -18,6 +18,7 @@ Orchestrates the full netlist-first workflow:
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 import logging
 import os
 import shutil
@@ -25,6 +26,7 @@ import time
 from typing import Any
 
 from kicad_mcp.schematic_engine.expected_netlist import (
+    check_power_net_sanity,
     compare_netlists,
     parse_kicad_netlist,
 )
@@ -120,6 +122,7 @@ def apply_design_intent_netlist_first(
 
         result.part_count = len(canonical.parts)
         result.endpoint_count = len(canonical.endpoints)
+        result.no_connect_summary = dict(getattr(canonical, "no_connect_summary", {}) or {})
 
         if _is_cancelled():
             return _cancelled_result(result, "after_normalize")
@@ -205,6 +208,12 @@ def apply_design_intent_netlist_first(
 
             writer = SchematicWriter(temp_dir, project_name)
             write_result = writer.write(canonical, sheet_plan)
+            if write_result.get("no_connect_summary"):
+                result.no_connect_summary = _merge_nested_counts(
+                    result.no_connect_summary,
+                    write_result["no_connect_summary"],
+                    prefix="writer",
+                )
 
             if not write_result.get("success"):
                 result.error = write_result.get("error", "Schematic write failed")
@@ -225,6 +234,9 @@ def apply_design_intent_netlist_first(
                 result.generated_schematic_artifacts = _copy_generated_schematics_to_artifacts(
                     tx.list_generated_schematics(),
                     artifact_dir,
+                )
+                result.candidate_schematic_artifacts = list(
+                    result.generated_schematic_artifacts
                 )
                 tx.rollback()
                 result.rolled_back = True
@@ -302,7 +314,22 @@ def apply_design_intent_netlist_first(
                     "extra_endpoints": compare_result.extra_endpoints[:10],
                     "expected_net_count": compare_result.expected_net_count,
                     "actual_net_count": compare_result.actual_net_count,
+                    "missing_endpoint_count": len(compare_result.missing_endpoints),
+                    "extra_endpoint_count": len(compare_result.extra_endpoints),
+                    "mismatched_net_count": len(compare_result.mismatched_nets),
                 }
+                result.netlist_compare_path = _write_json_artifact(
+                    artifact_dir,
+                    "netlist_compare.diff.json",
+                    {
+                        "success": compare_result.success,
+                        "missing_endpoints": compare_result.missing_endpoints,
+                        "extra_endpoints": compare_result.extra_endpoints,
+                        "mismatched_nets": compare_result.mismatched_nets,
+                        "expected_net_count": compare_result.expected_net_count,
+                        "actual_net_count": compare_result.actual_net_count,
+                    },
+                )
                 result.expected_netlist_match = compare_result.success
                 netlist_match = compare_result.success
 
@@ -311,6 +338,15 @@ def apply_design_intent_netlist_first(
                         f"Netlist mismatch: {len(compare_result.missing_endpoints)} "
                         f"missing endpoints"
                     )
+                power_sanity = check_power_net_sanity(
+                    compile_result.expected_netlist,
+                    actual_netlist,
+                )
+                result.power_net_sanity = power_sanity
+                if not power_sanity.get("success", True):
+                    netlist_match = False
+                    result.expected_netlist_match = False
+                    result.error = power_sanity.get("error", "Power net sanity check failed")
             elif require_kicad_cli_verification and not result.kicad_netlist_path:
                 # Safe mode requires netlist export to have succeeded
                 if kicad_cli_available:
@@ -331,7 +367,11 @@ def apply_design_intent_netlist_first(
             should_commit = True
             if not netlist_match and (strict or require_netlist_match):
                 should_commit = False
-                result.stage = "netlist_mismatch"
+                result.stage = (
+                    "power_net_sanity_failed"
+                    if result.power_net_sanity and not result.power_net_sanity.get("success", True)
+                    else "netlist_mismatch"
+                )
             if not cli_verification_success and (strict or require_kicad_cli_verification):
                 should_commit = False
                 result.stage = cli_failure_stage
@@ -343,6 +383,9 @@ def apply_design_intent_netlist_first(
                 result.generated_schematic_artifacts = _copy_generated_schematics_to_artifacts(
                     tx.list_generated_schematics(),
                     artifact_dir,
+                )
+                result.candidate_schematic_artifacts = list(
+                    result.generated_schematic_artifacts
                 )
                 tx.rollback()
                 result.success = False
@@ -444,6 +487,30 @@ def _copy_generated_schematics_to_artifacts(paths: list[str], artifact_dir: str)
         shutil.copy2(path, dest)
         copied.append(dest)
     return copied
+
+
+def _write_json_artifact(artifact_dir: str, filename: str, payload: dict[str, Any]) -> str | None:
+    try:
+        os.makedirs(artifact_dir, exist_ok=True)
+        path = os.path.join(artifact_dir, filename)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+        return path
+    except Exception as exc:
+        logger.warning("Failed to write artifact %s: %s", filename, exc)
+        return None
+
+
+def _merge_nested_counts(
+    base: dict[str, Any],
+    addition: dict[str, Any],
+    *,
+    prefix: str,
+) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in addition.items():
+        merged[f"{prefix}_{key}"] = value
+    return merged
 
 
 def _count_symbols_in_paths(paths: list[str]) -> int:

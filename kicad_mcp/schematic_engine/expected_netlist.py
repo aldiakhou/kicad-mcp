@@ -34,6 +34,7 @@ def compare_netlists(
     *,
     ignore_power_flags: bool = True,
     ignore_no_connects: list[tuple[str, str]] | None = None,
+    compare_mode: str = "permissive",
 ) -> NetlistCompareResult:
     """Compare expected netlist against actual (KiCad-exported) netlist.
 
@@ -42,6 +43,9 @@ def compare_netlists(
         actual: The netlist exported by KiCad CLI from the generated schematic.
         ignore_power_flags: Whether to ignore power flag symbols in comparison.
         ignore_no_connects: List of (ref, pin) tuples to ignore.
+        compare_mode: ``permissive`` treats KiCad pin numbers, pin functions,
+            and decorated function names as aliases. ``strict`` requires exact
+            ref/pin pairs inside each net.
 
     Returns:
         NetlistCompareResult with missing/extra/mismatched details.
@@ -61,9 +65,13 @@ def compare_netlists(
         actual_entries = actual_filtered.nets.get(net_name, set())
 
         # Find missing endpoints (in expected but not in actual)
-        missing = expected_entries - actual_entries
+        missing = {
+            entry
+            for entry in expected_entries
+            if not _entry_set_contains(actual_entries, entry, compare_mode)
+        }
         for entry in missing:
-            if (entry.ref, entry.pin) not in no_connect_set:
+            if not _is_no_connect_entry(entry, no_connect_set):
                 missing_endpoints.append({
                     "net": net_name,
                     "ref": entry.ref,
@@ -71,7 +79,11 @@ def compare_netlists(
                 })
 
         # Find extra endpoints (in actual but not in expected)
-        extra = actual_entries - expected_entries
+        extra = {
+            entry
+            for entry in actual_entries
+            if not _entry_set_contains(expected_entries, entry, compare_mode)
+        }
         for entry in extra:
             if not _is_power_flag_ref(entry.ref):
                 extra_endpoints.append({
@@ -164,7 +176,7 @@ def _filter_netlist(
         for entry in entries:
             if ignore_power_flags and _is_power_flag_ref(entry.ref):
                 continue
-            if (entry.ref, entry.pin) in no_connect_set:
+            if _is_no_connect_entry(entry, no_connect_set):
                 continue
             filtered_entries.add(entry)
 
@@ -177,6 +189,146 @@ def _filter_netlist(
 def _is_power_flag_ref(ref: str) -> bool:
     """Check if a reference designator is a power flag."""
     return any(ref.startswith(prefix) for prefix in _POWER_FLAG_PREFIXES)
+
+
+def check_power_net_sanity(
+    expected: NormalizedNetlist,
+    actual: NormalizedNetlist,
+) -> dict[str, Any]:
+    """Detect catastrophic generated shorts between ground and power rails.
+
+    KiCad chooses a single net name after a short, so this check maps actual
+    nodes back to their intended expected power nets and flags actual nets that
+    contain both ground-like and non-ground power rails.
+    """
+    expected_power = {
+        net_name: entries
+        for net_name, entries in expected.nets.items()
+        if _power_net_kind(net_name) is not None
+    }
+    issues: list[dict[str, Any]] = []
+    for actual_net, actual_entries in actual.nets.items():
+        intended_nets: set[str] = set()
+        endpoint_samples: list[dict[str, str]] = []
+        for expected_net, expected_entries in expected_power.items():
+            matched = [
+                entry
+                for entry in expected_entries
+                if _entry_set_contains(actual_entries, entry, "permissive")
+            ]
+            if matched:
+                intended_nets.add(expected_net)
+                endpoint_samples.extend(
+                    {
+                        "intended_net": expected_net,
+                        "ref": entry.ref,
+                        "pin": entry.pin,
+                    }
+                    for entry in matched[:5]
+                )
+
+        if _power_net_kind(actual_net) is not None:
+            intended_nets.add(actual_net)
+        if not _has_ground_power_conflict(intended_nets):
+            continue
+        issue = {
+            "severity": "error",
+            "type": "power_ground_short",
+            "actual_net": actual_net,
+            "intended_power_nets": sorted(intended_nets),
+            "endpoint_samples": endpoint_samples[:20],
+            "message": (
+                "Generated KiCad net contains both ground-like and power-like "
+                f"expected rails: {', '.join(sorted(intended_nets))}"
+            ),
+        }
+        issues.append(issue)
+
+    return {
+        "success": not issues,
+        "issue_count": len(issues),
+        "issues": issues,
+        "error": issues[0]["message"] if issues else None,
+    }
+
+
+def _entry_set_contains(
+    entries: set[NetlistEntry],
+    target: NetlistEntry,
+    compare_mode: str,
+) -> bool:
+    if compare_mode == "strict":
+        return target in entries
+    return any(_entries_equivalent(entry, target) for entry in entries)
+
+
+def _entries_equivalent(left: NetlistEntry, right: NetlistEntry) -> bool:
+    return left.ref == right.ref and _pins_equivalent(left.pin, right.pin)
+
+
+def _is_no_connect_entry(
+    entry: NetlistEntry,
+    no_connect_set: set[tuple[str, str]],
+) -> bool:
+    return any(
+        entry.ref == ref and _pins_equivalent(entry.pin, pin)
+        for ref, pin in no_connect_set
+    )
+
+
+def _pins_equivalent(left: str, right: str) -> bool:
+    left_aliases = _pin_alias_set(left)
+    right_aliases = _pin_alias_set(right)
+    return bool(left_aliases and right_aliases and left_aliases.intersection(right_aliases))
+
+
+def _pin_alias_set(value: str) -> set[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+    aliases = {raw}
+    stripped = (
+        raw.replace("~{", "")
+        .replace("}", "")
+        .replace("{", "")
+        .replace("~", "")
+    )
+    if stripped:
+        aliases.add(stripped)
+    for candidate in list(aliases):
+        if "/" in candidate:
+            aliases.update(part for part in candidate.split("/") if part)
+        suffix_match = re.match(r"^(.+)_([A-Za-z0-9]+)$", candidate)
+        if suffix_match:
+            aliases.add(suffix_match.group(1))
+            aliases.add(suffix_match.group(2))
+    normalized = {_pin_lookup_key(alias) for alias in aliases if _pin_lookup_key(alias)}
+    aliases.update(normalized)
+    return {alias.lower() for alias in aliases if alias}
+
+
+def _pin_lookup_key(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _power_net_kind(net_name: str) -> str | None:
+    normalized = str(net_name or "").upper().lstrip("/")
+    if normalized in {"GND", "AGND", "DGND", "GNDA", "GNDD", "VSS", "VSSA"}:
+        return "ground"
+    if normalized.startswith("+"):
+        return "power"
+    if normalized in {"VBUS", "VCC", "VDD", "VDDA", "VBAT", "VIN", "VOUT"}:
+        return "power"
+    if re.search(r"(^|_)(3V3|5V|VBUS|VCC|VDD|VDDA|VBAT|VIN|VOUT)(_|$)", normalized):
+        return "power"
+    if re.search(r"(^|_)(GND|VSS|AGND|DGND)(_|$)", normalized):
+        return "ground"
+    return None
+
+
+def _has_ground_power_conflict(net_names: set[str]) -> bool:
+    kinds = {_power_net_kind(name) for name in net_names}
+    return "ground" in kinds and "power" in kinds
 
 
 def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:

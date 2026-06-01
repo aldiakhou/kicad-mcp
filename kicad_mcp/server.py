@@ -79,6 +79,20 @@ _SCHEMATIC_RUNTIME_DEPENDENCIES = (
 )
 
 
+def _install_fastmcp_compat() -> None:
+    """Normalize FastMCP API differences across supported local versions."""
+    if not hasattr(FastMCP, "list_tools") and hasattr(FastMCP, "_list_tools"):
+        FastMCP.list_tools = FastMCP._list_tools  # type: ignore[attr-defined]
+    if not hasattr(FastMCP, "list_resource_templates") and hasattr(
+        FastMCP,
+        "_list_resource_templates",
+    ):
+        FastMCP.list_resource_templates = FastMCP._list_resource_templates  # type: ignore[attr-defined]
+
+
+_install_fastmcp_compat()
+
+
 def require_schematic_runtime() -> None:
     """Fail fast when required schematic runtime dependencies are missing."""
     missing: list[str] = []

@@ -48,6 +48,7 @@ class CanonicalCircuit:
     no_connects: list[tuple[str, str]]
     blocks: dict[str, list[str]]
     rails: set[str] = field(default_factory=set)
+    no_connect_summary: dict[str, Any] = field(default_factory=dict)
 
     def part_by_ref(self, ref: str) -> CircuitPart | None:
         """Look up a part by reference designator."""
