@@ -110,7 +110,13 @@ def _medium_ic_intent() -> dict:
                 "rail": "+3V3",
                 "ground": "GND",
                 "capacitors": ["100n", "1u"],
-            }
+            },
+            {"type": "power_flag", "net": "+3V3"},
+            {"type": "power_flag", "net": "GND"},
+        ],
+        "no_connect_rules": [
+            {"ref": "U1", "match": {"pin_type": "bidirectional"}, "action": "mark_no_connect"},
+            {"ref": "J1", "pin": "6", "action": "mark_no_connect"},
         ],
     }
 

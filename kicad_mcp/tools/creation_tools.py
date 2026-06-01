@@ -14,7 +14,7 @@ from typing import Any, cast
 from fastmcp import FastMCP
 
 from kicad_mcp.config import TIMEOUT_CONSTANTS
-from kicad_mcp.tools.drc_impl.cli_drc import run_drc_via_cli
+from kicad_mcp.tools.drc_impl.cli_drc import _drc_report_violations, run_drc_via_cli
 from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
 from kicad_mcp.utils.file_utils import get_project_files
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
@@ -1935,6 +1935,7 @@ def _run_pcb_drc_sync(pcb_path: str) -> dict[str, Any]:
     cli_path = get_kicad_cli_path(required=False)
     if cli_path is None:
         return {"success": True, "skipped": True, "reason": "KiCad CLI is not available"}
+    pcb_path = os.path.realpath(os.path.expanduser(pcb_path))
     with tempfile.TemporaryDirectory() as temp_dir:
         output_path = os.path.join(temp_dir, "drc_report.json")
         try:
@@ -1955,7 +1956,7 @@ def _run_pcb_drc_sync(pcb_path: str) -> dict[str, Any]:
             if "timed out" in error.lower():
                 error = "KiCad CLI PCB DRC timed out"
             return {"success": False, "error": error}
-        if process.returncode != 0:
+        if process.returncode != 0 and not os.path.exists(output_path):
             return {
                 "success": False,
                 "error": process.stderr or process.stdout or "KiCad CLI PCB DRC failed",
@@ -1966,7 +1967,7 @@ def _run_pcb_drc_sync(pcb_path: str) -> dict[str, Any]:
             if os.path.exists(output_path)
             else {}
         )
-        violations = report.get("violations", [])
+        violations = _drc_report_violations(report)
         return {
             "success": True,
             "total_violations": len(violations),

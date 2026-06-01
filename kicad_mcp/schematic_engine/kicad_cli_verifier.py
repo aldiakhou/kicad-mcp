@@ -178,7 +178,7 @@ class KicadCliVerifier:
             with open(erc_path, encoding="utf-8") as f:
                 data = json.load(f)
 
-            violations = data.get("violations", [])
+            violations = _erc_violations(data)
             errors = sum(1 for v in violations if v.get("severity", "") == "error")
             warnings = sum(1 for v in violations if v.get("severity", "") == "warning")
 
@@ -188,6 +188,7 @@ class KicadCliVerifier:
                 "total": len(violations),
                 "errors": errors,
                 "warnings": warnings,
+                "violations": violations,
             }
         except (json.JSONDecodeError, OSError) as e:
             return {
@@ -246,3 +247,10 @@ def _make_verifier_subprocess_runner(schematic_path: str, output_dir: str) -> An
         os.path.abspath(output_dir),
     }
     return SecureSubprocessRunner(path_validator=PathValidator(trusted_roots=trusted_roots))
+
+
+def _erc_violations(report: dict[str, Any]) -> list[dict[str, Any]]:
+    violations = list(report.get("violations", []))
+    for sheet in report.get("sheets", []):
+        violations.extend(sheet.get("violations", []))
+    return violations

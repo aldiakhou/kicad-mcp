@@ -11,6 +11,8 @@ from fastmcp import Client
 import pytest
 
 from kicad_mcp.server import create_server
+from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
+from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb
 
 
 @pytest.fixture(scope="module")
@@ -18,6 +20,10 @@ def event_loop_policy():
     if sys.platform == "win32":
         return asyncio.WindowsSelectorEventLoopPolicy()
     return asyncio.DefaultEventLoopPolicy()
+
+
+def _kicad_cli_available() -> bool:
+    return get_kicad_cli_path(required=False) is not None
 
 
 @pytest.mark.asyncio
@@ -124,3 +130,73 @@ async def test_stdio_mcp_client_can_connect_to_server_entrypoint():
         overview.data["schema"]["candidate_artifacts"]["promotion_tool"]
         == "schematic_export_candidate_to_project"
     )
+
+
+@pytest.mark.skipif(not _kicad_cli_available(), reason="KiCad CLI not available")
+@pytest.mark.asyncio
+async def test_mcp_validate_schematic_reports_real_erc_violations():
+    server = create_server()
+    fixture = Path("tests/fixtures/messy_card_reader_like_schematic.kicad_sch").resolve()
+
+    async with Client(server, init_timeout=30, timeout=60) as client:
+        result = await client.call_tool(
+            "schematic_validate_generated_schematic",
+            {
+                "schematic_path": str(fixture),
+                "run_erc": True,
+                "run_visual_lint": False,
+            },
+        )
+
+    assert result.is_error is False
+    assert result.data["success"] is False
+    assert result.data["erc"]["total"] > 0
+    assert result.data["erc"]["errors"] > 0
+
+
+@pytest.mark.skipif(not _kicad_cli_available(), reason="KiCad CLI not available")
+@pytest.mark.asyncio
+async def test_mcp_pcb_validate_layout_reports_real_drc_violations(tmp_path: Path):
+    server = create_server()
+
+    async with Client(server, init_timeout=30, timeout=90) as client:
+        created = await client.call_tool(
+            "create_kicad_project",
+            {
+                "project_dir": str(tmp_path),
+                "project_name": "drc_violation",
+                "create_schematic": True,
+                "create_pcb": True,
+                "paper": "A4",
+            },
+        )
+        assert created.data["success"] is True
+
+        pcb_path = Path(created.data["created_files"]["pcb"])
+        pcb = KiCadPcb.from_file(str(pcb_path))
+        pcb.add_track(
+            "NET_A",
+            [{"x": 10, "y": 10}, {"x": 40, "y": 10}],
+            width_mm=0.5,
+        )
+        pcb.add_track(
+            "NET_B",
+            [{"x": 10, "y": 10}, {"x": 40, "y": 10}],
+            width_mm=0.5,
+        )
+        pcb_path.write_text(pcb.to_text(), encoding="utf-8")
+
+        validation = await client.call_tool(
+            "pcb_validate_layout",
+            {
+                "project_path": created.data["project_path"],
+                "run_drc": True,
+                "require_clean_drc": True,
+            },
+        )
+
+    assert validation.is_error is False
+    assert validation.data["success"] is False
+    assert validation.data["drc"]["success"] is True
+    assert validation.data["drc"]["total_violations"] > 0
+    assert "DRC has" in validation.data["blocking_issues"][0]

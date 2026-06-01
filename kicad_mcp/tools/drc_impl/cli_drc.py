@@ -54,6 +54,8 @@ async def run_drc_via_cli(
     }
 
     try:
+        pcb_file = os.path.realpath(os.path.expanduser(pcb_file))
+        results["pcb_file"] = pcb_file
         # Create a temporary directory for the output
         with tempfile.TemporaryDirectory() as temp_dir:
             # Output file for DRC report
@@ -80,15 +82,13 @@ async def run_drc_via_cli(
                 timeout=resolved_timeout,
             )
 
-            # Check if the command was successful
-            if process.returncode != 0:
-                logger.error("DRC command failed with code %s", process.returncode)
-                logger.error("Error output: %s", process.stderr)
-                results["error"] = f"DRC command failed: {process.stderr}"
-                return results
-
             # Check if the output file was created
             if not os.path.exists(output_file):
+                if process.returncode != 0:
+                    logger.error("DRC command failed with code %s", process.returncode)
+                    logger.error("Error output: %s", process.stderr)
+                    results["error"] = f"DRC command failed: {process.stderr}"
+                    return results
                 logger.info("DRC report file not created")
                 results["error"] = "DRC report file not created"
                 return results
@@ -102,8 +102,10 @@ async def run_drc_via_cli(
                     results["error"] = "Failed to parse DRC report JSON"
                     return results
 
-            # Process the DRC report
-            violations = drc_report.get("violations", [])
+            # Process the DRC report. KiCad reports unrouted ratsnest items
+            # separately from rule violations; count them as actionable DRC
+            # findings so validation does not falsely look clean.
+            violations = _drc_report_violations(drc_report)
             violation_count = len(violations)
             logger.info(f"DRC completed with {violation_count} violations")
             if ctx:
@@ -113,7 +115,12 @@ async def run_drc_via_cli(
             # Categorize violations by type
             error_types = {}
             for violation in violations:
-                error_type = violation.get("message", "Unknown")
+                error_type = (
+                    violation.get("type")
+                    or violation.get("description")
+                    or violation.get("message")
+                    or "unknown"
+                )
                 if error_type not in error_types:
                     error_types[error_type] = 0
                 error_types[error_type] += 1
@@ -127,6 +134,7 @@ async def run_drc_via_cli(
                 "total_violations": violation_count,
                 "violation_categories": error_types,
                 "violations": violations,
+                "report": drc_report,
             }
 
             if ctx:
@@ -148,3 +156,16 @@ async def run_drc_via_cli(
         logger.exception("Error in CLI DRC: %s", e)
         results["error"] = f"Error in CLI DRC: {e}"
         return results
+
+
+def _drc_report_violations(report: dict[str, Any]) -> list[dict[str, Any]]:
+    violations = list(report.get("violations", []))
+    for item in report.get("unconnected_items", []):
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        normalized.setdefault("type", "unconnected_item")
+        normalized.setdefault("severity", "warning")
+        normalized.setdefault("description", "Unconnected item")
+        violations.append(normalized)
+    return violations

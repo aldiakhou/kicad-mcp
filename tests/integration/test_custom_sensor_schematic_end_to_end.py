@@ -81,6 +81,10 @@ async def test_custom_sensor_schematic_end_to_end(tmp_path: Path):
             "decoupling": [
                 {"target": "U2", "rail": "+3V3", "ground": "GND", "capacitors": ["100n"]}
             ],
+            "power_flag": [
+                {"net": "+3V3"},
+                {"net": "GND"},
+            ],
             "pullup": [
                 {"net": "I2C_SCL", "rail": "+3V3", "value": "4.7k"},
                 {"net": "I2C_SDA", "rail": "+3V3", "value": "4.7k"},
