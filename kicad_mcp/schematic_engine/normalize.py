@@ -174,6 +174,15 @@ def normalize_design_intent(
         rule_endpoints = _normalize_pin_rule(rule, parts_by_ref)
         endpoints.extend(rule_endpoints)
 
+    removed_power_flags = _remove_redundant_power_flags(parts, endpoints, parts_by_ref)
+    if removed_power_flags:
+        removed_refs = {item["ref"] for item in removed_power_flags}
+        parts = [part for part in parts if part.ref not in removed_refs]
+        endpoints = [endpoint for endpoint in endpoints if endpoint.ref not in removed_refs]
+        for block_name, refs in list(blocks.items()):
+            blocks[block_name] = [ref for ref in refs if ref not in removed_refs]
+        parts_by_ref = {part.ref: part for part in parts}
+
     _validate_endpoint_conflicts(parts_by_ref, endpoints)
     connected_keys = {
         _resolved_endpoint_key(parts_by_ref, endpoint.ref, endpoint.pin)
@@ -564,24 +573,29 @@ def _normalize_swd_interface(
     if not header_enabled:
         return parts, endpoints
 
+    existing_header_ref = iface_spec.get("header_ref")
     explicit_ref = header.get("ref")
-    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("J")
+    use_existing_header = bool(existing_header_ref)
+    ref = str(existing_header_ref or explicit_ref or ref_allocator.next("J"))
+    if explicit_ref and not use_existing_header:
+        ref = ref_allocator.claim(str(explicit_ref))
     rail = iface_spec.get("rail")
     ground = str(iface_spec.get("ground") or "GND")
     pin_count = int(header.get("pin_count") or (5 if rail else 4))
-    part = CircuitPart(
-        ref=ref,
-        lib_id=str(header.get("lib_id") or f"Connector_Generic:Conn_01x{pin_count:02d}"),
-        value=str(header.get("value") or "SWD"),
-        footprint=str(header.get("footprint") or _header_footprint(pin_count)),
-        block=str(header.get("block") or "interfaces"),
-        role="swd_header",
-        properties={
-            "KICAD_MCP_ROLE": "swd_header",
-            "KICAD_MCP_TARGET": target,
-        },
-    )
-    parts.append(part)
+    if not use_existing_header:
+        part = CircuitPart(
+            ref=ref,
+            lib_id=str(header.get("lib_id") or f"Connector_Generic:Conn_01x{pin_count:02d}"),
+            value=str(header.get("value") or "SWD"),
+            footprint=str(header.get("footprint") or _header_footprint(pin_count)),
+            block=str(header.get("block") or "interfaces"),
+            role="swd_header",
+            properties={
+                "KICAD_MCP_ROLE": "swd_header",
+                "KICAD_MCP_TARGET": target,
+            },
+        )
+        parts.append(part)
     assignments: list[tuple[str, str | None]] = [
         ("1", str(rail) if rail else None),
         ("2", nets["swdio"]),
@@ -924,7 +938,12 @@ def _normalize_crystal_load_caps(
         if endpoint:
             pin_target = str(endpoint["ref"])
             pin_name = endpoint["pin"]
-        net = str(nets[index] if len(nets) > index else _net_from_endpoint(endpoint, pin_name))
+        if len(nets) > index:
+            net = str(nets[index])
+        elif target and endpoint is None:
+            net = f"XTAL_{target}_{'IN' if index == 0 else 'OUT'}"
+        else:
+            net = str(_net_from_endpoint(endpoint, pin_name))
         if not net:
             raise ValueError("crystal_load_caps could not infer capacitor net")
         ref = ref_allocator.next("C")
@@ -1028,7 +1047,9 @@ def _normalize_crystal(
 
     # Try Device:Crystal_GND24 first, fall back to Device:Crystal
     crystal_lib_id = spec.get("lib_id", "Device:Crystal_GND24")
-    use_grounded = "GND" in crystal_lib_id
+    crystal_pin_map = _crystal_pin_map(str(crystal_lib_id), spec)
+    in_net = str(spec.get("in_net") or spec.get("xin_net") or f"XTAL_{target}_IN")
+    out_net = str(spec.get("out_net") or spec.get("xout_net") or f"XTAL_{target}_OUT")
 
     part = CircuitPart(
         ref=crystal_ref,
@@ -1048,39 +1069,35 @@ def _normalize_crystal(
     if len(pins) >= 2:
         # Crystal In pin
         endpoints.append(CircuitEndpoint(
-            ref=crystal_ref, pin="1", net=f"XTAL_{target}_IN",
+            ref=crystal_ref, pin=crystal_pin_map["xin"], net=in_net,
             required=True, source="support_circuit:crystal",
         ))
         endpoints.append(CircuitEndpoint(
-            ref=target, pin=str(pins[0]), net=f"XTAL_{target}_IN",
+            ref=target, pin=str(pins[0]), net=in_net,
             required=True, source="support_circuit:crystal",
         ))
         # Crystal Out pin
         endpoints.append(CircuitEndpoint(
-            ref=crystal_ref, pin="2", net=f"XTAL_{target}_OUT",
+            ref=crystal_ref, pin=crystal_pin_map["xout"], net=out_net,
             required=True, source="support_circuit:crystal",
         ))
         endpoints.append(CircuitEndpoint(
-            ref=target, pin=str(pins[1]), net=f"XTAL_{target}_OUT",
+            ref=target, pin=str(pins[1]), net=out_net,
             required=True, source="support_circuit:crystal",
         ))
 
     # Ground pins for grounded crystal
-    if use_grounded:
+    for ground_pin in crystal_pin_map["ground"]:
         endpoints.append(CircuitEndpoint(
-            ref=crystal_ref, pin="3", net=ground,
-            required=True, source="support_circuit:crystal",
-        ))
-        endpoints.append(CircuitEndpoint(
-            ref=crystal_ref, pin="4", net=ground,
+            ref=crystal_ref, pin=str(ground_pin), net=ground,
             required=True, source="support_circuit:crystal",
         ))
 
     # Load capacitors
-    load_caps = spec.get("load_capacitors")
+    load_caps = spec.get("load_capacitors") or spec.get("load_capacitance")
     if load_caps:
         cap_value = load_caps if isinstance(load_caps, str) else "18pF"
-        for net_name in [f"XTAL_{target}_IN", f"XTAL_{target}_OUT"]:
+        for net_name in [in_net, out_net]:
             cap_ref = ref_allocator.next("C")
             cap_part = CircuitPart(
                 ref=cap_ref,
@@ -1198,6 +1215,50 @@ def _normalize_usb_c_power(
     return parts, endpoints
 
 
+def _crystal_pin_map(lib_id: str, spec: dict[str, Any]) -> dict[str, Any]:
+    explicit = spec.get("pin_map")
+    if isinstance(explicit, dict):
+        ground = explicit.get("ground") or explicit.get("gnd") or []
+        if isinstance(ground, str):
+            ground = [ground]
+        return {
+            "xin": str(explicit.get("xin") or explicit.get("in") or "1"),
+            "xout": str(explicit.get("xout") or explicit.get("out") or "2"),
+            "ground": [str(pin) for pin in ground],
+        }
+
+    lib_upper = lib_id.upper()
+    try:
+        pins = _part_pins(CircuitPart(ref="Y?", lib_id=lib_id, value="Crystal"))
+    except ValueError:
+        pins = []
+
+    if pins:
+        ground_pins = [
+            str(pin.get("number") or pin.get("name") or "")
+            for pin in pins
+            if _pin_looks_like_ground(pin)
+        ]
+        signal_pins = [
+            str(pin.get("number") or pin.get("name") or "")
+            for pin in pins
+            if str(pin.get("number") or pin.get("name") or "")
+            and str(pin.get("number") or pin.get("name") or "") not in ground_pins
+        ]
+        if ground_pins and len(signal_pins) >= 2:
+            return {"xin": signal_pins[0], "xout": signal_pins[1], "ground": ground_pins}
+
+    if "GND24" in lib_upper:
+        return {"xin": "1", "xout": "3", "ground": ["2", "4"]}
+    if "GND23" in lib_upper:
+        return {"xin": "1", "xout": "4", "ground": ["2", "3"]}
+    if "GND2" in lib_upper:
+        return {"xin": "1", "xout": "3", "ground": ["2"]}
+    if "GND" in lib_upper:
+        return {"xin": "1", "xout": "2", "ground": ["3", "4"]}
+    return {"xin": "1", "xout": "2", "ground": []}
+
+
 def _normalize_pull_resistors(
     spec: dict[str, Any],
     target: str,
@@ -1311,6 +1372,44 @@ def _normalize_reset_button(
             required=True, source="support_circuit:reset_button",
         ))
 
+    if spec.get("pullup"):
+        rail = spec.get("rail")
+        if not rail:
+            raise ValueError("reset_button pullup requires rail")
+        resistor_ref = (
+            ref_allocator.claim(str(spec["pullup_ref"]))
+            if spec.get("pullup_ref")
+            else ref_allocator.next("R")
+        )
+        resistor = CircuitPart(
+            ref=resistor_ref,
+            lib_id="Device:R",
+            value=str(spec.get("pullup")),
+            footprint="Resistor_SMD:R_0402_1005Metric",
+            block=target if target else "mcu",
+            role="pullup",
+            properties={
+                "KICAD_MCP_ROLE": "pullup",
+                "KICAD_MCP_TARGET": target,
+                "KICAD_MCP_NETS": f"{rail},{net}",
+            },
+        )
+        parts.append(resistor)
+        endpoints.append(CircuitEndpoint(
+            ref=resistor_ref,
+            pin="1",
+            net=str(rail),
+            required=True,
+            source="support_circuit:reset_button:pullup",
+        ))
+        endpoints.append(CircuitEndpoint(
+            ref=resistor_ref,
+            pin="2",
+            net=str(net),
+            required=True,
+            source="support_circuit:reset_button:pullup",
+        ))
+
     return parts, endpoints
 
 
@@ -1390,8 +1489,15 @@ def _normalize_ferrite(
 
     explicit_ref = spec.get("ref")
     ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("FB")
-    input_net = spec.get("input_net", "+5V")
-    output_net = spec.get("output_net", "+5V_F")
+    input_net = spec.get("in_net") or spec.get("input_net") or spec.get("rail") or "+5V"
+    output_net = (
+        spec.get("out_net")
+        or spec.get("output_net")
+        or spec.get("filtered_net")
+        or spec.get("supply_rail")
+        or spec.get("net")
+        or f"{input_net}_F"
+    )
     value = spec.get("value", "600R@100MHz")
 
     part = CircuitPart(
@@ -1950,6 +2056,52 @@ def _pin_name_counts(part: CircuitPart) -> dict[str, int]:
 
 def _pin_is_hidden(pin: dict[str, Any]) -> bool:
     return bool(pin.get("hidden"))
+
+
+def _pin_looks_like_ground(pin: dict[str, Any]) -> bool:
+    name = str(pin.get("name") or pin.get("pinfunction") or "").upper()
+    number = str(pin.get("number") or "").upper()
+    return bool(
+        re.search(r"(^|[^A-Z])(GND|VSS|VSSA|AGND|DGND|GROUND)([^A-Z]|$)", name)
+        or name == "G"
+        or number in {"GND", "VSS", "AGND", "DGND"}
+    )
+
+
+def _endpoint_pin_type(
+    parts_by_ref: dict[str, CircuitPart],
+    endpoint: CircuitEndpoint,
+) -> str:
+    part = parts_by_ref.get(str(endpoint.ref))
+    if part is None:
+        return ""
+    matches = _exact_pin_matches(part, str(endpoint.pin))
+    if len(matches) != 1:
+        return ""
+    return str(matches[0].get("pintype") or matches[0].get("type") or "").lower()
+
+
+def _remove_redundant_power_flags(
+    parts: list[CircuitPart],
+    endpoints: list[CircuitEndpoint],
+    parts_by_ref: dict[str, CircuitPart],
+) -> list[dict[str, str]]:
+    power_flag_refs = {
+        part.ref
+        for part in parts
+        if part.role == "power_flag" or part.lib_id == "power:PWR_FLAG"
+    }
+    driven_nets = {
+        endpoint.net
+        for endpoint in endpoints
+        if endpoint.ref not in power_flag_refs
+        and _endpoint_pin_type(parts_by_ref, endpoint) == "power_out"
+    }
+    removed = []
+    for endpoint in endpoints:
+        if endpoint.ref in power_flag_refs and endpoint.net in driven_nets:
+            removed.append({"ref": endpoint.ref, "net": endpoint.net})
+    return removed
 
 
 def _pin_lookup_key(value: str) -> str:

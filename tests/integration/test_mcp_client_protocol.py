@@ -222,6 +222,107 @@ async def test_mcp_preview_grouped_interfaces_and_project_directory_alias(tmp_pa
     assert preview.data["summary"]["generated_part_count"] == 6
 
 
+@pytest.mark.asyncio
+async def test_mcp_preview_support_circuit_regressions_and_pcb_clean_start(tmp_path: Path):
+    server = create_server()
+
+    async with Client(server, init_timeout=30, timeout=60) as client:
+        created = await client.call_tool(
+            "create_kicad_project",
+            {
+                "project_dir": str(tmp_path),
+                "project_name": "support_preview",
+                "create_schematic": True,
+                "create_pcb": True,
+            },
+        )
+        assert created.is_error is False
+        assert created.data["success"] is True
+
+        preview = await client.call_tool(
+            "schematic_preview_design_intent",
+            {
+                "project_path": created.data["project_path"],
+                "intent": {
+                    "parts": [
+                        {
+                            "ref": "U1",
+                            "value": "MCU",
+                            "pins": [
+                                {"number": "1", "name": "PH0", "pintype": "input"},
+                                {"number": "2", "name": "PH1", "pintype": "output"},
+                                {"number": "3", "name": "NRST", "pintype": "input"},
+                                {"number": "4", "name": "PA13", "pintype": "bidirectional"},
+                                {"number": "5", "name": "PA14", "pintype": "bidirectional"},
+                            ],
+                        },
+                        {
+                            "ref": "J2",
+                            "lib_id": "Connector_Generic:Conn_01x05",
+                            "value": "DEBUG",
+                        },
+                        {
+                            "ref": "U5",
+                            "value": "LDO",
+                            "pins": [
+                                {"number": "1", "name": "OUT", "pintype": "power_out"},
+                                {"number": "2", "name": "GND", "pintype": "power_in"},
+                            ],
+                        },
+                    ],
+                    "bulk_connections": [{"net": "+3V3", "pins": [["U5", "OUT"]]}],
+                    "interfaces": [
+                        {
+                            "type": "swd",
+                            "target": "U1",
+                            "header_ref": "J2",
+                            "swdio": "PA13",
+                            "swclk": "PA14",
+                            "reset": "NRST",
+                        }
+                    ],
+                    "support_circuits": [
+                        {
+                            "type": "crystal",
+                            "target": "U1",
+                            "lib_id": "Device:Crystal_GND24_Small",
+                            "pins": ["PH0", "PH1"],
+                            "pin_map": {"xin": "1", "xout": "3", "ground": ["2", "4"]},
+                            "load_capacitance": "22pF",
+                        },
+                        {
+                            "type": "reset_button",
+                            "target": "U1",
+                            "pin": "NRST",
+                            "net": "RESET_N",
+                            "pullup": "10k",
+                            "rail": "+3V3",
+                        },
+                        {"type": "ferrite_filter", "in_net": "+3V3", "out_net": "+3V3A"},
+                        {"type": "power_flag", "net": "+3V3"},
+                    ],
+                },
+            },
+        )
+        pcb_preview = await client.call_tool(
+            "pcb_preview_layout_intent",
+            {
+                "project_path": created.data["project_path"],
+                "intent": {
+                    "placement": {"preserve_existing_placement": False},
+                    "routing": {"mode": "none"},
+                },
+            },
+        )
+
+    assert preview.is_error is False
+    assert preview.data["success"] is True
+    assert preview.data["summary"]["generated_part_count"] == 9
+    assert pcb_preview.is_error is False
+    assert pcb_preview.data["success"] is True
+    assert pcb_preview.data["summary"]["routing"]["clean_start"] is True
+
+
 @pytest.mark.skipif(not _kicad_cli_available(), reason="KiCad CLI not available")
 @pytest.mark.asyncio
 async def test_mcp_validate_schematic_reports_real_erc_violations():

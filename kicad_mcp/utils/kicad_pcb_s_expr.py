@@ -357,6 +357,33 @@ class KiCadPcb:
             )
         return vias
 
+    def clear_routing(self, *, include_zones: bool = True) -> dict[str, int]:
+        """Remove routed copper items while keeping footprints, nets, and outline."""
+        removed_segments = 0
+        removed_vias = 0
+        removed_zones = 0
+        kept = []
+        for item in self.root.items:
+            if isinstance(item, SExprList):
+                head = item.head()
+                if head == "segment":
+                    removed_segments += 1
+                    continue
+                if head == "via":
+                    removed_vias += 1
+                    continue
+                if include_zones and head == "zone":
+                    removed_zones += 1
+                    continue
+            kept.append(item)
+        self.root.items = kept
+        return {
+            "removed_segments": removed_segments,
+            "removed_vias": removed_vias,
+            "removed_zones": removed_zones,
+            "removed_total": removed_segments + removed_vias + removed_zones,
+        }
+
     def footprint_pad_positions(self) -> list[dict[str, Any]]:
         """Return transformed pad positions with assigned net names."""
         pads = []
@@ -367,6 +394,15 @@ class KiCadPcb:
             for pad in footprint.child_lists("pad"):
                 pad_number = _atom_text(pad.items[1] if len(pad.items) > 1 else None) or ""
                 local = self._parse_at(pad)
+                size = pad.first_child("size")
+                pad_width = 1.0
+                pad_height = 1.0
+                if size is not None and len(size.items) >= 3:
+                    try:
+                        pad_width = max(0.05, float(_atom_text(size.items[1]) or "1"))
+                        pad_height = max(0.05, float(_atom_text(size.items[2]) or "1"))
+                    except ValueError:
+                        pass
                 position = _transform_point(
                     local["x"],
                     local["y"],
@@ -374,6 +410,23 @@ class KiCadPcb:
                     footprint_at["y"],
                     footprint_at["angle"],
                 )
+                half_w = pad_width / 2.0
+                half_h = pad_height / 2.0
+                corners = [
+                    _transform_point(
+                        local["x"] + dx,
+                        local["y"] + dy,
+                        footprint_at["x"],
+                        footprint_at["y"],
+                        footprint_at["angle"],
+                    )
+                    for dx, dy in (
+                        (-half_w, -half_h),
+                        (half_w, -half_h),
+                        (half_w, half_h),
+                        (-half_w, half_h),
+                    )
+                ]
                 net_expr = pad.first_child("net")
                 net_name = ""
                 net_id = 0
@@ -386,6 +439,13 @@ class KiCadPcb:
                         "footprint_name": footprint_name,
                         "pad": pad_number,
                         "position": position,
+                        "size": {"width": pad_width, "height": pad_height},
+                        "bounds": {
+                            "left": min(point["x"] for point in corners),
+                            "top": min(point["y"] for point in corners),
+                            "right": max(point["x"] for point in corners),
+                            "bottom": max(point["y"] for point in corners),
+                        },
                         "net_id": net_id,
                         "net_name": net_name,
                     }

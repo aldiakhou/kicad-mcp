@@ -70,11 +70,10 @@ def autoroute_pcb(
         obstacles = _routing_obstacles(
             pcb,
             clearance_mm + track_width_mm / 2.0,
-            excluded_refs={
-                connection["from"]["reference"],
-                connection["to"]["reference"],
+            excluded_pads={
+                (connection["from"]["reference"], connection["from"]["pad"]),
+                (connection["to"]["reference"], connection["to"]["pad"]),
             },
-            excluded_net=connection["net_name"],
         )
         path = _route_grid_path(
             connection["from"]["position"],
@@ -92,6 +91,16 @@ def autoroute_pcb(
                     "from": connection["from"],
                     "to": connection["to"],
                     "reason": "No obstacle-free grid path found",
+                }
+            )
+            continue
+        if _path_intersects_obstacles(path, obstacles):
+            failures.append(
+                {
+                    "net_name": connection["net_name"],
+                    "from": connection["from"],
+                    "to": connection["to"],
+                    "reason": "Candidate path intersects blocked pads or copper",
                 }
             )
             continue
@@ -196,10 +205,10 @@ def _routing_obstacles(
     pcb: KiCadPcb,
     inflate_mm: float,
     *,
-    excluded_refs: set[str],
-    excluded_net: str,
+    excluded_pads: set[tuple[str, str]],
 ) -> list[Rect]:
     obstacles = []
+    excluded_refs = {ref for ref, _pad in excluded_pads}
     for footprint in pcb.list_footprints():
         if str(footprint.get("reference", "")) in excluded_refs:
             continue
@@ -213,19 +222,70 @@ def _routing_obstacles(
                     float(bounds["bottom"]),
                 ).inflated(inflate_mm)
             )
-    for segment in pcb.list_track_segments():
-        if segment.get("net_name") == excluded_net:
+    for pad in pcb.footprint_pad_positions():
+        if _pad_key(pad) in excluded_pads:
             continue
+        bounds = pad.get("bounds", {})
+        if bounds:
+            obstacles.append(
+                Rect(
+                    float(bounds["left"]),
+                    float(bounds["top"]),
+                    float(bounds["right"]),
+                    float(bounds["bottom"]),
+                ).inflated(inflate_mm)
+            )
+    for segment in pcb.list_track_segments():
         obstacles.append(_segment_rect(segment, inflate_mm))
     for via in pcb.list_vias():
-        if via.get("net_name") == excluded_net:
-            continue
         point = via["position"]
         radius = max(float(via.get("diameter_mm") or 0.0) / 2.0, inflate_mm)
         obstacles.append(
             Rect(point["x"] - radius, point["y"] - radius, point["x"] + radius, point["y"] + radius)
         )
     return obstacles
+
+
+def _path_intersects_obstacles(path: list[dict[str, float]], obstacles: list[Rect]) -> bool:
+    for start, end in zip(path, path[1:]):
+        if any(_segment_intersects_rect(start, end, obstacle) for obstacle in obstacles):
+            return True
+    return False
+
+
+def _segment_intersects_rect(start: dict[str, float], end: dict[str, float], rect: Rect) -> bool:
+    if rect.contains(start) or rect.contains(end):
+        return True
+    min_x = min(start["x"], end["x"])
+    max_x = max(start["x"], end["x"])
+    min_y = min(start["y"], end["y"])
+    max_y = max(start["y"], end["y"])
+    if max_x < rect.left or min_x > rect.right or max_y < rect.top or min_y > rect.bottom:
+        return False
+    if abs(start["x"] - end["x"]) < 1e-9:
+        return rect.left <= start["x"] <= rect.right
+    if abs(start["y"] - end["y"]) < 1e-9:
+        return rect.top <= start["y"] <= rect.bottom
+    return _diagonal_segment_intersects_rect(start, end, rect)
+
+
+def _diagonal_segment_intersects_rect(
+    start: dict[str, float],
+    end: dict[str, float],
+    rect: Rect,
+) -> bool:
+    # The router emits Manhattan paths, but keep this fallback for malformed
+    # input or future path simplification changes.
+    steps = max(2, int(max(abs(end["x"] - start["x"]), abs(end["y"] - start["y"])) / 0.1))
+    for index in range(steps + 1):
+        ratio = index / steps
+        point = {
+            "x": start["x"] + (end["x"] - start["x"]) * ratio,
+            "y": start["y"] + (end["y"] - start["y"]) * ratio,
+        }
+        if rect.contains(point):
+            return True
+    return False
 
 
 def _route_grid_path(

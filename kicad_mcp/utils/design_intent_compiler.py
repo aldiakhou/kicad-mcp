@@ -306,7 +306,20 @@ DESIGN_INTENT_SCHEMA = {
             }
         ],
         "required_fields": ["type", "target"],
-        "optional_fields": ["swdio", "swclk", "reset", "rail", "ground", "header"],
+        "optional_fields": ["swdio", "swclk", "reset", "rail", "ground", "header", "header_ref"],
+        "existing_header_example": [{"type": "swd", "target": "U1", "header_ref": "J2", "swdio": "PA13", "swclk": "PA14", "reset": "NRST"}],
+    },
+    "interfaces.usb2": {
+        "example": [
+            {
+                "type": "usb2",
+                "name": "USB",
+                "controller": {"ref": "U1", "dp": "PA12", "dm": "PA11"},
+                "connector": {"ref": "J1", "dp": "A6", "dm": "A7"},
+            }
+        ],
+        "required_fields": ["type", "controller/device/connector endpoints"],
+        "optional_fields": ["name", "dp_net", "dm_net"],
     },
     "support_circuits.decoupling": {
         "example": [{"type": "decoupling", "target": "U1", "rail": "+3V3", "ground": "GND", "capacitors": ["100n", "4.7u"]}],
@@ -361,10 +374,12 @@ DESIGN_INTENT_SCHEMA = {
         "example": [{"type": "crystal", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "value": "8MHz"}],
         "alias_example": [{"type": "crystal", "target": "U1", "xin": "OSC_IN", "xout": "OSC_OUT", "value": "8MHz"}],
         "grounded_example": [{"type": "crystal", "lib_id": "Device:Crystal_GND2", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "ground": "GND", "value": "8MHz"}],
+        "pin_map_example": [{"type": "crystal", "lib_id": "Device:Crystal_GND24_Small", "target": "U1", "pins": ["PH0", "PH1"], "pin_map": {"xin": "1", "xout": "3", "ground": ["2", "4"]}}],
+        "load_capacitance_example": [{"type": "crystal", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "value": "8MHz", "load_capacitance": "22pF"}],
         "required_fields": ["type", "pins or xin+xout"],
-        "optional_fields": ["target", "ref", "value", "footprint", "lib_id", "symbol", "ground", "xin", "xout"],
+        "optional_fields": ["target", "ref", "value", "footprint", "lib_id", "symbol", "ground", "xin", "xout", "pin_map", "load_capacitance", "load_capacitors"],
         "generated_parts_summary": "One crystal.",
-        "generated_nets_summary": "Crystal pins 1 and 2 connect to the two listed nets; grounded symbols also connect ground pins.",
+        "generated_nets_summary": "Crystal signal pins connect to XTAL_<target>_IN/OUT; grounded symbols connect detected or pin_map ground pins.",
     },
     "support_circuits.reset_button": {
         "example": [{"type": "reset_button", "target": "U1", "pin": "NRST", "net": "RESET_N", "rail": "+3V3", "pullup": "10k", "ground": "GND"}],

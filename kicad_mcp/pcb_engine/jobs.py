@@ -360,6 +360,36 @@ def _apply_layout_intent(
         return _cancelled_payload(project_path, "after_sync_and_place")
 
     files = ct.get_project_files(ct.validate_local_path(project_path, "project", must_exist=True))
+    cleanup = {
+        "success": True,
+        "skipped": True,
+        "reason": "routing.clean_start=False",
+    }
+    if normalized["routing"].get("clean_start"):
+        progress("clean_routing", 4, "Clearing existing routed copper before layout")
+
+        def cleanup_mutation(pcb_model: KiCadPcb) -> dict[str, Any]:
+            return pcb_model.clear_routing(include_zones=True)
+
+        cleanup = ct._apply_transactional_pcb_edit(
+            files["pcb"],
+            cleanup_mutation,
+            run_cli_validation=True,
+        )
+        if not cleanup.get("success"):
+            return {
+                "success": False,
+                "changed": True,
+                "project_path": project_path,
+                "pcb_path": files["pcb"],
+                "stage": "clean_routing_failed",
+                "error": cleanup.get("error", "PCB routing cleanup failed"),
+                "sync": completed.get("sync"),
+                "placement": completed.get("placement"),
+                "cleanup": cleanup,
+            }
+        if is_cancelled():
+            return _cancelled_payload(project_path, "after_clean_routing")
     routing = {
         "success": True,
         "skipped": True,
@@ -456,6 +486,7 @@ def _apply_layout_intent(
             "expected_connection_count": ratsnest.get("expected_connection_count", 0),
         },
         "routing": routing,
+        "cleanup": cleanup,
         "quality": quality,
         "drc": drc,
         "intent": normalized,

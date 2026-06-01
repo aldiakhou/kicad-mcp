@@ -267,6 +267,46 @@ class TestNormalizeDesignIntent:
         assert canonical.part_by_ref("J1").role == "swd_header"
         assert len([part for part in canonical.parts if part.role == "i2c_pullup"]) == 2
 
+    def test_swd_interface_can_use_existing_header_ref(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "MCU",
+                    "pins": [
+                        {"number": "1", "name": "PA13", "pintype": "bidirectional"},
+                        {"number": "2", "name": "PA14", "pintype": "bidirectional"},
+                        {"number": "3", "name": "NRST", "pintype": "input"},
+                    ],
+                },
+                {
+                    "ref": "J2",
+                    "lib_id": "Connector_Generic:Conn_01x05",
+                    "value": "DEBUG",
+                },
+            ],
+            "interfaces": [
+                {
+                    "type": "swd",
+                    "target": "U1",
+                    "header_ref": "J2",
+                    "swdio": "PA13",
+                    "swclk": "PA14",
+                    "reset": "NRST",
+                    "rail": "+3V3",
+                    "ground": "GND",
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        endpoints = {(ep.net, ep.ref, ep.pin) for ep in canonical.endpoints}
+
+        assert [part.ref for part in canonical.parts if part.role == "swd_header"] == []
+        assert ("SWDIO", "J2", "2") in endpoints
+        assert ("SWCLK", "J2", "4") in endpoints
+        assert ("RESET_N", "J2", "5") in endpoints
+
     def test_grouped_interface_low_level_connections_still_work(self):
         intent = {
             "parts": [{"ref": "U1", "lib_id": "Device:R", "value": "10k"}],
@@ -522,9 +562,35 @@ class TestNormalizeDesignIntent:
         assert ("GND", "C1", "2") in endpoints
         assert ("U4_SETP", "U4", "SETP") in endpoints
         assert ("U4_SETC", "U4", "SETC") in endpoints
-        assert ("OSC_IN", "U1", "OSC_IN") in endpoints
-        assert ("OSC_OUT", "U1", "OSC_OUT") in endpoints
+        assert ("XTAL_U1_IN", "U1", "OSC_IN") in endpoints
+        assert ("XTAL_U1_OUT", "U1", "OSC_OUT") in endpoints
         assert len([part for part in canonical.parts if part.role == "load_capacitor"]) == 2
+
+    def test_crystal_load_caps_reuse_crystal_generated_nets_for_target_pins(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "MCU",
+                    "pins": [
+                        {"number": "1", "name": "PH0", "pintype": "input"},
+                        {"number": "2", "name": "PH1", "pintype": "output"},
+                    ],
+                }
+            ],
+            "support_circuits": [
+                {"type": "crystal", "target": "U1", "pins": ["PH0", "PH1"]},
+                {"type": "crystal_load_caps", "target": "U1", "xin": "PH0", "xout": "PH1"},
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        target_nets = {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints if ep.ref == "U1"}
+
+        assert ("U1", "PH0", "XTAL_U1_IN") in target_nets
+        assert ("U1", "PH1", "XTAL_U1_OUT") in target_nets
+        assert ("U1", "PH0", "PH0") not in target_nets
+        assert ("U1", "PH1", "PH1") not in target_nets
 
     def test_grouped_support_circuits_do_not_crash(self):
         """Grouped support_circuits object is normalized before expansion."""
@@ -568,6 +634,107 @@ class TestNormalizeDesignIntent:
         assert crystal_parts[0].ref == "Y1"
         assert {part.ref for part in load_cap_parts} == {"C1", "C2"}
 
+    def test_crystal_gnd24_symbol_maps_signals_to_non_ground_pins(self, monkeypatch):
+        def fake_part_pins(part):
+            if part.ref == "Y?":
+                return [
+                    {"number": "1", "name": "XTAL1", "pintype": "passive"},
+                    {"number": "2", "name": "GND", "pintype": "passive"},
+                    {"number": "3", "name": "XTAL2", "pintype": "passive"},
+                    {"number": "4", "name": "GND", "pintype": "passive"},
+                ]
+            return [
+                {"number": "1", "name": "PH0", "pintype": "input"},
+                {"number": "2", "name": "PH1", "pintype": "output"},
+            ]
+
+        monkeypatch.setattr(normalize, "_part_pins", fake_part_pins)
+        intent = {
+            "parts": [{"ref": "U1", "lib_id": "Test:MCU", "value": "MCU"}],
+            "support_circuits": [
+                {
+                    "type": "crystal",
+                    "target": "U1",
+                    "lib_id": "Device:Crystal_GND24_Small",
+                    "pins": ["PH0", "PH1"],
+                    "ground": "GND",
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        endpoints = {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints}
+
+        assert ("Y1", "1", "XTAL_U1_IN") in endpoints
+        assert ("Y1", "3", "XTAL_U1_OUT") in endpoints
+        assert ("Y1", "2", "GND") in endpoints
+        assert ("Y1", "4", "GND") in endpoints
+        assert ("Y1", "2", "XTAL_U1_OUT") not in endpoints
+
+    def test_crystal_gnd2_numeric_symbol_maps_pin2_to_ground(self, monkeypatch):
+        def fake_part_pins(part):
+            if part.ref == "Y?":
+                return [
+                    {"number": "1", "name": "1", "pintype": "passive"},
+                    {"number": "2", "name": "2", "pintype": "passive"},
+                    {"number": "3", "name": "3", "pintype": "passive"},
+                ]
+            return [
+                {"number": "1", "name": "PH0", "pintype": "input"},
+                {"number": "2", "name": "PH1", "pintype": "output"},
+            ]
+
+        monkeypatch.setattr(normalize, "_part_pins", fake_part_pins)
+        intent = {
+            "parts": [{"ref": "U1", "lib_id": "Test:MCU", "value": "MCU"}],
+            "support_circuits": [
+                {
+                    "type": "crystal",
+                    "target": "U1",
+                    "lib_id": "Device:Crystal_GND2_Small",
+                    "pins": ["PH0", "PH1"],
+                    "ground": "GND",
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        endpoints = {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints}
+
+        assert ("Y1", "1", "XTAL_U1_IN") in endpoints
+        assert ("Y1", "3", "XTAL_U1_OUT") in endpoints
+        assert ("Y1", "2", "GND") in endpoints
+        assert ("Y1", "4", "GND") not in endpoints
+
+    def test_crystal_pin_map_overrides_symbol_defaults(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "MCU",
+                    "pins": [
+                        {"number": "1", "name": "PH0", "pintype": "input"},
+                        {"number": "2", "name": "PH1", "pintype": "output"},
+                    ],
+                }
+            ],
+            "support_circuits": [
+                {
+                    "type": "crystal",
+                    "target": "U1",
+                    "lib_id": "Device:Crystal_GND24_Small",
+                    "pins": ["PH0", "PH1"],
+                    "pin_map": {"xin": "1", "xout": "3", "ground": ["2", "4"]},
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        endpoints = {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints}
+
+        assert ("Y1", "3", "XTAL_U1_OUT") in endpoints
+        assert ("Y1", "4", "GND") in endpoints
+
     def test_duplicate_crystals_allocate_unique_refs(self):
         """Generated crystal support parts use unique standard refs across targets."""
         intent = {
@@ -586,6 +753,76 @@ class TestNormalizeDesignIntent:
         refs = [part.ref for part in canonical.parts]
         assert len(refs) == len(set(refs))
         assert {part.ref for part in canonical.parts if part.role == "crystal"} == {"Y1", "Y2"}
+
+    def test_reset_button_pullup_generates_resistor(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "MCU",
+                    "pins": [{"number": "1", "name": "NRST", "pintype": "input"}],
+                }
+            ],
+            "support_circuits": [
+                {
+                    "type": "reset_button",
+                    "target": "U1",
+                    "pin": "NRST",
+                    "net": "RESET_N",
+                    "pullup": "10k",
+                    "rail": "+3V3",
+                    "ground": "GND",
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        pullups = [part for part in canonical.parts if part.role == "pullup"]
+        endpoints = {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints}
+
+        assert len(pullups) == 1
+        assert (pullups[0].ref, "1", "+3V3") in endpoints
+        assert (pullups[0].ref, "2", "RESET_N") in endpoints
+
+    def test_ferrite_filter_respects_in_net_out_net_aliases(self):
+        intent = {
+            "support_circuits": [
+                {
+                    "type": "ferrite_filter",
+                    "in_net": "+3V3",
+                    "out_net": "+3V3A",
+                    "value": "Ferrite",
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        endpoints = {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints}
+
+        assert ("FB1", "1", "+3V3") in endpoints
+        assert ("FB1", "2", "+3V3A") in endpoints
+        assert ("FB1", "1", "+5V") not in endpoints
+
+    def test_power_flag_skipped_when_net_has_power_output_driver(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U5",
+                    "value": "LDO",
+                    "pins": [
+                        {"number": "1", "name": "OUT", "pintype": "power_out"},
+                        {"number": "2", "name": "GND", "pintype": "power_in"},
+                    ],
+                }
+            ],
+            "bulk_connections": [{"net": "+3V3", "pins": [["U5", "OUT"]]}],
+            "support_circuits": [{"type": "power_flag", "net": "+3V3"}],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert [part for part in canonical.parts if part.role == "power_flag"] == []
+        assert not any(ep.ref.startswith("#FLG") for ep in canonical.endpoints)
 
     def test_duplicate_decoupling_groups_allocate_unique_refs(self):
         """Decoupling groups allocate unique capacitor refs without target-derived names."""

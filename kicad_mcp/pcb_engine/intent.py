@@ -53,7 +53,8 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
         "description": "Routing scope for the async PCB layout job.",
         "capability_notes": [
             "mode=report_only does not write routes; it reports ratsnest/topology after sync and placement.",
-            "mode=auto uses the bounded obstacle-aware grid router for ordinary point-to-point copper on one selected layer.",
+            "mode=auto uses the experimental bounded obstacle-aware grid router for ordinary point-to-point copper on one selected layer.",
+            "Treat auto-routed output as a draft only until KiCad DRC is clean.",
             "The router is not an RF, impedance, differential-pair, length-tuning, or dense mixed-signal signoff router.",
             "Vias, advanced layer changes, and high-density escape routing require manual or external routing.",
         ],
@@ -64,6 +65,7 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
             "clearance_mm": "Minimum routing keepout clearance around footprints and other-net copper.",
             "grid_mm": "Routing grid pitch. Smaller values can route tighter designs but take longer.",
             "max_connections": "Optional cap on routed ratsnest connections in one job. Use 0 or omit for no cap.",
+            "clean_start": "Remove existing segments, vias, and zones before routing/reporting. Also enabled for mode=none with preserve_existing_placement=false.",
         },
         "example": {
             "mode": "auto",
@@ -177,6 +179,9 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
             raise ValueError("routing.max_connections must be non-negative")
         if max_connections == 0:
             max_connections = None
+    clean_start = bool(routing.get("clean_start", False))
+    if routing_mode == "none" and not bool(placement.get("preserve_existing_placement", True)):
+        clean_start = True
 
     placement_rules = _merge_placement_rules(
         placement.get("rules"),
@@ -203,6 +208,7 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
             "clearance_mm": clearance,
             "grid_mm": grid,
             "max_connections": max_connections,
+            "clean_start": clean_start,
         },
         "validation": {
             "run_drc": bool(validation.get("run_drc", False)),
