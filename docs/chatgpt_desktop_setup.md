@@ -139,6 +139,18 @@ For generated schematics, use the netlist-first workflow in this order:
 
 The apply job is always atomic: it writes through the required SKiDL/KiUtils/kicad-skip engine, verifies with KiCad CLI, and rolls back on failure. `schematic_cancel_job` can cancel queued work and requests cooperative rollback for running work.
 
+For PCB layout after schematic validation:
+
+1. `pcb_design_intent_schema`
+2. `pcb_preview_layout_intent`
+3. `pcb_start_layout_job`
+4. `pcb_get_layout_job_status` until the job reaches `succeeded`, `failed`, or `cancelled`
+5. `pcb_get_layout_job_result`
+6. `pcb_validate_layout`
+7. `pcb_export_fabrication_package`
+
+The default agent profile does not expose manual coordinate routing tools. PCB layout jobs sync footprints from the schematic, assign pad nets, apply board/placement constraints, and report ratsnest and DRC status.
+
 ## Current limitations
 
 - No PCB routing yet.

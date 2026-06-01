@@ -53,6 +53,56 @@ Symbol and footprint discovery tools remain public:
 
 The apply job writes in a temporary worktree first. If KiCad CLI export, ERC, or netlist comparison fails, the live project is not changed. `schematic_cancel_job` is cooperative: it cancels queued work immediately and requests rollback at the next pipeline checkpoint for running work. If KiCad CLI is already running, that command may finish before the job rolls back.
 
+## PCB Layout
+
+After the schematic is committed and validated, use the PCB intent workflow. The default agent profile exposes only the high-level PCB tools:
+
+- `pcb_design_intent_schema`
+- `pcb_preview_layout_intent`
+- `pcb_start_layout_job`
+- `pcb_get_layout_job_status`
+- `pcb_get_layout_job_result`
+- `pcb_cancel_layout_job`
+- `pcb_validate_layout`
+- `pcb_export_fabrication_package`
+
+Recommended PCB order:
+
+1. `pcb_design_intent_schema`
+2. `pcb_preview_layout_intent`
+3. `pcb_start_layout_job`
+4. `pcb_get_layout_job_status` until `status` is `succeeded`, `failed`, or `cancelled`
+5. `pcb_get_layout_job_result`
+6. `pcb_validate_layout`
+7. `pcb_export_fabrication_package`
+
+The PCB job syncs footprints and pad nets from the generated schematic, creates or updates the board outline, applies functional placement constraints, and returns ratsnest/quality status. It does not expose coordinate-level manual routing in the agent profile. Low-level footprint, track, via, and pad-routing tools remain debug-only.
+
+PCB intent example:
+
+```json
+{
+  "board": {"width_mm": 60, "height_mm": 40, "shape": "rectangular"},
+  "placement": {
+    "style": "functional",
+    "preserve_existing_placement": true,
+    "components": [
+      {"ref": "J1", "x": 5, "y": 20, "angle": 90},
+      {"ref": "U1", "x": 30, "y": 20, "angle": 0}
+    ],
+    "rules": {
+      "roles": {
+        "connector": {"x": 8, "y": 35, "angle": 0},
+        "primary_controller": {"x": 30, "y": 20, "angle": 0}
+      }
+    }
+  },
+  "routing": {"mode": "report_only", "track_width_mm": 0.25},
+  "validation": {"run_drc": false, "require_clean_drc": false},
+  "fabrication": {"include_step": false, "include_ipc2581": false, "run_drc": true}
+}
+```
+
 ## Design Intent Shape
 
 Use full KiCad symbol IDs and explicit connection intent:

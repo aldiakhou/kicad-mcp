@@ -4,6 +4,16 @@ from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 
+from kicad_mcp.pcb_engine.fabrication import export_fabrication_package
+from kicad_mcp.pcb_engine.intent import pcb_design_intent_schema as _pcb_design_intent_schema
+from kicad_mcp.pcb_engine.jobs import (
+    cancel_layout_job,
+    get_layout_job_result,
+    get_layout_job_status,
+    preview_layout_intent,
+    start_layout_job,
+    validate_layout,
+)
 import kicad_mcp.tools.creation_tools as ct
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
@@ -12,6 +22,76 @@ from kicad_mcp.utils.library_resolver import KiCadLibraryError
 
 def register_pcb_tools(mcp: FastMCP) -> None:
     """Register PCB creation, sync, placement, and routing tools."""
+
+    @mcp.tool()
+    def pcb_design_intent_schema(section: str = "all") -> dict[str, Any]:
+        """Return compact PCB layout-intent schema examples for agents."""
+        return _pcb_design_intent_schema(section)
+
+    @mcp.tool()
+    def pcb_preview_layout_intent(
+        project_path: str,
+        intent: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Preview PCB layout readiness and constraints without writing files."""
+        resolved_project = ct._resolve_project_alias(project_path, None, None)
+        return preview_layout_intent(resolved_project, intent or {})
+
+    @mcp.tool()
+    def pcb_start_layout_job(
+        project_path: str,
+        intent: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Start an asynchronous, cancellable PCB sync/place job."""
+        resolved_project = ct._resolve_project_alias(project_path, None, None)
+        return start_layout_job(resolved_project, intent or {})
+
+    @mcp.tool()
+    def pcb_get_layout_job_status(job_id: str) -> dict[str, Any]:
+        """Poll progress for an asynchronous PCB layout job."""
+        return get_layout_job_status(job_id)
+
+    @mcp.tool()
+    def pcb_get_layout_job_result(job_id: str) -> dict[str, Any]:
+        """Fetch the final result for a completed PCB layout job."""
+        return get_layout_job_result(job_id)
+
+    @mcp.tool()
+    def pcb_cancel_layout_job(job_id: str) -> dict[str, Any]:
+        """Request cooperative cancellation for a queued or running PCB layout job."""
+        return cancel_layout_job(job_id)
+
+    @mcp.tool()
+    def pcb_validate_layout(
+        project_path: str,
+        run_drc: bool = False,
+        require_clean_drc: bool = False,
+    ) -> dict[str, Any]:
+        """Validate current PCB sync, placement, ratsnest, and optional DRC status."""
+        resolved_project = ct._resolve_project_alias(project_path, None, None)
+        return validate_layout(
+            resolved_project,
+            run_drc=run_drc,
+            require_clean_drc=require_clean_drc,
+        )
+
+    @mcp.tool()
+    def pcb_export_fabrication_package(
+        project_path: str,
+        output_dir: str | None = None,
+        include_step: bool = False,
+        include_ipc2581: bool = False,
+        run_drc: bool = True,
+    ) -> dict[str, Any]:
+        """Export Gerbers, drill files, position file, and a fabrication ZIP."""
+        resolved_project = ct._resolve_project_alias(project_path, None, None)
+        return export_fabrication_package(
+            resolved_project,
+            output_dir=output_dir,
+            include_step=include_step,
+            include_ipc2581=include_ipc2581,
+            run_drc=run_drc,
+        )
 
     @mcp.tool()
     async def pcb_add_footprint(

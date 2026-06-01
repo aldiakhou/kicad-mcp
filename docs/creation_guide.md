@@ -37,7 +37,9 @@ On Windows it also searches versioned KiCad installations such as `C:\Program Fi
 - `pcb_add_via(...)`
 - `pcb_generate_basic_layout(...)`
 
-PCB tooling is conservative. `pcb_generate_basic_layout(...)` creates an outline and places footprints from schematic footprint properties. It does not autoroute. Copper is only written when `pcb_add_track(...)` or `pcb_add_via(...)` is called explicitly.
+PCB tooling is conservative. The default agent workflow uses `pcb_preview_layout_intent`, `pcb_start_layout_job`, `pcb_get_layout_job_status`, `pcb_get_layout_job_result`, `pcb_validate_layout`, and `pcb_export_fabrication_package`. The job syncs footprints from the schematic, assigns pad nets, creates the board outline, applies functional placement, and reports ratsnest/quality status. It does not autoroute.
+
+Manual tools such as `pcb_generate_basic_layout(...)`, `pcb_add_track(...)`, and `pcb_add_via(...)` remain debug/advanced tools. Copper is only written when explicit routing tools are called.
 
 ## KiCad CLI
 

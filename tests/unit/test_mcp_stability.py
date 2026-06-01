@@ -95,6 +95,14 @@ async def test_create_server_registers_smoke_resources_and_tools():
     assert "export_schematic_svg" in tools
     assert "validate_project_boundaries" in tools
     assert "generate_validation_report" in tools
+    assert "pcb_design_intent_schema" in tools
+    assert "pcb_preview_layout_intent" in tools
+    assert "pcb_start_layout_job" in tools
+    assert "pcb_get_layout_job_status" in tools
+    assert "pcb_get_layout_job_result" in tools
+    assert "pcb_cancel_layout_job" in tools
+    assert "pcb_validate_layout" in tools
+    assert "pcb_export_fabrication_package" in tools
     assert "resolve_symbol" in tools
     assert "resolve_symbols" in tools
     assert "resolve_footprint" in tools

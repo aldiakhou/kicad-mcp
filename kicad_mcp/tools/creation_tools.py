@@ -758,15 +758,15 @@ async def _project_design_state(
         )
     elif not status.get("pcb_synced"):
         stage = "schematic_valid"
-        next_tool = "pcb_sync_place_and_report"
+        next_tool = "pcb_preview_layout_intent"
         next_args = {"project_path": report["project_path"]}
     elif not status.get("placement_valid"):
         stage = "pcb_synced"
-        next_tool = "pcb_apply_functional_placement"
+        next_tool = "pcb_start_layout_job"
         next_args = {"project_path": report["project_path"]}
     elif pcb.get("routing_status") in {"unrouted", "partially_routed", "unknown_needs_drc"}:
         stage = "routing_needed"
-        next_tool = "pcb_get_ratsnest"
+        next_tool = "pcb_validate_layout"
         next_args = {"project_path": report["project_path"]}
     elif run_drc and drc.get("success") and drc.get("total_violations", 0) == 0:
         stage = "ready"
@@ -854,7 +854,7 @@ def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[st
             _next_action(
                 "sync_pcb_from_schematic",
                 "Sync PCB from schematic",
-                "pcb_complete_from_schematic",
+                "pcb_start_layout_job",
                 "high",
                 "Schematic is complete, but PCB footprints/pad nets are not synced.",
                 {},
@@ -865,7 +865,7 @@ def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[st
             _next_action(
                 "apply_pcb_functional_placement",
                 "Apply functional PCB placement",
-                "pcb_apply_functional_placement",
+                "pcb_start_layout_job",
                 "medium",
                 "PCB exists but placement has overlap or keepout warnings.",
                 {
@@ -878,10 +878,10 @@ def _next_actions_from_completion_report(report: dict[str, Any]) -> list[dict[st
         actions.append(
             _next_action(
                 "route_unrouted_nets",
-                "Route remaining ratsnest connections",
-                "pcb_get_ratsnest",
+                "Review PCB ratsnest and routing status",
+                "pcb_validate_layout",
                 "high",
-                "PCB is synced and placed, but copper routing is not complete.",
+                "PCB is synced and placed, but copper routing is not complete. Use debug routing tools only for explicit route edits.",
                 {"ratsnest_connection_count": ratsnest.get("connection_count")},
             )
         )
