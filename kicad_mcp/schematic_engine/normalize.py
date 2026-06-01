@@ -86,7 +86,9 @@ def normalize_design_intent(
         "requested_count": 0,
         "matched_count": 0,
         "emitted_count": 0,
+        "excluded_count": 0,
         "skipped_connected_count": 0,
+        "skipped_excluded_count": 0,
         "skipped_hidden_count": 0,
         "matched_zero_pins_count": 0,
         "matched_zero_pins": [],
@@ -126,23 +128,12 @@ def normalize_design_intent(
                 ))
 
     # --- Extract interfaces ---
-    interfaces_raw = intent.get("interfaces", [])
-    if isinstance(interfaces_raw, dict):
-        # Dict format: {"i2c": [...connections...], "spi": [...]}
-        for iface_name, iface_connections in interfaces_raw.items():
-            if isinstance(iface_connections, list):
-                iface_spec = {"type": iface_name, "connections": iface_connections}
-                iface_endpoints = _normalize_interface(iface_spec)
-                endpoints.extend(iface_endpoints)
-            elif isinstance(iface_connections, dict):
-                # Single interface dict with type implicit from key
-                iface_connections["type"] = iface_connections.get("type", iface_name)
-                iface_endpoints = _normalize_interface(iface_connections)
-                endpoints.extend(iface_endpoints)
-    elif isinstance(interfaces_raw, list):
-        for iface_spec in interfaces_raw:
-            iface_endpoints = _normalize_interface(iface_spec)
-            endpoints.extend(iface_endpoints)
+    for iface_spec in _normalize_interface_specs(intent.get("interfaces", [])):
+        iface_parts, iface_endpoints = _normalize_interface(iface_spec, ref_allocator)
+        parts.extend(iface_parts)
+        endpoints.extend(iface_endpoints)
+        for p in iface_parts:
+            blocks.setdefault(p.block, []).append(p.ref)
 
     # --- Extract bulk_connections ---
     for bulk in _normalize_object_list(intent.get("bulk_connections", []), "bulk_connections"):
@@ -190,13 +181,30 @@ def normalize_design_intent(
     }
 
     # --- Extract no_connect_rules ---
-    for index, nc_rule in enumerate(
-        _normalize_object_list(intent.get("no_connect_rules", []), "no_connect_rules")
-    ):
+    no_connect_rules = _normalize_object_list(
+        intent.get("no_connect_rules", []),
+        "no_connect_rules",
+    )
+    excluded_no_connect_keys: set[tuple[str, str]] = set()
+    for index, nc_rule in enumerate(no_connect_rules):
+        if str(nc_rule.get("action", "mark_no_connect")).lower() != "exclude":
+            continue
+        excluded_keys, rule_summary = _normalize_no_connect_exclusion_rule(
+            nc_rule,
+            parts_by_ref,
+            f"no_connect_rules[{index}]",
+        )
+        excluded_no_connect_keys.update(excluded_keys)
+        _merge_no_connect_summary(no_connect_summary, rule_summary)
+
+    for index, nc_rule in enumerate(no_connect_rules):
+        if str(nc_rule.get("action", "mark_no_connect")).lower() == "exclude":
+            continue
         markers, rule_summary = _normalize_no_connect_rule(
             nc_rule,
             parts_by_ref,
             connected_keys,
+            excluded_no_connect_keys,
             f"no_connect_rules[{index}]",
         )
         no_connects.extend(markers)
@@ -267,19 +275,25 @@ def _normalize_part(part_spec: dict[str, Any]) -> CircuitPart:
     )
 
 
-def _normalize_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
-    """Convert an interface spec to endpoints."""
+def _normalize_interface(
+    iface_spec: dict[str, Any],
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
+    """Convert an interface spec to generated parts and endpoints."""
     if not isinstance(iface_spec, dict):
         raise ValueError(f"Interface entry must be an object: {iface_spec!r}")
+    parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
-    iface_type = iface_spec.get("type", "")
+    iface_type = str(iface_spec.get("type", "")).lower()
     connections = iface_spec.get("connections", [])
 
     for conn in connections:
+        if not isinstance(conn, dict):
+            continue
         net_name = conn.get("net", "")
         if not net_name:
             continue
-        for ep in conn.get("endpoints", []):
+        for ep in _bulk_connections(conn):
             ref = ep.get("ref", "")
             pin = ep.get("pin", "")
             if ref and pin:
@@ -292,58 +306,83 @@ def _normalize_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
                     source=f"interface:{iface_type}",
                 ))
 
-    if str(iface_type).lower() == "i2c":
-        endpoints.extend(_normalize_i2c_interface(iface_spec))
-
     # Handle shorthand interface definitions
     signals = iface_spec.get("signals", {})
-    for signal_name, signal_def in signals.items():
-        net_name = signal_def.get("net", signal_name)
-        for ep in signal_def.get("endpoints", []):
-            ref = ep.get("ref", "")
-            pin = ep.get("pin", "")
-            if ref and pin:
-                endpoints.append(CircuitEndpoint(
-                    ref=ref,
-                    pin=str(pin),
-                    net=net_name,
+    if isinstance(signals, dict):
+        for signal_name, signal_def in signals.items():
+            net_name = signal_name
+            signal_endpoints: list[dict[str, Any]] = []
+            if isinstance(signal_def, dict):
+                net_name = signal_def.get("net", signal_name)
+                signal_endpoints = _bulk_connections(signal_def)
+            elif isinstance(signal_def, list):
+                signal_endpoints = _endpoint_items(signal_def)
+            for ep in signal_endpoints:
+                _append_endpoint(
+                    endpoints,
+                    ep.get("ref", ""),
+                    ep.get("pin", ""),
+                    str(net_name),
+                    source=f"interface:{iface_type}:{signal_name}",
                     required=ep.get("required", True),
                     allow_hidden=ep.get("allow_hidden", False),
-                    source=f"interface:{iface_type}:{signal_name}",
-                ))
+                )
+    elif isinstance(signals, list):
+        endpoints.extend(_normalize_signal_list(iface_type, signals))
 
-    return endpoints
+    if iface_type == "i2c":
+        iface_parts, iface_endpoints = _normalize_i2c_interface(iface_spec, ref_allocator)
+        parts.extend(iface_parts)
+        endpoints.extend(iface_endpoints)
+    elif iface_type == "spi":
+        endpoints.extend(_normalize_spi_interface(iface_spec))
+    elif iface_type == "uart":
+        endpoints.extend(_normalize_uart_interface(iface_spec))
+    elif iface_type == "usb2":
+        endpoints.extend(_normalize_usb2_interface(iface_spec))
+    elif iface_type == "swd":
+        iface_parts, iface_endpoints = _normalize_swd_interface(iface_spec, ref_allocator)
+        parts.extend(iface_parts)
+        endpoints.extend(iface_endpoints)
+    elif iface_type in {"gpio", "interrupt", "analog"}:
+        endpoints.extend(_normalize_signal_list(iface_type, iface_spec.get("signals", [])))
+    elif iface_type == "power":
+        endpoints.extend(_normalize_power_interface(iface_spec))
+
+    return parts, endpoints
 
 
-def _normalize_i2c_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
+def _normalize_i2c_interface(
+    iface_spec: dict[str, Any],
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
     """Normalize the public schema's controller/devices I2C shorthand."""
+    parts: list[CircuitPart] = []
     endpoints: list[CircuitEndpoint] = []
     controller = iface_spec.get("controller")
     devices = iface_spec.get("devices", [])
     if not isinstance(controller, dict) or not isinstance(devices, list):
-        return endpoints
+        return parts, endpoints
 
     iface_name = str(iface_spec.get("name") or "I2C").upper()
     scl_net = str(iface_spec.get("scl_net") or f"{iface_name}_SCL")
     sda_net = str(iface_spec.get("sda_net") or f"{iface_name}_SDA")
     controller_ref = str(controller.get("ref") or "")
     if controller_ref:
-        if controller.get("scl"):
-            endpoints.append(CircuitEndpoint(
-                ref=controller_ref,
-                pin=str(controller["scl"]),
-                net=scl_net,
-                required=True,
-                source=f"interface:{iface_spec.get('type', 'i2c')}:controller",
-            ))
-        if controller.get("sda"):
-            endpoints.append(CircuitEndpoint(
-                ref=controller_ref,
-                pin=str(controller["sda"]),
-                net=sda_net,
-                required=True,
-                source=f"interface:{iface_spec.get('type', 'i2c')}:controller",
-            ))
+        _append_named_endpoint(
+            endpoints,
+            scl_net,
+            controller,
+            "scl",
+            source=f"interface:{iface_spec.get('type', 'i2c')}:controller",
+        )
+        _append_named_endpoint(
+            endpoints,
+            sda_net,
+            controller,
+            "sda",
+            source=f"interface:{iface_spec.get('type', 'i2c')}:controller",
+        )
 
     for device in devices:
         if not isinstance(device, dict):
@@ -351,23 +390,383 @@ def _normalize_i2c_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint
         ref = str(device.get("ref") or "")
         if not ref:
             continue
-        if device.get("scl"):
-            endpoints.append(CircuitEndpoint(
-                ref=ref,
-                pin=str(device["scl"]),
-                net=scl_net,
-                required=True,
-                source=f"interface:{iface_spec.get('type', 'i2c')}:device",
-            ))
-        if device.get("sda"):
-            endpoints.append(CircuitEndpoint(
-                ref=ref,
-                pin=str(device["sda"]),
-                net=sda_net,
-                required=True,
-                source=f"interface:{iface_spec.get('type', 'i2c')}:device",
-            ))
+        _append_named_endpoint(
+            endpoints,
+            scl_net,
+            device,
+            "scl",
+            source=f"interface:{iface_spec.get('type', 'i2c')}:device",
+        )
+        _append_named_endpoint(
+            endpoints,
+            sda_net,
+            device,
+            "sda",
+            source=f"interface:{iface_spec.get('type', 'i2c')}:device",
+        )
+        _append_pin_net_map(
+            endpoints,
+            ref,
+            device.get("interrupts", {}),
+            source=f"interface:{iface_spec.get('type', 'i2c')}:interrupts",
+        )
+        _append_pin_net_map(
+            endpoints,
+            ref,
+            device.get("address_pins", {}),
+            source=f"interface:{iface_spec.get('type', 'i2c')}:address_pins",
+        )
+
+    pullups = iface_spec.get("pullups")
+    if isinstance(pullups, dict) and pullups.get("rail"):
+        rail = str(pullups["rail"])
+        value = str(pullups.get("value") or "4.7k")
+        footprint = str(pullups.get("footprint") or "Resistor_SMD:R_0402_1005Metric")
+        for net_name in (scl_net, sda_net):
+            part, part_endpoints = _two_pin_part(
+                ref_allocator,
+                prefix="R",
+                lib_id="Device:R",
+                value=value,
+                footprint=footprint,
+                net_1=rail,
+                net_2=net_name,
+                block=str(controller.get("ref") or "interfaces"),
+                role="i2c_pullup",
+                source=f"interface:{iface_spec.get('type', 'i2c')}:pullup",
+                properties={
+                    "KICAD_MCP_ROLE": "i2c_pullup",
+                    "KICAD_MCP_TARGET": str(controller.get("ref") or ""),
+                    "KICAD_MCP_NETS": f"{rail},{net_name}",
+                },
+            )
+            parts.append(part)
+            endpoints.extend(part_endpoints)
+
+    return parts, endpoints
+
+
+def _normalize_spi_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
+    endpoints: list[CircuitEndpoint] = []
+    name = str(iface_spec.get("name") or "SPI").upper()
+    nets = {
+        "sck": str(iface_spec.get("sck_net") or f"{name}_SCK"),
+        "miso": str(iface_spec.get("miso_net") or f"{name}_MISO"),
+        "mosi": str(iface_spec.get("mosi_net") or f"{name}_MOSI"),
+    }
+    controller = iface_spec.get("controller")
+    if not isinstance(controller, dict):
+        return endpoints
+    for signal, net in nets.items():
+        _append_named_endpoint(
+            endpoints,
+            net,
+            controller,
+            signal,
+            source=f"interface:{iface_spec.get('type', 'spi')}:controller",
+        )
+    for device in iface_spec.get("devices", []):
+        if not isinstance(device, dict):
+            continue
+        for signal, net in nets.items():
+            _append_named_endpoint(
+                endpoints,
+                net,
+                device,
+                signal,
+                source=f"interface:{iface_spec.get('type', 'spi')}:device",
+            )
+        cs_net = device.get("cs_net") or device.get("cs")
+        device_cs_pin = device.get("cs_pin") or ("CS" if device.get("cs_net") else None)
+        if cs_net and device_cs_pin:
+            _append_endpoint(
+                endpoints,
+                device.get("ref", ""),
+                device_cs_pin,
+                str(cs_net),
+                source=f"interface:{iface_spec.get('type', 'spi')}:chip_select",
+            )
+        controller_cs_pin = (
+            device.get("controller_cs_pin")
+            or device.get("controller_cs")
+            or controller.get("cs")
+        )
+        if cs_net and controller_cs_pin:
+            _append_endpoint(
+                endpoints,
+                controller.get("ref", ""),
+                controller_cs_pin,
+                str(cs_net),
+                source=f"interface:{iface_spec.get('type', 'spi')}:chip_select",
+            )
     return endpoints
+
+
+def _normalize_uart_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
+    endpoints: list[CircuitEndpoint] = []
+    name = str(iface_spec.get("name") or "UART").upper()
+    controller = iface_spec.get("controller") or iface_spec.get("a")
+    device = iface_spec.get("device") or iface_spec.get("b")
+    if not isinstance(controller, dict) or not isinstance(device, dict):
+        return endpoints
+    tx_net = str(iface_spec.get("tx_net") or f"{name}_TX")
+    rx_net = str(iface_spec.get("rx_net") or f"{name}_RX")
+    _append_named_endpoint(endpoints, tx_net, controller, "tx", source=f"interface:{iface_spec.get('type', 'uart')}:controller")
+    _append_named_endpoint(endpoints, tx_net, device, "rx", source=f"interface:{iface_spec.get('type', 'uart')}:device")
+    _append_named_endpoint(endpoints, rx_net, controller, "rx", source=f"interface:{iface_spec.get('type', 'uart')}:controller")
+    _append_named_endpoint(endpoints, rx_net, device, "tx", source=f"interface:{iface_spec.get('type', 'uart')}:device")
+    return endpoints
+
+
+def _normalize_usb2_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
+    endpoints: list[CircuitEndpoint] = []
+    name = str(iface_spec.get("name") or "USB").upper()
+    dp_net = str(iface_spec.get("dp_net") or f"{name}_D+")
+    dm_net = str(iface_spec.get("dm_net") or f"{name}_D-")
+    for side_key in ("controller", "device", "connector"):
+        side = iface_spec.get(side_key)
+        if isinstance(side, dict):
+            _append_named_endpoint(endpoints, dp_net, side, "dp", source=f"interface:{iface_spec.get('type', 'usb2')}:{side_key}")
+            _append_named_endpoint(endpoints, dm_net, side, "dm", source=f"interface:{iface_spec.get('type', 'usb2')}:{side_key}")
+    return endpoints
+
+
+def _normalize_swd_interface(
+    iface_spec: dict[str, Any],
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
+    parts: list[CircuitPart] = []
+    endpoints: list[CircuitEndpoint] = []
+    target = str(iface_spec.get("target") or "")
+    if not target:
+        return parts, endpoints
+    nets = {
+        "swdio": str(iface_spec.get("swdio_net") or "SWDIO"),
+        "swclk": str(iface_spec.get("swclk_net") or "SWCLK"),
+        "reset": str(iface_spec.get("reset_net") or "RESET_N"),
+        "swo": str(iface_spec.get("swo_net") or "SWO"),
+    }
+    for signal in ("swdio", "swclk", "reset", "swo"):
+        pin = iface_spec.get(signal)
+        if signal == "reset":
+            pin = pin or iface_spec.get("nrst")
+        if pin:
+            _append_endpoint(
+                endpoints,
+                target,
+                pin,
+                nets[signal],
+                source=f"interface:{iface_spec.get('type', 'swd')}:target",
+            )
+
+    header = iface_spec.get("header") if isinstance(iface_spec.get("header"), dict) else {}
+    header_enabled = iface_spec.get("header", True) is not False
+    if not header_enabled:
+        return parts, endpoints
+
+    explicit_ref = header.get("ref")
+    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("J")
+    rail = iface_spec.get("rail")
+    ground = str(iface_spec.get("ground") or "GND")
+    pin_count = int(header.get("pin_count") or (5 if rail else 4))
+    part = CircuitPart(
+        ref=ref,
+        lib_id=str(header.get("lib_id") or f"Connector_Generic:Conn_01x{pin_count:02d}"),
+        value=str(header.get("value") or "SWD"),
+        footprint=str(header.get("footprint") or _header_footprint(pin_count)),
+        block=str(header.get("block") or "interfaces"),
+        role="swd_header",
+        properties={
+            "KICAD_MCP_ROLE": "swd_header",
+            "KICAD_MCP_TARGET": target,
+        },
+    )
+    parts.append(part)
+    assignments: list[tuple[str, str | None]] = [
+        ("1", str(rail) if rail else None),
+        ("2", nets["swdio"]),
+        ("3", ground),
+        ("4", nets["swclk"]),
+    ]
+    if pin_count >= 5:
+        assignments.append(("5", nets["reset"]))
+    elif iface_spec.get("reset") or iface_spec.get("nrst"):
+        assignments[0] = ("1", nets["reset"])
+    if pin_count >= 6 and iface_spec.get("swo"):
+        assignments.append(("6", nets["swo"]))
+    for pin, net in assignments:
+        if net:
+            _append_endpoint(
+                endpoints,
+                ref,
+                pin,
+                net,
+                source=f"interface:{iface_spec.get('type', 'swd')}:header",
+            )
+    return parts, endpoints
+
+
+def _normalize_signal_list(iface_type: str, signals: Any) -> list[CircuitEndpoint]:
+    endpoints: list[CircuitEndpoint] = []
+    if not isinstance(signals, list):
+        return endpoints
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        net = str(signal.get("net") or signal.get("name") or "")
+        if not net:
+            continue
+        for endpoint in _endpoint_items(signal.get("pins", [])):
+            _append_endpoint(
+                endpoints,
+                endpoint.get("ref", ""),
+                endpoint.get("pin", ""),
+                net,
+                source=f"interface:{iface_type}",
+            )
+    return endpoints
+
+
+def _normalize_power_interface(iface_spec: dict[str, Any]) -> list[CircuitEndpoint]:
+    endpoints: list[CircuitEndpoint] = []
+    net = str(iface_spec.get("net") or iface_spec.get("rail") or "")
+    if not net:
+        return endpoints
+    for endpoint in _endpoint_items(iface_spec.get("pins", [])):
+        _append_endpoint(
+            endpoints,
+            endpoint.get("ref", ""),
+            endpoint.get("pin", ""),
+            net,
+            source=f"interface:{iface_spec.get('type', 'power')}",
+        )
+    return endpoints
+
+
+def _append_endpoint(
+    endpoints: list[CircuitEndpoint],
+    ref: Any,
+    pin: Any,
+    net: str,
+    *,
+    source: str,
+    required: bool = True,
+    allow_hidden: bool = False,
+) -> None:
+    if ref and pin and net:
+        endpoints.append(CircuitEndpoint(
+            ref=str(ref),
+            pin=str(pin),
+            net=str(net),
+            required=required,
+            allow_hidden=allow_hidden,
+            source=source,
+        ))
+
+
+def _append_named_endpoint(
+    endpoints: list[CircuitEndpoint],
+    net: str,
+    endpoint: dict[str, Any],
+    key: str,
+    *,
+    source: str,
+) -> None:
+    _append_endpoint(
+        endpoints,
+        endpoint.get("ref", ""),
+        endpoint.get(key, ""),
+        net,
+        source=source,
+        required=bool(endpoint.get("required", True)),
+        allow_hidden=bool(endpoint.get("allow_hidden", False)),
+    )
+
+
+def _append_pin_net_map(
+    endpoints: list[CircuitEndpoint],
+    ref: str,
+    mapping: Any,
+    *,
+    source: str,
+) -> None:
+    if not isinstance(mapping, dict):
+        return
+    for pin, net in mapping.items():
+        _append_endpoint(endpoints, ref, pin, str(net), source=source)
+
+
+def _endpoint_items(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    result: list[dict[str, Any]] = []
+    for item in items:
+        endpoint = _endpoint_item(item)
+        if endpoint:
+            result.append(endpoint)
+    return result
+
+
+def _endpoint_item(item: Any) -> dict[str, Any] | None:
+    if isinstance(item, dict):
+        if item.get("ref") and item.get("pin"):
+            return dict(item)
+        return None
+    if isinstance(item, list | tuple) and len(item) >= 2:
+        return {"ref": item[0], "pin": item[1]}
+    if isinstance(item, str) and ":" in item:
+        ref, pin = item.split(":", 1)
+        return {"ref": ref, "pin": pin}
+    return None
+
+
+def _net_from_endpoint(endpoint: dict[str, Any] | None, fallback: Any) -> str:
+    if endpoint:
+        ref = str(endpoint.get("ref") or "")
+        pin = str(endpoint.get("pin") or "")
+        if ref and pin:
+            return f"{ref}_{pin}"
+        return pin or ref
+    return str(fallback or "")
+
+
+def _two_pin_part(
+    ref_allocator: GeneratedRefAllocator,
+    *,
+    prefix: str,
+    lib_id: str,
+    value: str,
+    footprint: str | None,
+    net_1: str,
+    net_2: str,
+    block: str,
+    role: str,
+    source: str,
+    properties: dict[str, str] | None = None,
+    ref: str | None = None,
+) -> tuple[CircuitPart, list[CircuitEndpoint]]:
+    part_ref = ref or ref_allocator.next(prefix)
+    part = CircuitPart(
+        ref=part_ref,
+        lib_id=lib_id,
+        value=str(value),
+        footprint=footprint,
+        block=block,
+        role=role,
+        properties=properties or {},
+    )
+    return part, [
+        CircuitEndpoint(ref=part_ref, pin="1", net=str(net_1), required=True, source=source),
+        CircuitEndpoint(ref=part_ref, pin="2", net=str(net_2), required=True, source=source),
+    ]
+
+
+def _header_footprint(pin_count: int) -> str:
+    return (
+        "Connector_PinHeader_2.54mm:"
+        f"PinHeader_1x{pin_count:02d}_P2.54mm_Vertical"
+    )
 
 
 def _normalize_support_circuit(
@@ -384,6 +783,12 @@ def _normalize_support_circuit(
 
     if sc_type == "decoupling":
         parts, endpoints = _normalize_decoupling(sc_spec, target, ref_allocator)
+    elif sc_type == "capacitor_to_gnd":
+        parts, endpoints = _normalize_capacitor_to_gnd(sc_spec, target, ref_allocator)
+    elif sc_type == "capacitor_between":
+        parts, endpoints = _normalize_capacitor_between(sc_spec, target, ref_allocator)
+    elif sc_type == "crystal_load_caps":
+        parts, endpoints = _normalize_crystal_load_caps(sc_spec, target, ref_allocator)
     elif sc_type == "crystal":
         parts, endpoints = _normalize_crystal(sc_spec, target, ref_allocator)
     elif sc_type == "usb_c_power_input":
@@ -403,6 +808,154 @@ def _normalize_support_circuit(
     elif sc_type:
         raise ValueError(f"Unsupported support circuit type '{sc_spec.get('type')}'")
 
+    return parts, endpoints
+
+
+def _normalize_capacitor_to_gnd(
+    spec: dict[str, Any],
+    target: str,
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
+    """Generate one capacitor from a target pin/net to ground."""
+    pin = spec.get("pin") or spec.get("target_pin")
+    net = str(spec.get("net") or pin or "")
+    ground = str(spec.get("ground") or "GND")
+    if not net:
+        raise ValueError("capacitor_to_gnd requires net or target pin")
+    explicit_ref = spec.get("ref")
+    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("C")
+    part, endpoints = _two_pin_part(
+        ref_allocator,
+        prefix="C",
+        lib_id="Device:C",
+        value=str(spec.get("value") or spec.get("capacitance") or "100n"),
+        footprint=str(spec.get("footprint") or "Capacitor_SMD:C_0402_1005Metric"),
+        net_1=net,
+        net_2=ground,
+        block=target or "default",
+        role="capacitor_to_gnd",
+        source="support_circuit:capacitor_to_gnd",
+        ref=ref,
+        properties={
+            "KICAD_MCP_ROLE": "capacitor_to_gnd",
+            "KICAD_MCP_TARGET": target,
+            "KICAD_MCP_NETS": f"{net},{ground}",
+        },
+    )
+    if target and pin:
+        endpoints.append(CircuitEndpoint(
+            ref=str(target),
+            pin=str(pin),
+            net=net,
+            required=True,
+            source="support_circuit:capacitor_to_gnd:target",
+        ))
+    return [part], endpoints
+
+
+def _normalize_capacitor_between(
+    spec: dict[str, Any],
+    target: str,
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
+    """Generate one capacitor between two nets or target endpoints."""
+    raw_pins = spec.get("pins") or spec.get("endpoints") or []
+    if not isinstance(raw_pins, list) or len(raw_pins) < 2:
+        raise ValueError("capacitor_between requires two pins/endpoints")
+    nets = spec.get("nets") if isinstance(spec.get("nets"), list) else []
+    first_endpoint = _endpoint_item(raw_pins[0])
+    second_endpoint = _endpoint_item(raw_pins[1])
+    first_net = str(nets[0] if len(nets) > 0 else spec.get("net_1") or _net_from_endpoint(first_endpoint, raw_pins[0]))
+    second_net = str(nets[1] if len(nets) > 1 else spec.get("net_2") or _net_from_endpoint(second_endpoint, raw_pins[1]))
+    if not first_net or not second_net:
+        raise ValueError("capacitor_between could not infer both nets")
+
+    explicit_ref = spec.get("ref")
+    ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("C")
+    part, endpoints = _two_pin_part(
+        ref_allocator,
+        prefix="C",
+        lib_id="Device:C",
+        value=str(spec.get("value") or spec.get("capacitance") or "100n"),
+        footprint=str(spec.get("footprint") or "Capacitor_SMD:C_0402_1005Metric"),
+        net_1=first_net,
+        net_2=second_net,
+        block=target or "default",
+        role="capacitor_between",
+        source="support_circuit:capacitor_between",
+        ref=ref,
+        properties={
+            "KICAD_MCP_ROLE": "capacitor_between",
+            "KICAD_MCP_TARGET": target,
+            "KICAD_MCP_NETS": f"{first_net},{second_net}",
+        },
+    )
+    for endpoint, net in ((first_endpoint, first_net), (second_endpoint, second_net)):
+        if endpoint:
+            endpoints.append(CircuitEndpoint(
+                ref=str(endpoint["ref"]),
+                pin=str(endpoint["pin"]),
+                net=net,
+                required=True,
+                source="support_circuit:capacitor_between:target",
+            ))
+    return [part], endpoints
+
+
+def _normalize_crystal_load_caps(
+    spec: dict[str, Any],
+    target: str,
+    ref_allocator: GeneratedRefAllocator,
+) -> tuple[list[CircuitPart], list[CircuitEndpoint]]:
+    """Generate two crystal load capacitors from oscillator pins/nets to ground."""
+    pins = spec.get("pins", [])
+    if (not isinstance(pins, list) or len(pins) < 2) and spec.get("xin") and spec.get("xout"):
+        pins = [spec.get("xin"), spec.get("xout")]
+    if not isinstance(pins, list) or len(pins) < 2:
+        raise ValueError("crystal_load_caps requires pins or xin/xout")
+    nets = spec.get("nets") if isinstance(spec.get("nets"), list) else []
+    ground = str(spec.get("ground") or "GND")
+    parts: list[CircuitPart] = []
+    endpoints: list[CircuitEndpoint] = []
+    for index, pin_item in enumerate(pins[:2]):
+        endpoint = _endpoint_item(pin_item)
+        pin_target = target
+        pin_name = pin_item
+        if endpoint:
+            pin_target = str(endpoint["ref"])
+            pin_name = endpoint["pin"]
+        net = str(nets[index] if len(nets) > index else _net_from_endpoint(endpoint, pin_name))
+        if not net:
+            raise ValueError("crystal_load_caps could not infer capacitor net")
+        ref = ref_allocator.next("C")
+        part, cap_endpoints = _two_pin_part(
+            ref_allocator,
+            prefix="C",
+            lib_id="Device:C",
+            value=str(spec.get("value") or spec.get("capacitance") or "18pF"),
+            footprint=str(spec.get("footprint") or "Capacitor_SMD:C_0402_1005Metric"),
+            net_1=net,
+            net_2=ground,
+            block=target or "mcu",
+            role="load_capacitor",
+            source="support_circuit:crystal_load_caps",
+            ref=ref,
+            properties={
+                "KICAD_MCP_ROLE": "load_capacitor",
+                "KICAD_MCP_TARGET": target,
+                "KICAD_MCP_NETS": f"{net},{ground}",
+            },
+        )
+        parts.append(part)
+        endpoints.extend(cap_endpoints)
+        if pin_target and pin_name:
+            endpoints.append(CircuitEndpoint(
+                ref=str(pin_target),
+                pin=str(pin_name),
+                net=net,
+                required=True,
+                source="support_circuit:crystal_load_caps:target",
+            ))
     return parts, endpoints
 
 
@@ -466,7 +1019,11 @@ def _normalize_crystal(
     explicit_ref = spec.get("ref")
     crystal_ref = ref_allocator.claim(str(explicit_ref)) if explicit_ref else ref_allocator.next("Y")
     crystal_value = spec.get("value", "8MHz")
-    pins = spec.get("pins", ["PF0", "PF1"])
+    pins = spec.get("pins")
+    if (not isinstance(pins, list) or len(pins) < 2) and spec.get("xin") and spec.get("xout"):
+        pins = [spec.get("xin"), spec.get("xout")]
+    if not isinstance(pins, list) or len(pins) < 2:
+        pins = ["PF0", "PF1"]
     ground = spec.get("ground", "GND")
 
     # Try Device:Crystal_GND24 first, fall back to Device:Crystal
@@ -1016,23 +1573,28 @@ def _normalize_no_connect_rule(
     rule: dict[str, Any],
     parts_by_ref: dict[str, CircuitPart],
     connected_keys: set[tuple[str, str]],
+    excluded_keys: set[tuple[str, str]],
     path: str,
 ) -> tuple[list[tuple[str, str]], dict[str, Any]]:
     if not isinstance(rule, dict):
         raise ValueError(f"{path} must be an object")
-    if rule.get("action", "mark_no_connect") != "mark_no_connect":
-        raise ValueError(f"{path} action must be 'mark_no_connect'")
+    action = str(rule.get("action", "mark_no_connect")).lower()
+    if action != "mark_no_connect":
+        raise ValueError(f"{path} action must be 'mark_no_connect' or 'exclude'")
 
     ref = str(rule.get("ref") or "")
     markers: list[tuple[str, str]] = []
     summary: dict[str, Any] = {
         "path": path,
+        "action": "mark_no_connect",
         "ref": ref,
         "selector": rule.get("match"),
         "requested_count": 0,
         "matched_count": 0,
         "emitted_count": 0,
+        "excluded_count": 0,
         "skipped_connected": [],
+        "skipped_excluded": [],
         "skipped_hidden": [],
         "matched_zero_pins": [],
         "unmatched": False,
@@ -1062,7 +1624,7 @@ def _normalize_no_connect_rule(
             candidate_pins.append((_pin_identifier(part, pin_info), pin_info))
 
     except_pins = {str(item) for item in rule.get("except", [])}
-    include_hidden = bool(rule.get("include_hidden", False))
+    include_hidden = _include_hidden_no_connect_pins(rule)
     summary["requested_count"] = len(candidate_pins)
     summary["matched_count"] = len(candidate_pins)
 
@@ -1088,6 +1650,9 @@ def _normalize_no_connect_rule(
         if marker_key in connected_keys:
             summary["skipped_connected"].append({"ref": ref, "pin": pin})
             continue
+        if marker_key in excluded_keys:
+            summary["skipped_excluded"].append({"ref": ref, "pin": pin})
+            continue
         marker = (ref, pin)
         if marker in seen:
             continue
@@ -1096,6 +1661,89 @@ def _normalize_no_connect_rule(
 
     summary["emitted_count"] = len(markers)
     return markers, summary
+
+
+def _normalize_no_connect_exclusion_rule(
+    rule: dict[str, Any],
+    parts_by_ref: dict[str, CircuitPart],
+    path: str,
+) -> tuple[set[tuple[str, str]], dict[str, Any]]:
+    if not isinstance(rule, dict):
+        raise ValueError(f"{path} must be an object")
+    ref = str(rule.get("ref") or "")
+    summary: dict[str, Any] = {
+        "path": path,
+        "action": "exclude",
+        "ref": ref,
+        "selector": rule.get("match"),
+        "requested_count": 0,
+        "matched_count": 0,
+        "emitted_count": 0,
+        "excluded_count": 0,
+        "excluded": [],
+        "skipped_connected": [],
+        "skipped_excluded": [],
+        "skipped_hidden": [],
+        "matched_zero_pins": [],
+        "unmatched": False,
+        "warnings": [],
+    }
+    if not ref:
+        raise ValueError(f"{path} missing ref")
+
+    candidate_pins: list[tuple[str, dict[str, Any] | None]] = [
+        (pin, None) for pin in _rule_pin_list(rule)
+    ]
+    match_spec = rule.get("match")
+    if match_spec:
+        part = parts_by_ref.get(ref)
+        if part is None:
+            raise ValueError(f"{path} ref not found: {ref}")
+        matched = _select_part_pins(part, match_spec)
+        if not matched:
+            summary["unmatched"] = True
+            summary["matched_zero_pins"].append(
+                {"path": path, "ref": ref, "selector": match_spec}
+            )
+            summary["warnings"].append("selector matched zero pins")
+        for pin_info in matched:
+            candidate_pins.append((_pin_identifier(part, pin_info), pin_info))
+
+    except_pins = {str(item) for item in rule.get("except", [])}
+    include_hidden = _include_hidden_no_connect_pins(rule)
+    summary["requested_count"] = len(candidate_pins)
+    summary["matched_count"] = len(candidate_pins)
+    excluded: set[tuple[str, str]] = set()
+    for pin, pin_info in candidate_pins:
+        if pin in except_pins:
+            continue
+        if pin_info is not None and (
+            str(pin_info.get("name") or "") in except_pins
+            or str(pin_info.get("number") or "") in except_pins
+        ):
+            continue
+        if pin_info is not None and _pin_is_hidden(pin_info) and not include_hidden:
+            summary["skipped_hidden"].append(
+                {
+                    "pin": pin,
+                    "name": str(pin_info.get("name") or ""),
+                    "number": str(pin_info.get("number") or ""),
+                }
+            )
+            continue
+        key = _resolved_endpoint_key(parts_by_ref, ref, pin)
+        excluded.add(key)
+        summary["excluded"].append({"ref": ref, "pin": pin})
+    summary["excluded_count"] = len(excluded)
+    return excluded, summary
+
+
+def _include_hidden_no_connect_pins(rule: dict[str, Any]) -> bool:
+    if "include_hidden" in rule:
+        return bool(rule.get("include_hidden"))
+    if "skip_hidden" in rule:
+        return not bool(rule.get("skip_hidden"))
+    return False
 
 
 def _rule_pin_list(rule: dict[str, Any]) -> list[str]:
@@ -1119,7 +1767,9 @@ def _merge_no_connect_summary(target: dict[str, Any], rule_summary: dict[str, An
     target["requested_count"] += int(rule_summary.get("requested_count", 0))
     target["matched_count"] += int(rule_summary.get("matched_count", 0))
     target["emitted_count"] += int(rule_summary.get("emitted_count", 0))
+    target["excluded_count"] += int(rule_summary.get("excluded_count", 0))
     target["skipped_connected_count"] += len(rule_summary.get("skipped_connected", []))
+    target["skipped_excluded_count"] += len(rule_summary.get("skipped_excluded", []))
     target["skipped_hidden_count"] += len(rule_summary.get("skipped_hidden", []))
     target["matched_zero_pins_count"] += len(rule_summary.get("matched_zero_pins", []))
     target["matched_zero_pins"].extend(rule_summary.get("matched_zero_pins", []))
@@ -1147,8 +1797,10 @@ def _validate_endpoint_conflicts(
         if existing and existing.net != endpoint.net:
             raise ValueError(
                 "same ref/pin assigned to multiple nets: "
-                f"{endpoint.ref}.{endpoint.pin} is on both "
-                f"{existing.net} and {endpoint.net}"
+                f"{endpoint.ref}.{endpoint.pin} is currently on net "
+                f"{existing.net} from {existing.source or 'unknown source'}; "
+                f"attempted assignment to {endpoint.net} from "
+                f"{endpoint.source or 'unknown source'}"
             )
         assignments[key] = endpoint
 
@@ -1324,6 +1976,70 @@ def _normalize_object_list(raw: Any, path: str) -> list[dict[str, Any]]:
     return result
 
 
+def _normalize_interface_specs(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, list):
+        entries = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"interfaces[{index}] must be an object")
+            entries.append(dict(item))
+        return entries
+    if not isinstance(raw, dict):
+        raise ValueError("interfaces must be a list or grouped object")
+
+    entries: list[dict[str, Any]] = []
+    for group, group_value in raw.items():
+        if group_value in (None, ""):
+            continue
+        if isinstance(group_value, list):
+            if _looks_like_connection_list(group_value):
+                entries.append({"type": group, "connections": [dict(item) for item in group_value]})
+                continue
+            items = group_value
+        else:
+            items = [group_value]
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError(f"interfaces.{group}[{index}] must be an object")
+            normalized = dict(item)
+            normalized.setdefault("type", group)
+            entries.append(normalized)
+    return entries
+
+
+def _looks_like_connection_list(items: list[Any]) -> bool:
+    if not items:
+        return False
+    shorthand_keys = {
+        "name",
+        "controller",
+        "device",
+        "devices",
+        "target",
+        "signals",
+        "pullups",
+        "header",
+        "scl",
+        "sda",
+        "tx",
+        "rx",
+        "swdio",
+        "swclk",
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        if shorthand_keys.intersection(item):
+            return False
+        if "net" not in item:
+            return False
+        if not any(key in item for key in ("endpoints", "pins", "ref", "pin")):
+            return False
+    return True
+
+
 def _normalize_grouped_entries(raw: Any, path: str, *, type_key: str) -> list[dict[str, Any]]:
     if raw in (None, ""):
         return []
@@ -1426,6 +2142,10 @@ def _canonical_support_type(raw_type: str) -> str:
     aliases = {
         "led_indicator": "led",
         "ferrite_filter": "ferrite",
+        "capacitor_to_ground": "capacitor_to_gnd",
+        "cap_to_gnd": "capacitor_to_gnd",
+        "cap_between": "capacitor_between",
+        "crystal_load_capacitors": "crystal_load_caps",
     }
     return aliases.get(raw_type, raw_type)
 

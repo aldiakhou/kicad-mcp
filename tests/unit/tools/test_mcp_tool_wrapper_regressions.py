@@ -57,6 +57,45 @@ async def test_create_kicad_project_accepts_paper_size_alias(
 
 
 @pytest.mark.asyncio
+async def test_create_kicad_project_accepts_project_directory_alias(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    def fake_create_project(
+        project_dir: str,
+        project_name: str,
+        create_schematic: bool,
+        create_pcb: bool,
+        paper: str,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "project_dir": project_dir,
+                "project_name": project_name,
+                "create_schematic": create_schematic,
+                "create_pcb": create_pcb,
+                "paper": paper,
+            }
+        )
+        return {"success": True, "project_path": "demo.kicad_pro"}
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.project_creation_tools.ct._create_kicad_project",
+        fake_create_project,
+    )
+    tools = await _tools_from(register_project_creation_tools)
+
+    result = tools["create_kicad_project"].fn(
+        project_directory="C:/tmp",
+        project_name="demo",
+    )
+
+    assert result["success"] is True
+    assert captured["project_dir"] == "C:/tmp"
+
+
+@pytest.mark.asyncio
 async def test_extract_project_netlist_uses_undecorated_helper(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

@@ -21,9 +21,10 @@ def register_project_creation_tools(mcp: FastMCP) -> None:
         directory: str | None = None,
         path: str | None = None,
         name: str | None = None,
+        project_directory: str | None = None,
     ) -> dict[str, Any]:
         """Create a new KiCad project and optional schematic/PCB files."""
-        resolved_dir = project_dir or directory or path
+        resolved_dir = project_dir or project_directory or directory or path
         resolved_name = project_name or name or ""
         resolved_paper = paper_size or paper
         if not resolved_dir:

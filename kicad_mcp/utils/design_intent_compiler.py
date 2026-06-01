@@ -61,6 +61,9 @@ DESIGN_INTENT_TOP_LEVEL_SCHEMA = {
             "decoupling": [],
             "pullup": [],
             "pulldown": [],
+            "capacitor_to_gnd": [],
+            "capacitor_between": [],
+            "crystal_load_caps": [],
             "crystal": [],
             "reset_button": [],
             "led_indicator": [],
@@ -278,6 +281,18 @@ DESIGN_INTENT_SCHEMA = {
         "required_fields": ["type", "controller", "devices"],
         "optional_fields": ["name", "sck_net", "miso_net", "mosi_net", "cs_net"],
     },
+    "interfaces.uart": {
+        "example": [
+            {
+                "type": "uart",
+                "name": "DEBUG_UART",
+                "controller": {"ref": "U1", "tx": "PA9", "rx": "PA10"},
+                "device": {"ref": "J2", "rx": "2", "tx": "3"},
+            }
+        ],
+        "required_fields": ["type", "controller", "device"],
+        "optional_fields": ["name", "tx_net", "rx_net"],
+    },
     "interfaces.swd": {
         "example": [
             {
@@ -314,6 +329,33 @@ DESIGN_INTENT_SCHEMA = {
         "optional_fields": ["target", "ground", "value", "footprint"],
         "generated_parts_summary": "One resistor.",
         "generated_nets_summary": "Resistor connects net to ground.",
+    },
+    "support_circuits.capacitor_to_gnd": {
+        "example": [
+            {"type": "capacitor_to_gnd", "target": "U1", "pin": "VCAP1", "value": "4.7uF", "ground": "GND"}
+        ],
+        "required_fields": ["type", "net or target+pin"],
+        "optional_fields": ["target", "pin", "net", "ground", "value", "capacitance", "ref", "footprint"],
+        "generated_parts_summary": "One capacitor.",
+        "generated_nets_summary": "The selected target pin/net connects to capacitor pin 1; capacitor pin 2 connects to ground.",
+    },
+    "support_circuits.capacitor_between": {
+        "example": [
+            {"type": "capacitor_between", "pins": [["U4", "SETP"], ["U4", "SETC"]], "value": "0.22uF"}
+        ],
+        "required_fields": ["type", "two pins/endpoints or two nets"],
+        "optional_fields": ["target", "pins", "endpoints", "nets", "net_1", "net_2", "value", "capacitance", "ref", "footprint"],
+        "generated_parts_summary": "One capacitor.",
+        "generated_nets_summary": "The capacitor connects the two selected nets/endpoints.",
+    },
+    "support_circuits.crystal_load_caps": {
+        "example": [
+            {"type": "crystal_load_caps", "target": "U1", "xin": "OSC_IN", "xout": "OSC_OUT", "value": "22pF", "ground": "GND"}
+        ],
+        "required_fields": ["type", "pins or xin+xout"],
+        "optional_fields": ["target", "pins", "xin", "xout", "nets", "ground", "value", "capacitance", "footprint"],
+        "generated_parts_summary": "Two capacitors.",
+        "generated_nets_summary": "Each oscillator pin/net gets one load capacitor to ground.",
     },
     "support_circuits.crystal": {
         "example": [{"type": "crystal", "target": "U1", "pins": ["OSC_IN", "OSC_OUT"], "value": "8MHz"}],
@@ -368,8 +410,11 @@ DESIGN_INTENT_SCHEMA = {
     },
     "no_connect_rules": {
         "example": [{"ref": "U1", "match": {"name_regex": "PA[0-9]+|PB[0-9]+"}, "except": ["PB6", "PB7", "PA13", "PA14"], "action": "mark_no_connect"}],
+        "exclude_action_example": [{"ref": "U1", "match": {"names": ["PA13", "PA14"]}, "action": "exclude"}],
         "required_fields": ["ref", "match"],
-        "optional_fields": ["except", "include_hidden", "allow_hidden_no_connect", "action"],
+        "optional_fields": ["except", "include_hidden", "skip_hidden", "allow_hidden_no_connect", "action"],
+        "action_values": ["mark_no_connect", "exclude"],
+        "notes": "Use match.exclude or top-level except inside one rule, or action=exclude to keep resolved pins out of all no-connect marker rules.",
     },
 }
 

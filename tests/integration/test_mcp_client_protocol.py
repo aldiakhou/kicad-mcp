@@ -132,6 +132,96 @@ async def test_stdio_mcp_client_can_connect_to_server_entrypoint():
     )
 
 
+@pytest.mark.asyncio
+async def test_mcp_preview_grouped_interfaces_and_project_directory_alias(tmp_path: Path):
+    server = create_server()
+
+    async with Client(server, init_timeout=30, timeout=60) as client:
+        created = await client.call_tool(
+            "create_kicad_project",
+            {
+                "project_directory": str(tmp_path),
+                "project_name": "interface_preview",
+                "create_schematic": True,
+                "create_pcb": False,
+            },
+        )
+        assert created.is_error is False
+        assert created.data["success"] is True
+
+        preview = await client.call_tool(
+            "schematic_preview_design_intent",
+            {
+                "project_path": created.data["project_path"],
+                "intent": {
+                    "parts": [
+                        {
+                            "ref": "U1",
+                            "value": "MCU",
+                            "pins": [
+                                {"number": "1", "name": "PB6", "pintype": "bidirectional"},
+                                {"number": "2", "name": "PB7", "pintype": "bidirectional"},
+                                {"number": "3", "name": "PA9", "pintype": "output"},
+                                {"number": "4", "name": "PA10", "pintype": "input"},
+                                {"number": "5", "name": "PA13", "pintype": "bidirectional"},
+                                {"number": "6", "name": "PA14", "pintype": "bidirectional"},
+                                {"number": "7", "name": "NRST", "pintype": "input"},
+                            ],
+                        },
+                        {
+                            "ref": "U2",
+                            "value": "SENSOR",
+                            "pins": [
+                                {"number": "1", "name": "SCL", "pintype": "input"},
+                                {"number": "2", "name": "SDA", "pintype": "bidirectional"},
+                            ],
+                        },
+                        {
+                            "ref": "J2",
+                            "value": "UART",
+                            "pins": [
+                                {"number": "2", "name": "RX", "pintype": "input"},
+                                {"number": "3", "name": "TX", "pintype": "output"},
+                            ],
+                        },
+                    ],
+                    "interfaces": {
+                        "i2c": [
+                            {
+                                "name": "SENSOR_I2C",
+                                "controller": {"ref": "U1", "scl": "PB6", "sda": "PB7"},
+                                "devices": [{"ref": "U2", "scl": "SCL", "sda": "SDA"}],
+                                "pullups": {"rail": "+3V3"},
+                            }
+                        ],
+                        "uart": [
+                            {
+                                "name": "DEBUG_UART",
+                                "controller": {"ref": "U1", "tx": "PA9", "rx": "PA10"},
+                                "device": {"ref": "J2", "rx": "2", "tx": "3"},
+                            }
+                        ],
+                        "swd": [
+                            {
+                                "target": "U1",
+                                "swdio": "PA13",
+                                "swclk": "PA14",
+                                "reset": "NRST",
+                                "rail": "+3V3",
+                                "ground": "GND",
+                            }
+                        ],
+                    },
+                },
+            },
+        )
+
+    assert preview.is_error is False
+    assert preview.data["success"] is True
+    assert preview.data["summary"]["net_count"] >= 7
+    assert preview.data["summary"]["generated_part_count"] == 6
+
+
 @pytest.mark.skipif(not _kicad_cli_available(), reason="KiCad CLI not available")
 @pytest.mark.asyncio
 async def test_mcp_validate_schematic_reports_real_erc_violations():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from kicad_mcp.pcb_engine.autorouter import autoroute_pcb
+from kicad_mcp.pcb_engine.intent import normalize_pcb_layout_intent
 from kicad_mcp.tools import creation_tools as ct
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb
 from kicad_mcp.utils.kicad_s_expr import SExprAtom, SExprList
@@ -96,3 +97,9 @@ def test_quality_report_treats_routed_copper_as_connected():
     assert after["ratsnest_connection_count"] == 0
     assert after["routing_complete"] is True
     assert after["routing_status"] == "routed_needs_drc"
+
+
+def test_pcb_intent_max_connections_zero_means_no_cap():
+    normalized = normalize_pcb_layout_intent({"routing": {"mode": "auto", "max_connections": 0}})
+
+    assert normalized["routing"]["max_connections"] is None

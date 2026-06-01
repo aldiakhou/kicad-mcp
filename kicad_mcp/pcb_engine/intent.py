@@ -63,7 +63,7 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
             "track_width_mm": "Track width for auto routing.",
             "clearance_mm": "Minimum routing keepout clearance around footprints and other-net copper.",
             "grid_mm": "Routing grid pitch. Smaller values can route tighter designs but take longer.",
-            "max_connections": "Optional cap on routed ratsnest connections in one job.",
+            "max_connections": "Optional cap on routed ratsnest connections in one job. Use 0 or omit for no cap.",
         },
         "example": {
             "mode": "auto",
@@ -173,8 +173,10 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
             max_connections = int(max_connections)
         except (TypeError, ValueError) as exc:
             raise ValueError("routing.max_connections must be an integer") from exc
-        if max_connections <= 0:
-            raise ValueError("routing.max_connections must be positive")
+        if max_connections < 0:
+            raise ValueError("routing.max_connections must be non-negative")
+        if max_connections == 0:
+            max_connections = None
 
     placement_rules = _merge_placement_rules(
         placement.get("rules"),

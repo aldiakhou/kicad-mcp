@@ -2,6 +2,7 @@
 
 import pytest
 
+import kicad_mcp.schematic_engine.normalize as normalize
 from kicad_mcp.schematic_engine.normalize import normalize_design_intent
 
 
@@ -186,6 +187,105 @@ class TestNormalizeDesignIntent:
         assert len([ep for ep in canonical.endpoints if ep.net == "SENSOR_I2C_SCL"]) == 2
         assert len([ep for ep in canonical.endpoints if ep.net == "SENSOR_I2C_SDA"]) == 2
 
+    def test_grouped_interfaces_expand_documented_shorthand(self):
+        """Grouped public interface schema must materialize real endpoints."""
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "MCU",
+                    "pins": [
+                        {"number": "1", "name": "PB6", "pintype": "bidirectional"},
+                        {"number": "2", "name": "PB7", "pintype": "bidirectional"},
+                        {"number": "3", "name": "PA9", "pintype": "output"},
+                        {"number": "4", "name": "PA10", "pintype": "input"},
+                        {"number": "5", "name": "PA13", "pintype": "bidirectional"},
+                        {"number": "6", "name": "PA14", "pintype": "bidirectional"},
+                        {"number": "7", "name": "NRST", "pintype": "input"},
+                    ],
+                },
+                {
+                    "ref": "U2",
+                    "value": "SENSOR",
+                    "pins": [
+                        {"number": "1", "name": "SCL", "pintype": "input"},
+                        {"number": "2", "name": "SDA", "pintype": "bidirectional"},
+                    ],
+                },
+                {
+                    "ref": "J2",
+                    "value": "UART",
+                    "pins": [
+                        {"number": "2", "name": "RX", "pintype": "input"},
+                        {"number": "3", "name": "TX", "pintype": "output"},
+                    ],
+                },
+            ],
+            "interfaces": {
+                "i2c": [
+                    {
+                        "name": "SENSOR_I2C",
+                        "controller": {"ref": "U1", "scl": "PB6", "sda": "PB7"},
+                        "devices": [{"ref": "U2", "scl": "SCL", "sda": "SDA"}],
+                        "pullups": {"rail": "+3V3", "value": "4.7k"},
+                    }
+                ],
+                "uart": [
+                    {
+                        "name": "DEBUG_UART",
+                        "controller": {"ref": "U1", "tx": "PA9", "rx": "PA10"},
+                        "device": {"ref": "J2", "rx": "2", "tx": "3"},
+                    }
+                ],
+                "swd": [
+                    {
+                        "target": "U1",
+                        "swdio": "PA13",
+                        "swclk": "PA14",
+                        "reset": "NRST",
+                        "rail": "+3V3",
+                        "ground": "GND",
+                        "header": {"ref": "J1"},
+                    }
+                ],
+            },
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        endpoints = {(ep.net, ep.ref, ep.pin) for ep in canonical.endpoints}
+
+        assert ("SENSOR_I2C_SCL", "U1", "PB6") in endpoints
+        assert ("SENSOR_I2C_SCL", "U2", "SCL") in endpoints
+        assert ("SENSOR_I2C_SDA", "U1", "PB7") in endpoints
+        assert ("DEBUG_UART_TX", "U1", "PA9") in endpoints
+        assert ("DEBUG_UART_TX", "J2", "2") in endpoints
+        assert ("DEBUG_UART_RX", "U1", "PA10") in endpoints
+        assert ("SWDIO", "U1", "PA13") in endpoints
+        assert ("SWDIO", "J1", "2") in endpoints
+        assert ("RESET_N", "U1", "NRST") in endpoints
+        assert ("RESET_N", "J1", "5") in endpoints
+        assert canonical.part_by_ref("J1").role == "swd_header"
+        assert len([part for part in canonical.parts if part.role == "i2c_pullup"]) == 2
+
+    def test_grouped_interface_low_level_connections_still_work(self):
+        intent = {
+            "parts": [{"ref": "U1", "lib_id": "Device:R", "value": "10k"}],
+            "interfaces": {
+                "gpio": [
+                    {
+                        "net": "GPIO1",
+                        "pins": [["U1", "1"]],
+                    }
+                ]
+            },
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert {(ep.ref, ep.pin, ep.net) for ep in canonical.endpoints} == {
+            ("U1", "1", "GPIO1")
+        }
+
     def test_no_connect_rules(self):
         """No-connect rules are captured."""
         intent = {
@@ -255,6 +355,54 @@ class TestNormalizeDesignIntent:
         assert canonical.no_connect_summary["matched_zero_pins"][0]["ref"] == "U1"
         assert canonical.no_connect_summary["unmatched_rule_count"] == 1
 
+    def test_no_connect_exclude_action_skips_matching_markers_regardless_order(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "CUSTOM_MCU",
+                    "pins": [
+                        {"number": "1", "name": "PB6", "pintype": "bidirectional"},
+                        {"number": "2", "name": "PA5", "pintype": "bidirectional"},
+                    ],
+                }
+            ],
+            "no_connect_rules": [
+                {"ref": "U1", "match": {"name_regex": "^P[A-B][0-9]+$"}},
+                {"ref": "U1", "match": {"name": "PB6"}, "action": "exclude"},
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert canonical.no_connects == [("U1", "PA5")]
+        assert canonical.no_connect_summary["excluded_count"] == 1
+        assert canonical.no_connect_summary["skipped_excluded_count"] == 1
+
+    def test_no_connect_skip_hidden_false_includes_hidden_matches(self, monkeypatch):
+        def fake_part_pins(_part):
+            return [
+                {"number": "1", "name": "RESV", "pintype": "no_connect", "hidden": True},
+                {"number": "2", "name": "GPIO", "pintype": "bidirectional", "hidden": False},
+            ]
+
+        monkeypatch.setattr(normalize, "_part_pins", fake_part_pins)
+        intent = {
+            "parts": [{"ref": "U1", "lib_id": "Test:Hidden", "value": "Hidden"}],
+            "no_connect_rules": [
+                {
+                    "ref": "U1",
+                    "match": {"name_regex": "RESV|GPIO"},
+                    "skip_hidden": False,
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert canonical.no_connects == [("U1", "RESV"), ("U1", "GPIO")]
+        assert canonical.no_connect_summary["skipped_hidden_count"] == 0
+
     def test_usb_d_plus_and_d_minus_pin_keys_do_not_collapse(self):
         intent = {
             "parts": [
@@ -296,8 +444,9 @@ class TestNormalizeDesignIntent:
             ],
         }
 
-        with pytest.raises(ValueError, match="same ref/pin assigned to multiple nets"):
+        with pytest.raises(ValueError, match="currently on net") as excinfo:
             normalize_design_intent("/tmp/test.kicad_pro", intent)
+        assert "attempted assignment to GND" in str(excinfo.value)
 
     def test_decoupling_support_circuit(self):
         """Decoupling support circuits generate parts and endpoints."""
@@ -319,6 +468,63 @@ class TestNormalizeDesignIntent:
         decap_parts = [p for p in canonical.parts if p.role == "decoupling"]
         assert len(decap_parts) == 2
         assert decap_parts[0].properties["KICAD_MCP_TARGET"] == "U2"
+
+    def test_capacitor_support_circuit_helpers(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "MCU",
+                    "pins": [
+                        {"number": "1", "name": "VCAP1", "pintype": "power_in"},
+                        {"number": "2", "name": "OSC_IN", "pintype": "input"},
+                        {"number": "3", "name": "OSC_OUT", "pintype": "output"},
+                    ],
+                },
+                {
+                    "ref": "U4",
+                    "value": "MAG",
+                    "pins": [
+                        {"number": "1", "name": "SETP", "pintype": "passive"},
+                        {"number": "2", "name": "SETC", "pintype": "passive"},
+                    ],
+                },
+            ],
+            "support_circuits": [
+                {
+                    "type": "capacitor_to_gnd",
+                    "target": "U1",
+                    "pin": "VCAP1",
+                    "value": "4.7uF",
+                    "ground": "GND",
+                },
+                {
+                    "type": "capacitor_between",
+                    "pins": [["U4", "SETP"], ["U4", "SETC"]],
+                    "value": "0.22uF",
+                },
+                {
+                    "type": "crystal_load_caps",
+                    "target": "U1",
+                    "xin": "OSC_IN",
+                    "xout": "OSC_OUT",
+                    "value": "22pF",
+                    "ground": "GND",
+                },
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+        endpoints = {(ep.net, ep.ref, ep.pin) for ep in canonical.endpoints}
+
+        assert ("VCAP1", "U1", "VCAP1") in endpoints
+        assert ("VCAP1", "C1", "1") in endpoints
+        assert ("GND", "C1", "2") in endpoints
+        assert ("U4_SETP", "U4", "SETP") in endpoints
+        assert ("U4_SETC", "U4", "SETC") in endpoints
+        assert ("OSC_IN", "U1", "OSC_IN") in endpoints
+        assert ("OSC_OUT", "U1", "OSC_OUT") in endpoints
+        assert len([part for part in canonical.parts if part.role == "load_capacitor"]) == 2
 
     def test_grouped_support_circuits_do_not_crash(self):
         """Grouped support_circuits object is normalized before expansion."""
