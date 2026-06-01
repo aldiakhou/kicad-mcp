@@ -88,6 +88,8 @@ def normalize_design_intent(
         "emitted_count": 0,
         "skipped_connected_count": 0,
         "skipped_hidden_count": 0,
+        "matched_zero_pins_count": 0,
+        "matched_zero_pins": [],
         "unmatched_rule_count": 0,
         "rules": [],
         "warnings": [],
@@ -1032,6 +1034,7 @@ def _normalize_no_connect_rule(
         "emitted_count": 0,
         "skipped_connected": [],
         "skipped_hidden": [],
+        "matched_zero_pins": [],
         "unmatched": False,
         "warnings": [],
     }
@@ -1051,6 +1054,9 @@ def _normalize_no_connect_rule(
         matched = _select_part_pins(part, match_spec)
         if not matched:
             summary["unmatched"] = True
+            summary["matched_zero_pins"].append(
+                {"path": path, "ref": ref, "selector": match_spec}
+            )
             summary["warnings"].append("selector matched zero pins")
         for pin_info in matched:
             candidate_pins.append((_pin_identifier(part, pin_info), pin_info))
@@ -1115,6 +1121,8 @@ def _merge_no_connect_summary(target: dict[str, Any], rule_summary: dict[str, An
     target["emitted_count"] += int(rule_summary.get("emitted_count", 0))
     target["skipped_connected_count"] += len(rule_summary.get("skipped_connected", []))
     target["skipped_hidden_count"] += len(rule_summary.get("skipped_hidden", []))
+    target["matched_zero_pins_count"] += len(rule_summary.get("matched_zero_pins", []))
+    target["matched_zero_pins"].extend(rule_summary.get("matched_zero_pins", []))
     if rule_summary.get("unmatched"):
         target["unmatched_rule_count"] += 1
     for warning in rule_summary.get("warnings", []):
@@ -1300,7 +1308,7 @@ def _pin_lookup_key(value: str) -> str:
         .replace("{", "")
         .replace("~", "")
     )
-    return "".join(ch for ch in cleaned.lower() if ch.isalnum())
+    return "".join(cleaned.lower().split())
 
 
 def _normalize_object_list(raw: Any, path: str) -> list[dict[str, Any]]:

@@ -229,6 +229,57 @@ class TestNormalizeDesignIntent:
         assert canonical.no_connect_summary["emitted_count"] == 1
         assert canonical.no_connect_summary["skipped_connected_count"] == 1
 
+    def test_no_connect_rules_report_zero_pin_matches(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "CUSTOM_MCU",
+                    "pins": [
+                        {"number": "1", "name": "PB6", "pintype": "bidirectional"},
+                    ],
+                }
+            ],
+            "no_connect_rules": [
+                {
+                    "ref": "U1",
+                    "match": {"name_regex": "^PC[0-9]+$"},
+                    "action": "mark_no_connect",
+                }
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert canonical.no_connect_summary["matched_zero_pins_count"] == 1
+        assert canonical.no_connect_summary["matched_zero_pins"][0]["ref"] == "U1"
+        assert canonical.no_connect_summary["unmatched_rule_count"] == 1
+
+    def test_usb_d_plus_and_d_minus_pin_keys_do_not_collapse(self):
+        intent = {
+            "parts": [
+                {
+                    "ref": "J1",
+                    "value": "USB_C",
+                    "pins": [
+                        {"number": "A6", "name": "D+", "pintype": "bidirectional"},
+                        {"number": "A7", "name": "D-", "pintype": "bidirectional"},
+                    ],
+                }
+            ],
+            "bulk_connections": [
+                {"net": "USB_D_P", "pins": [["J1", "D+"]]},
+                {"net": "USB_D_N", "pins": [["J1", "D-"]]},
+            ],
+        }
+
+        canonical = normalize_design_intent("/tmp/test.kicad_pro", intent)
+
+        assert {endpoint.net for endpoint in canonical.endpoints} == {
+            "USB_D_P",
+            "USB_D_N",
+        }
+
     def test_conflicting_pin_alias_assignments_raise(self):
         """The same physical pin cannot be assigned to two different nets."""
         intent = {

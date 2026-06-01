@@ -84,16 +84,68 @@ class TestNetlistComparison:
             "CONN": {NetlistEntry("J2", "Pin_1")},
             "PLUS": {NetlistEntry("BZ1", "+")},
         })
-        actual = NormalizedNetlist(nets={
-            "+3V3": {NetlistEntry("U4", "VOUT_5")},
-            "CONN": {NetlistEntry("J2", "Pin_1_1")},
-            "PLUS": {NetlistEntry("BZ1", "+_1")},
-        })
+        actual = _parse_sexpr_netlist(
+            """
+            (export (version "E")
+              (nets
+                (net (code 1) (name "+3V3")
+                  (node (ref "U4") (pin "5") (pinfunction "VOUT_5"))
+                )
+                (net (code 2) (name "CONN")
+                  (node (ref "J2") (pin "1") (pinfunction "Pin_1_1"))
+                )
+                (net (code 3) (name "PLUS")
+                  (node (ref "BZ1") (pin "1") (pinfunction "+_1"))
+                )
+              )
+            )
+            """
+        )
 
         result = compare_netlists(expected, actual)
 
         assert result.success
         assert result.missing_endpoints == []
+
+    def test_permissive_aliases_require_symbol_context(self):
+        """VOUT, VOUT_5, and 5 are not equivalent without per-ref alias context."""
+        expected = NormalizedNetlist(nets={
+            "+3V3": {NetlistEntry("U4", "VOUT")},
+        })
+        actual = NormalizedNetlist(nets={
+            "+3V3": {NetlistEntry("U4", "VOUT_5")},
+        })
+
+        result = compare_netlists(expected, actual)
+
+        assert not result.success
+        assert result.missing_endpoints == [
+            {"net": "+3V3", "ref": "U4", "pin": "VOUT"}
+        ]
+
+    def test_permissive_aliases_do_not_cross_refs(self):
+        """Alias context is scoped by reference designator."""
+        expected = NormalizedNetlist(nets={
+            "+3V3": {NetlistEntry("U4", "VOUT")},
+        })
+        actual = _parse_sexpr_netlist(
+            """
+            (export (version "E")
+              (nets
+                (net (code 1) (name "+3V3")
+                  (node (ref "U5") (pin "5") (pinfunction "VOUT_5"))
+                )
+              )
+            )
+            """
+        )
+
+        result = compare_netlists(expected, actual)
+
+        assert not result.success
+        assert result.missing_endpoints == [
+            {"net": "+3V3", "ref": "U4", "pin": "VOUT"}
+        ]
 
     def test_mismatched_nets_reported(self):
         """Mismatched nets are reported."""
@@ -164,7 +216,9 @@ class TestParseSexprNetlist:
         )
         '''
         netlist = _parse_sexpr_netlist(content)
-        assert NetlistEntry("U1", "NRST") in netlist.nets["RESET_N"]
+        assert NetlistEntry("U1", "4") in netlist.nets["RESET_N"]
+        assert NetlistEntry("U1", "NRST") not in netlist.nets["RESET_N"]
+        assert "NRST" in netlist.aliases_by_ref_pin["U1"]["4"]
 
     def test_slash_separated_pinfunction_aliases(self):
         """Dual-role KiCad pin functions expose each role as an alias."""
@@ -181,8 +235,10 @@ class TestParseSexprNetlist:
         )
         '''
         netlist = _parse_sexpr_netlist(content)
-        assert NetlistEntry("U2", "SCL") in netlist.nets["I2C_SCL"]
-        assert NetlistEntry("U2", "SDA") in netlist.nets["I2C_SDA"]
+        assert NetlistEntry("U2", "23") in netlist.nets["I2C_SCL"]
+        assert NetlistEntry("U2", "24") in netlist.nets["I2C_SDA"]
+        assert "SCL" in netlist.aliases_by_ref_pin["U2"]["23"]
+        assert "SDA" in netlist.aliases_by_ref_pin["U2"]["24"]
 
     def test_empty_content(self):
         """Empty content produces empty netlist."""
@@ -205,3 +261,42 @@ def test_power_net_sanity_detects_ground_short():
 
     assert result["success"] is False
     assert result["issues"][0]["type"] == "power_ground_short"
+
+
+def test_power_net_sanity_detects_common_rails():
+    from kicad_mcp.schematic_engine.expected_netlist import check_power_net_sanity
+
+    expected = NormalizedNetlist(nets={
+        "+3V3": {NetlistEntry("U1", "1")},
+        "VBUS": {NetlistEntry("J1", "A4")},
+        "GND": {NetlistEntry("J1", "A1")},
+    })
+    actual = NormalizedNetlist(nets={
+        "GND": {
+            NetlistEntry("U1", "1"),
+            NetlistEntry("J1", "A4"),
+            NetlistEntry("J1", "A1"),
+        },
+    })
+
+    result = check_power_net_sanity(expected, actual)
+
+    assert result["success"] is False
+    assert result["issues"][0]["intended_power_nets"] == ["+3V3", "GND", "VBUS"]
+
+
+def test_power_net_sanity_uses_custom_power_rails():
+    from kicad_mcp.schematic_engine.expected_netlist import check_power_net_sanity
+
+    expected = NormalizedNetlist(nets={
+        "SENSOR_BIAS": {NetlistEntry("U1", "1")},
+        "GND": {NetlistEntry("U1", "2")},
+    })
+    actual = NormalizedNetlist(nets={
+        "SENSOR_BIAS": {NetlistEntry("U1", "1"), NetlistEntry("U1", "2")},
+    })
+
+    result = check_power_net_sanity(expected, actual, power_nets={"SENSOR_BIAS"})
+
+    assert result["success"] is False
+    assert result["issues"][0]["intended_power_nets"] == ["GND", "SENSOR_BIAS"]

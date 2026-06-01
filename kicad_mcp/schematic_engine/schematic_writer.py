@@ -338,6 +338,8 @@ class SchematicWriter:
             no_connect_summary: dict[str, Any] = {
                 "requested_count": len(canonical.no_connects),
                 "emitted_count": 0,
+                "skipped_no_coordinates_count": 0,
+                "skipped_no_coordinates": [],
                 "skipped": [],
                 "markers": [],
             }
@@ -383,6 +385,13 @@ class SchematicWriter:
                 no_connect_summary["emitted_count"] += sheet_no_connects.get(
                     "emitted_count",
                     0,
+                )
+                no_connect_summary["skipped_no_coordinates_count"] += sheet_no_connects.get(
+                    "skipped_no_coordinates_count",
+                    0,
+                )
+                no_connect_summary["skipped_no_coordinates"].extend(
+                    sheet_no_connects.get("skipped_no_coordinates", [])
                 )
                 no_connect_summary["skipped"].extend(sheet_no_connects.get("skipped", []))
                 no_connect_summary["markers"].extend(sheet_no_connects.get("markers", []))
@@ -635,7 +644,13 @@ class SchematicWriter:
         resolve the real pin coordinate and place a no_connect marker there.
         Falls back to estimated position if library resolution is unavailable.
         """
-        summary: dict[str, Any] = {"emitted_count": 0, "skipped": [], "markers": []}
+        summary: dict[str, Any] = {
+            "emitted_count": 0,
+            "skipped_no_coordinates_count": 0,
+            "skipped_no_coordinates": [],
+            "skipped": [],
+            "markers": [],
+        }
         try:
             from kiutils.items.common import Position
             from kiutils.items.schitems import NoConnect
@@ -663,8 +678,15 @@ class SchematicWriter:
                 pin_map = _resolve_real_pin_positions(part, placement)
                 pin_entries = pin_map.get(nc_pin, [])
                 if not pin_entries:
+                    skipped = {
+                        "ref": nc_ref,
+                        "pin": nc_pin,
+                        "reason": "pin position not resolved",
+                    }
+                    summary["skipped_no_coordinates_count"] += 1
+                    summary["skipped_no_coordinates"].append(skipped)
                     summary["skipped"].append(
-                        {"ref": nc_ref, "pin": nc_pin, "reason": "pin position not resolved"}
+                        skipped
                     )
                     continue
 

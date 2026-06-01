@@ -9,6 +9,7 @@ Verifies that:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -371,6 +372,25 @@ class TestWriterRuntimeDependencies:
         with pytest.raises(RuntimeError, match="kicad-skip"):
             writer.write(canonical, sheet_plan)
 
+    def test_no_connect_summary_reports_skipped_no_coordinates(self, tmp_path, monkeypatch):
+        canonical, sheet_plan = self._make_simple_circuit()
+        canonical.no_connects = [("R1", "99")]
+        monkeypatch.setattr(
+            "kicad_mcp.schematic_engine.schematic_writer._resolve_real_pin_positions",
+            lambda part, placement: {},
+        )
+
+        writer = SchematicWriter(str(tmp_path), "test_project")
+        result = writer._add_no_connects_kiutils(
+            SimpleNamespace(noConnects=[]),
+            canonical,
+            ["R1"],
+            sheet_plan,
+        )
+
+        assert result["emitted_count"] == 0
+        assert result["skipped_no_coordinates_count"] == 1
+        assert result["skipped_no_coordinates"][0]["ref"] == "R1"
 
 
 

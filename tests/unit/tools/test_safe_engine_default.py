@@ -1,6 +1,7 @@
 """Tests for the simplified single-path schematic engine surface."""
 
 from inspect import signature
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -161,3 +162,80 @@ def test_promote_candidate_schematic_copies_candidate_and_keeps_backup(tmp_path:
     assert result["success"] is True
     assert schematic_path.read_text(encoding="utf-8") == "candidate"
     assert result["backup_paths"]
+
+
+@pytest.mark.asyncio
+async def test_compare_netlists_tool_writes_full_diff_artifact(tmp_path: Path):
+    server = create_server()
+    tools = await server.get_tools()
+
+    expected_path = tmp_path / "expected_netlist.json"
+    actual_path = tmp_path / "actual.net"
+    expected_path.write_text(
+        json.dumps({
+            "nets": {
+                "VBUS": [{"ref": "J1", "pin": "VBUS"}],
+                "GND": [{"ref": "J1", "pin": "A1"}],
+            },
+            "power_nets": ["VBUS", "GND"],
+        }),
+        encoding="utf-8",
+    )
+    actual_path.write_text(
+        """
+        (export (version "E")
+          (nets
+            (net (code 1) (name "VBUS")
+              (node (ref "J1") (pin "A4") (pinfunction "VBUS_A4"))
+            )
+            (net (code 2) (name "GND")
+              (node (ref "J1") (pin "A1") (pinfunction "GND_A1"))
+            )
+          )
+        )
+        """,
+        encoding="utf-8",
+    )
+
+    result = tools["schematic_compare_netlists"].fn(
+        str(expected_path),
+        str(actual_path),
+    )
+
+    assert result["success"] is True
+    assert result["diff_path"].endswith("netlist_compare.diff.json")
+    assert Path(result["diff_path"]).exists()
+    diff = json.loads(Path(result["diff_path"]).read_text(encoding="utf-8"))
+    assert diff["netlist_compare"]["missing_endpoints"] == []
+
+
+@pytest.mark.asyncio
+async def test_export_candidate_tool_promotes_with_backup_and_validation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    server = create_server()
+    tools = await server.get_tools()
+    project_path = tmp_path / "demo.kicad_pro"
+    schematic_path = tmp_path / "demo.kicad_sch"
+    project_path.write_text("{}", encoding="utf-8")
+    schematic_path.write_text("original", encoding="utf-8")
+    candidate_dir = tmp_path / ".kicad_mcp" / "engine_artifacts" / "apply-test" / "failed_schematics"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "demo.kicad_sch").write_text("candidate", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "kicad_mcp.tools.creation_tools._generated_schematic_report",
+        lambda schematic_path, run_erc: {"success": True, "schematic_path": schematic_path},
+    )
+
+    result = tools["schematic_export_candidate_to_project"].fn(
+        str(project_path),
+        job_id="apply-test",
+        run_erc=True,
+    )
+
+    assert result["success"] is True
+    assert result["backup_paths"]
+    assert result["validation"]["success"] is True
+    assert schematic_path.read_text(encoding="utf-8") == "candidate"

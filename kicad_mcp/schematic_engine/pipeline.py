@@ -341,6 +341,7 @@ def apply_design_intent_netlist_first(
                 power_sanity = check_power_net_sanity(
                     compile_result.expected_netlist,
                     actual_netlist,
+                    power_nets=canonical.rails,
                 )
                 result.power_net_sanity = power_sanity
                 if not power_sanity.get("success", True):

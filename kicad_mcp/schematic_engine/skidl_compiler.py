@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _COMPILE_CACHE_MAX = 32
 _COMPILE_CACHE: OrderedDict[str, SkidlCompileResult] = OrderedDict()
+PinAliasLookup = dict[str, set[str]]
 
 
 @dataclass
@@ -123,7 +124,7 @@ class SkidlCompiler:
             # used by the writer and produces the expected canonical netlist.
             Circuit()
             part_defs_by_ref = {part.ref: part for part in canonical.parts}
-            pin_aliases_by_ref: dict[str, dict[str, str]] = {}
+            pin_aliases_by_ref: dict[str, PinAliasLookup] = {}
             erc_warnings: list[str] = []
             erc_errors: list[str] = []
 
@@ -180,7 +181,7 @@ class SkidlCompiler:
                 verification_quality="skidl_runtime_symbol_pin_verified",
                 part_count=len(canonical.parts),
                 net_count=len(expected.nets),
-                endpoint_count=len(canonical.endpoints),
+                endpoint_count=sum(len(entries) for entries in expected.nets.values()),
                 erc_warnings=erc_warnings,
                 erc_errors=erc_errors,
                 error="; ".join(erc_errors) if erc_errors else None,
@@ -213,11 +214,14 @@ class SkidlCompiler:
         try:
             data = {
                 "nets": netlist.to_dict(),
+                "pin_aliases": netlist.aliases_to_dict(),
+                "power_nets": sorted(netlist.power_nets or canonical.rails),
                 "metadata": {
                     "part_count": len(canonical.parts),
                     "net_count": len(netlist.nets),
-                    "endpoint_count": len(canonical.endpoints),
+                    "endpoint_count": sum(len(entries) for entries in netlist.nets.values()),
                     "no_connect_count": len(canonical.no_connects),
+                    "rails": sorted(canonical.rails),
                 },
             }
             with open(path, "w", encoding="utf-8") as f:
@@ -228,8 +232,8 @@ class SkidlCompiler:
             return None
 
 
-def _pin_alias_lookup(lib_id: str) -> dict[str, str]:
-    aliases: dict[str, str] = {}
+def _pin_alias_lookup(lib_id: str) -> PinAliasLookup:
+    aliases: PinAliasLookup = {}
     try:
         pins = _resolve_symbol_pins(lib_id)
     except Exception:
@@ -249,12 +253,12 @@ def _pin_alias_lookup(lib_id: str) -> dict[str, str]:
         for candidate in candidates:
             key = _pin_lookup_key(candidate)
             if key and selector:
-                aliases.setdefault(key, selector)
+                aliases.setdefault(key, set()).add(selector)
     return aliases
 
 
-def _custom_pin_alias_lookup(part_def: Any) -> dict[str, str]:
-    aliases: dict[str, str] = {}
+def _custom_pin_alias_lookup(part_def: Any) -> PinAliasLookup:
+    aliases: PinAliasLookup = {}
     for pin in decode_custom_pins(part_def.properties.get("KICAD_MCP_CUSTOM_PINS")):
         number = str(pin.get("number") or "")
         name = str(pin.get("name") or "")
@@ -270,22 +274,34 @@ def _custom_pin_alias_lookup(part_def: Any) -> dict[str, str]:
         for candidate in candidates:
             key = _pin_lookup_key(candidate)
             if key and selector:
-                aliases.setdefault(key, selector)
+                aliases.setdefault(key, set()).add(selector)
     return aliases
 
 
 def _resolved_selector_netlist(
     canonical: CanonicalCircuit,
-    pin_aliases_by_ref: dict[str, dict[str, str]],
+    pin_aliases_by_ref: dict[str, PinAliasLookup],
 ) -> NormalizedNetlist:
     resolved: dict[str, set[NetlistEntry]] = defaultdict(set)
+    aliases_by_ref_pin: dict[str, dict[str, set[str]]] = {}
     for endpoint in canonical.endpoints:
-        selector = pin_aliases_by_ref.get(endpoint.ref, {}).get(
-            _pin_lookup_key(endpoint.pin),
-            endpoint.pin,
-        )
-        resolved[endpoint.net].add(NetlistEntry(ref=endpoint.ref, pin=selector))
-    return NormalizedNetlist(nets=dict(resolved))
+        aliases = pin_aliases_by_ref.get(endpoint.ref, {})
+        selectors = aliases.get(_pin_lookup_key(endpoint.pin), {endpoint.pin})
+        for selector in sorted(selectors):
+            resolved[endpoint.net].add(NetlistEntry(ref=endpoint.ref, pin=selector))
+        for selector in selectors:
+            related_aliases = {selector}
+            if len(selectors) == 1:
+                related_aliases.add(endpoint.pin)
+            for alias_key, alias_selectors in aliases.items():
+                if alias_selectors == {selector}:
+                    related_aliases.add(alias_key)
+            _register_pin_alias_group(aliases_by_ref_pin, endpoint.ref, related_aliases)
+    return NormalizedNetlist(
+        nets=dict(resolved),
+        aliases_by_ref_pin=aliases_by_ref_pin,
+        power_nets=set(canonical.rails),
+    )
 
 
 def _pin_aliases(pin_name: str, pin_number: str = "") -> set[str]:
@@ -315,7 +331,30 @@ def _pin_aliases(pin_name: str, pin_number: str = "") -> set[str]:
 
 
 def _pin_lookup_key(value: str) -> str:
-    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+    cleaned = (
+        str(value or "")
+        .replace("~{", "")
+        .replace("}", "")
+        .replace("{", "")
+        .replace("~", "")
+    )
+    return "".join(cleaned.lower().split())
+
+
+def _register_pin_alias_group(
+    aliases_by_ref_pin: dict[str, dict[str, set[str]]],
+    ref: str,
+    aliases: set[str],
+) -> None:
+    normalized_aliases = {alias for alias in aliases if str(alias)}
+    normalized_aliases.update(
+        _pin_lookup_key(alias) for alias in aliases if _pin_lookup_key(alias)
+    )
+    if not normalized_aliases:
+        return
+    ref_aliases = aliases_by_ref_pin.setdefault(ref, {})
+    for alias in normalized_aliases:
+        ref_aliases.setdefault(alias, set()).update(normalized_aliases)
 
 
 def _pin_not_found_message(

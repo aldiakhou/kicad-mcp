@@ -114,6 +114,8 @@ class NormalizedNetlist:
     """A normalized netlist for comparison purposes."""
 
     nets: dict[str, set[NetlistEntry]]
+    aliases_by_ref_pin: dict[str, dict[str, set[str]]] = field(default_factory=dict)
+    power_nets: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict[str, list[dict[str, str]]]:
         """Convert to serializable dict."""
@@ -125,15 +127,38 @@ class NormalizedNetlist:
             for net, endpoints in sorted(self.nets.items())
         }
 
+    def aliases_to_dict(self) -> dict[str, dict[str, list[str]]]:
+        """Convert pin alias context to a serializable dict."""
+        return {
+            ref: {
+                pin: sorted(str(alias) for alias in aliases)
+                for pin, aliases in sorted(pin_aliases.items())
+            }
+            for ref, pin_aliases in sorted(self.aliases_by_ref_pin.items())
+        }
+
     @classmethod
-    def from_dict(cls, data: dict[str, list[dict[str, str]]]) -> NormalizedNetlist:
+    def from_dict(
+        cls,
+        data: dict[str, list[dict[str, str]]],
+        *,
+        aliases_by_ref_pin: dict[str, dict[str, list[str] | set[str]]] | None = None,
+        power_nets: set[str] | list[str] | None = None,
+    ) -> NormalizedNetlist:
         """Create from serialized dict."""
         nets: dict[str, set[NetlistEntry]] = {}
         for net_name, entries in data.items():
             nets[net_name] = {
                 NetlistEntry(ref=e["ref"], pin=e["pin"]) for e in entries
             }
-        return cls(nets=nets)
+        aliases = {
+            str(ref): {
+                str(pin): {str(alias) for alias in pin_aliases}
+                for pin, pin_aliases in ref_aliases.items()
+            }
+            for ref, ref_aliases in (aliases_by_ref_pin or {}).items()
+        }
+        return cls(nets=nets, aliases_by_ref_pin=aliases, power_nets=set(power_nets or []))
 
 
 @dataclass

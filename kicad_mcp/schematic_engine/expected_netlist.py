@@ -68,10 +68,16 @@ def compare_netlists(
         missing = {
             entry
             for entry in expected_entries
-            if not _entry_set_contains(actual_entries, entry, compare_mode)
+            if not _entry_set_contains(
+                actual_entries,
+                entry,
+                compare_mode,
+                actual_filtered,
+                expected_filtered,
+            )
         }
         for entry in missing:
-            if not _is_no_connect_entry(entry, no_connect_set):
+            if not _is_no_connect_entry(entry, no_connect_set, expected_filtered):
                 missing_endpoints.append({
                     "net": net_name,
                     "ref": entry.ref,
@@ -82,7 +88,13 @@ def compare_netlists(
         extra = {
             entry
             for entry in actual_entries
-            if not _entry_set_contains(expected_entries, entry, compare_mode)
+            if not _entry_set_contains(
+                expected_entries,
+                entry,
+                compare_mode,
+                expected_filtered,
+                actual_filtered,
+            )
         }
         for entry in extra:
             if not _is_power_flag_ref(entry.ref):
@@ -154,7 +166,13 @@ def load_expected_netlist(path: str) -> NormalizedNetlist:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         nets_data = data.get("nets", data)
-        return NormalizedNetlist.from_dict(nets_data)
+        aliases = data.get("pin_aliases") or data.get("aliases_by_ref_pin") or {}
+        power_nets = data.get("power_nets") or data.get("metadata", {}).get("rails", [])
+        return NormalizedNetlist.from_dict(
+            nets_data,
+            aliases_by_ref_pin=aliases,
+            power_nets=power_nets,
+        )
     except Exception as e:
         logger.error("Failed to load expected netlist %s: %s", path, e)
         return NormalizedNetlist(nets={})
@@ -176,14 +194,18 @@ def _filter_netlist(
         for entry in entries:
             if ignore_power_flags and _is_power_flag_ref(entry.ref):
                 continue
-            if _is_no_connect_entry(entry, no_connect_set):
+            if _is_no_connect_entry(entry, no_connect_set, netlist):
                 continue
             filtered_entries.add(entry)
 
         if filtered_entries:
             filtered_nets[net_name] = filtered_entries
 
-    return NormalizedNetlist(nets=filtered_nets)
+    return NormalizedNetlist(
+        nets=filtered_nets,
+        aliases_by_ref_pin=netlist.aliases_by_ref_pin,
+        power_nets=set(netlist.power_nets),
+    )
 
 
 def _is_power_flag_ref(ref: str) -> bool:
@@ -194,6 +216,8 @@ def _is_power_flag_ref(ref: str) -> bool:
 def check_power_net_sanity(
     expected: NormalizedNetlist,
     actual: NormalizedNetlist,
+    *,
+    power_nets: set[str] | None = None,
 ) -> dict[str, Any]:
     """Detect catastrophic generated shorts between ground and power rails.
 
@@ -201,10 +225,11 @@ def check_power_net_sanity(
     nodes back to their intended expected power nets and flags actual nets that
     contain both ground-like and non-ground power rails.
     """
+    known_power_nets = set(power_nets or set()).union(expected.power_nets)
     expected_power = {
         net_name: entries
         for net_name, entries in expected.nets.items()
-        if _power_net_kind(net_name) is not None
+        if _power_net_kind(net_name, known_power_nets) is not None
     }
     issues: list[dict[str, Any]] = []
     for actual_net, actual_entries in actual.nets.items():
@@ -214,7 +239,13 @@ def check_power_net_sanity(
             matched = [
                 entry
                 for entry in expected_entries
-                if _entry_set_contains(actual_entries, entry, "permissive")
+                if _entry_set_contains(
+                    actual_entries,
+                    entry,
+                    "permissive",
+                    actual,
+                    expected,
+                )
             ]
             if matched:
                 intended_nets.add(expected_net)
@@ -227,9 +258,9 @@ def check_power_net_sanity(
                     for entry in matched[:5]
                 )
 
-        if _power_net_kind(actual_net) is not None:
+        if _power_net_kind(actual_net, known_power_nets) is not None:
             intended_nets.add(actual_net)
-        if not _has_ground_power_conflict(intended_nets):
+        if not _has_ground_power_conflict(intended_nets, known_power_nets):
             continue
         issue = {
             "severity": "error",
@@ -256,65 +287,76 @@ def _entry_set_contains(
     entries: set[NetlistEntry],
     target: NetlistEntry,
     compare_mode: str,
+    entries_netlist: NormalizedNetlist | None = None,
+    target_netlist: NormalizedNetlist | None = None,
 ) -> bool:
     if compare_mode == "strict":
         return target in entries
-    return any(_entries_equivalent(entry, target) for entry in entries)
+    return any(
+        _entries_equivalent(entry, target, entries_netlist, target_netlist)
+        for entry in entries
+    )
 
 
-def _entries_equivalent(left: NetlistEntry, right: NetlistEntry) -> bool:
-    return left.ref == right.ref and _pins_equivalent(left.pin, right.pin)
+def _entries_equivalent(
+    left: NetlistEntry,
+    right: NetlistEntry,
+    left_netlist: NormalizedNetlist | None = None,
+    right_netlist: NormalizedNetlist | None = None,
+) -> bool:
+    if left.ref != right.ref:
+        return False
+    if _pin_text_key(left.pin) == _pin_text_key(right.pin):
+        return True
+    return _alias_context_has_pair(left_netlist, left.ref, left.pin, right.pin) or (
+        _alias_context_has_pair(right_netlist, right.ref, right.pin, left.pin)
+    )
 
 
 def _is_no_connect_entry(
     entry: NetlistEntry,
     no_connect_set: set[tuple[str, str]],
+    netlist: NormalizedNetlist | None = None,
 ) -> bool:
     return any(
-        entry.ref == ref and _pins_equivalent(entry.pin, pin)
+        _entries_equivalent(entry, NetlistEntry(ref=ref, pin=pin), netlist, netlist)
         for ref, pin in no_connect_set
     )
 
 
-def _pins_equivalent(left: str, right: str) -> bool:
-    left_aliases = _pin_alias_set(left)
-    right_aliases = _pin_alias_set(right)
-    return bool(left_aliases and right_aliases and left_aliases.intersection(right_aliases))
+def _alias_context_has_pair(
+    netlist: NormalizedNetlist | None,
+    ref: str,
+    left_pin: str,
+    right_pin: str,
+) -> bool:
+    if netlist is None:
+        return False
+    ref_aliases = netlist.aliases_by_ref_pin.get(ref, {})
+    group = ref_aliases.get(left_pin) or ref_aliases.get(_pin_text_key(left_pin))
+    if not group:
+        return False
+    return _pin_text_key(right_pin) in {_pin_text_key(alias) for alias in group}
 
 
-def _pin_alias_set(value: str) -> set[str]:
+def _pin_text_key(value: str) -> str:
     raw = str(value or "").strip()
-    if not raw:
-        return set()
-    aliases = {raw}
-    stripped = (
+    cleaned = (
         raw.replace("~{", "")
         .replace("}", "")
         .replace("{", "")
         .replace("~", "")
     )
-    if stripped:
-        aliases.add(stripped)
-    for candidate in list(aliases):
-        if "/" in candidate:
-            aliases.update(part for part in candidate.split("/") if part)
-        suffix_match = re.match(r"^(.+)_([A-Za-z0-9]+)$", candidate)
-        if suffix_match:
-            aliases.add(suffix_match.group(1))
-            aliases.add(suffix_match.group(2))
-    normalized = {_pin_lookup_key(alias) for alias in aliases if _pin_lookup_key(alias)}
-    aliases.update(normalized)
-    return {alias.lower() for alias in aliases if alias}
+    return re.sub(r"\s+", "", cleaned).lower()
 
 
-def _pin_lookup_key(value: str) -> str:
-    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
-
-
-def _power_net_kind(net_name: str) -> str | None:
+def _power_net_kind(net_name: str, power_nets: set[str] | None = None) -> str | None:
     normalized = str(net_name or "").upper().lstrip("/")
     if normalized in {"GND", "AGND", "DGND", "GNDA", "GNDD", "VSS", "VSSA"}:
         return "ground"
+    known_power_nets = {_canonical_net_name(name) for name in power_nets or set()}
+    if _canonical_net_name(net_name) in known_power_nets:
+        return "power"
     if normalized.startswith("+"):
         return "power"
     if normalized in {"VBUS", "VCC", "VDD", "VDDA", "VBAT", "VIN", "VOUT"}:
@@ -326,9 +368,16 @@ def _power_net_kind(net_name: str) -> str | None:
     return None
 
 
-def _has_ground_power_conflict(net_names: set[str]) -> bool:
-    kinds = {_power_net_kind(name) for name in net_names}
+def _has_ground_power_conflict(
+    net_names: set[str],
+    power_nets: set[str] | None = None,
+) -> bool:
+    kinds = {_power_net_kind(name, power_nets) for name in net_names}
     return "ground" in kinds and "power" in kinds
+
+
+def _canonical_net_name(net_name: str) -> str:
+    return str(net_name or "").upper().lstrip("/")
 
 
 def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
@@ -341,6 +390,7 @@ def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
     )
     """
     nets: dict[str, set[NetlistEntry]] = {}
+    aliases_by_ref_pin: dict[str, dict[str, set[str]]] = {}
 
     # Find net blocks by matching balanced parentheses
     net_start_pattern = re.compile(
@@ -376,13 +426,33 @@ def _parse_sexpr_netlist(content: str) -> NormalizedNetlist:
             pin = node_match.group(2)
             entries.add(NetlistEntry(ref=ref, pin=pin))
             pinfunction = node_match.group(3) or ""
-            for alias in _pinfunction_aliases(pinfunction, pin):
-                entries.add(NetlistEntry(ref=ref, pin=alias))
+            _register_pin_alias_group(
+                aliases_by_ref_pin,
+                ref,
+                {pin, *_pinfunction_aliases(pinfunction, pin)},
+            )
 
         if entries:
             nets[net_name] = entries
 
-    return NormalizedNetlist(nets=nets)
+    return NormalizedNetlist(nets=nets, aliases_by_ref_pin=aliases_by_ref_pin)
+
+
+def _register_pin_alias_group(
+    aliases_by_ref_pin: dict[str, dict[str, set[str]]],
+    ref: str,
+    aliases: set[str],
+) -> None:
+    """Register equivalent selector spellings for one physical symbol pin."""
+    normalized_aliases = {alias for alias in aliases if str(alias)}
+    normalized_aliases.update(
+        _pin_text_key(alias) for alias in aliases if _pin_text_key(alias)
+    )
+    if not normalized_aliases:
+        return
+    ref_aliases = aliases_by_ref_pin.setdefault(ref, {})
+    for alias in normalized_aliases:
+        ref_aliases.setdefault(alias, set()).update(normalized_aliases)
 
 
 def _normalize_net_name(net_name: str) -> str:
