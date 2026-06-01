@@ -62,7 +62,13 @@ def _pcb_intent() -> dict:
                 {"ref": "D1", "x": 38, "y": 16, "angle": 0},
             ],
         },
-        "routing": {"mode": "report_only", "track_width_mm": 0.25},
+        "routing": {
+            "mode": "auto",
+            "layer": "F.Cu",
+            "track_width_mm": 0.25,
+            "clearance_mm": 0.35,
+            "grid_mm": 1.27,
+        },
         "validation": {"run_drc": False, "require_clean_drc": False},
         "fabrication": {"include_step": False, "include_ipc2581": False, "run_drc": False},
     }
@@ -117,6 +123,10 @@ async def test_pcb_layout_job_end_to_end(tmp_path: Path):
     )
     assert pcb_result["stage"] == "pcb_layout_committed"
     assert pcb_result["quality"]["footprint_count"] == 3
+    assert pcb_result["routing"]["changed_objects"]["routed_count"] == 3
+    assert pcb_result["quality"]["track_count"] > 0
+    assert pcb_result["quality"]["ratsnest_connection_count"] == 0
+    assert pcb_result["quality"]["routing_complete"] is True
 
     validated = tools["pcb_validate_layout"].fn(project["project_path"], False, False)
     assert validated["success"] is True

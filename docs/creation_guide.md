@@ -37,9 +37,11 @@ On Windows it also searches versioned KiCad installations such as `C:\Program Fi
 - `pcb_add_via(...)`
 - `pcb_generate_basic_layout(...)`
 
-PCB tooling is conservative. The default agent workflow uses `pcb_preview_layout_intent`, `pcb_start_layout_job`, `pcb_get_layout_job_status`, `pcb_get_layout_job_result`, `pcb_validate_layout`, and `pcb_export_fabrication_package`. The job syncs footprints from the schematic, assigns pad nets, creates the board outline, applies functional placement, and reports ratsnest/quality status. It does not autoroute.
+PCB tooling is conservative. The default agent workflow uses `pcb_preview_layout_intent`, `pcb_start_layout_job`, `pcb_get_layout_job_status`, `pcb_get_layout_job_result`, `pcb_validate_layout`, and `pcb_export_fabrication_package`. The job syncs footprints from the schematic, assigns pad nets, creates the board outline, applies functional placement, and can run the bounded grid autorouter with `routing.mode="auto"`.
 
-Manual tools such as `pcb_generate_basic_layout(...)`, `pcb_add_track(...)`, and `pcb_add_via(...)` remain debug/advanced tools. Copper is only written when explicit routing tools are called.
+The built-in autorouter is rule-aware enough for first-pass agent layouts: it uses board bounds, footprint obstacles, existing other-net copper, track width, clearance, and grid pitch. It is not a full professional push-and-shove router for dense boards, impedance-controlled nets, or differential pairs. Always use `pcb_validate_layout(...)` and KiCad DRC before treating a board as manufacturable.
+
+Manual tools such as `pcb_generate_basic_layout(...)`, `pcb_add_track(...)`, and `pcb_add_via(...)` remain debug/advanced tools.
 
 ## KiCad CLI
 

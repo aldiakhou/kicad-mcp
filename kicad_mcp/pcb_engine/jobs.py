@@ -12,11 +12,13 @@ import time
 from typing import Any
 import uuid
 
+from kicad_mcp.pcb_engine.autorouter import autoroute_pcb
 from kicad_mcp.pcb_engine.intent import normalize_pcb_layout_intent
 from kicad_mcp.tools import creation_tools as ct
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb
 
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+PCB_LAYOUT_STEP_COUNT = 8
 _JOBS: dict[str, PcbLayoutJob] = {}
 _LOCK = threading.RLock()
 _EXECUTOR: ThreadPoolExecutor | None = None
@@ -32,7 +34,7 @@ class PcbLayoutJob:
     status: str = "queued"
     stage: str = "queued"
     progress: dict[str, Any] = field(
-        default_factory=lambda: {"step": 0, "step_count": 7, "message": "Queued"}
+        default_factory=lambda: {"step": 0, "step_count": PCB_LAYOUT_STEP_COUNT, "message": "Queued"}
     )
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -265,7 +267,11 @@ def _run_layout_job(job_id: str) -> None:
         job.stage = "starting"
         job.started_at = time.time()
         job.updated_at = job.started_at
-        job.progress = {"step": 0, "step_count": 7, "message": "Starting PCB layout job"}
+        job.progress = {
+            "step": 0,
+            "step_count": PCB_LAYOUT_STEP_COUNT,
+            "message": "Starting PCB layout job",
+        }
         _write_job_record_locked(job)
 
     def is_cancelled() -> bool:
@@ -277,7 +283,11 @@ def _run_layout_job(job_id: str) -> None:
             current = _JOBS[job_id]
             if current.status not in TERMINAL_STATUSES:
                 current.stage = stage
-                current.progress = {"step": step, "step_count": 7, "message": message}
+                current.progress = {
+                    "step": step,
+                    "step_count": PCB_LAYOUT_STEP_COUNT,
+                    "message": message,
+                }
                 current.updated_at = time.time()
                 _write_job_record_locked(current)
 
@@ -349,15 +359,58 @@ def _apply_layout_intent(
     if is_cancelled():
         return _cancelled_payload(project_path, "after_sync_and_place")
 
-    progress("quality_report", 4, "Building PCB quality and ratsnest report")
     files = ct.get_project_files(ct.validate_local_path(project_path, "project", must_exist=True))
+    routing = {"success": True, "skipped": True, "reason": "routing.mode is not auto"}
+    if normalized["routing"]["mode"] == "auto":
+        progress("autoroute", 4, "Routing assigned PCB ratsnest connections")
+
+        def route_mutation(pcb_model: KiCadPcb) -> dict[str, Any]:
+            route_result = autoroute_pcb(
+                pcb_model,
+                normalized["board"]["width_mm"],
+                normalized["board"]["height_mm"],
+                layer=normalized["routing"]["layer"],
+                track_width_mm=normalized["routing"]["track_width_mm"],
+                clearance_mm=normalized["routing"]["clearance_mm"],
+                grid_mm=normalized["routing"]["grid_mm"],
+                max_connections=normalized["routing"]["max_connections"],
+                cancel_check=is_cancelled,
+            )
+            if route_result.get("cancelled"):
+                raise RuntimeError("PCB autoroute cancelled")
+            return route_result
+
+        routing = ct._apply_transactional_pcb_edit(
+            files["pcb"],
+            route_mutation,
+            run_cli_validation=True,
+        )
+        if not routing.get("success"):
+            if is_cancelled():
+                return _cancelled_payload(project_path, "during_autoroute")
+            return {
+                "success": False,
+                "changed": True,
+                "project_path": project_path,
+                "pcb_path": files["pcb"],
+                "stage": "autoroute_failed",
+                "error": routing.get("error", "PCB autoroute failed"),
+                "sync": completed.get("sync"),
+                "placement": completed.get("placement"),
+                "routing": routing,
+            }
+    if is_cancelled():
+        return _cancelled_payload(project_path, "after_autoroute")
+
+    progress("quality_report", 5, "Building PCB quality and ratsnest report")
     pcb = KiCadPcb.from_file(files["pcb"])
     quality = ct._pcb_quality_report(project_path, files["pcb"], pcb)
+    ratsnest = ct._build_ratsnest(project_path, files["pcb"], pcb)
     if is_cancelled():
         return _cancelled_payload(project_path, "after_quality_report")
 
     drc = {"success": True, "skipped": True, "reason": "validation.run_drc=False"}
-    progress("drc", 5, "Running PCB DRC" if normalized["validation"]["run_drc"] else "Skipping PCB DRC")
+    progress("drc", 6, "Running PCB DRC" if normalized["validation"]["run_drc"] else "Skipping PCB DRC")
     if normalized["validation"]["run_drc"]:
         drc = ct._run_pcb_drc_sync(files["pcb"])
         if normalized["validation"]["require_clean_drc"] and drc.get("total_violations", 0) > 0:
@@ -374,7 +427,10 @@ def _apply_layout_intent(
     if is_cancelled():
         return _cancelled_payload(project_path, "after_drc")
 
-    progress("done", 7, "PCB layout job completed")
+    progress("done", PCB_LAYOUT_STEP_COUNT, "PCB layout job completed")
+    status = dict(completed.get("status", {}))
+    status["routing_complete"] = bool(quality.get("routing_complete", False))
+    status["routing_status"] = quality.get("routing_status", "unknown_needs_drc")
     return {
         "success": True,
         "changed": True,
@@ -382,14 +438,24 @@ def _apply_layout_intent(
         "project_path": project_path,
         "pcb_path": files["pcb"],
         "stage": "pcb_layout_committed",
-        "status": completed.get("status", {}),
+        "status": status,
         "sync": completed.get("sync"),
         "placement": completed.get("placement"),
-        "ratsnest": completed.get("ratsnest"),
+        "ratsnest": {
+            "net_count": ratsnest.get("net_count", 0),
+            "connection_count": ratsnest.get("connection_count", 0),
+            "routed_connection_count": ratsnest.get("routed_connection_count", 0),
+            "expected_connection_count": ratsnest.get("expected_connection_count", 0),
+        },
+        "routing": routing,
         "quality": quality,
         "drc": drc,
         "intent": normalized,
-        "progress": {"step": 7, "step_count": 7, "message": "PCB layout job completed"},
+        "progress": {
+            "step": PCB_LAYOUT_STEP_COUNT,
+            "step_count": PCB_LAYOUT_STEP_COUNT,
+            "message": "PCB layout job completed",
+        },
         "recommended_next_tool": "pcb_validate_layout",
     }
 

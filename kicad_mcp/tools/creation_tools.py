@@ -1227,9 +1227,9 @@ def _complete_pcb_from_schematic(
             ),
             "pcb_synced": True,
             "pcb_placed": bool(place_pcb),
-            "routing_complete": False,
+            "routing_complete": bool(quality.get("routing_complete", False)),
             "routing_status": quality.get("routing_status", "unknown_needs_drc"),
-            "completion_scope": "sync_and_initial_placement_only",
+            "completion_scope": "sync_placement_and_routing_status",
         },
         "sync": sync,
         "placement": placement,
@@ -1550,12 +1550,35 @@ def _build_ratsnest(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str
     for pad in pcb.footprint_pad_positions():
         if pad.get("net_name"):
             pads_by_net.setdefault(pad["net_name"], []).append(pad)
+    track_segments_by_net: dict[str, list[dict[str, Any]]] = {}
+    for segment in pcb.list_track_segments():
+        if segment.get("net_name"):
+            track_segments_by_net.setdefault(str(segment["net_name"]), []).append(segment)
+    vias_by_net: dict[str, list[dict[str, Any]]] = {}
+    for via in pcb.list_vias():
+        if via.get("net_name"):
+            vias_by_net.setdefault(str(via["net_name"]), []).append(via)
     connections = []
+    expected_connection_count = 0
+    routed_net_count = 0
     for net_name, pads in sorted(pads_by_net.items()):
         if len(pads) < 2:
+            routed_net_count += 1
             continue
+        expected_connection_count += len(pads) - 1
+        pad_components = _pad_routing_components(
+            pads,
+            track_segments_by_net.get(net_name, []),
+            vias_by_net.get(net_name, []),
+        )
+        unique_components = {pad_components.get(_pad_key(pad)) for pad in pads}
+        if len(unique_components) <= 1:
+            routed_net_count += 1
         anchor = pads[0]
+        anchor_component = pad_components.get(_pad_key(anchor))
         for pad in pads[1:]:
+            if pad_components.get(_pad_key(pad)) == anchor_component:
+                continue
             connections.append(
                 {
                     "net_name": net_name,
@@ -1575,11 +1598,54 @@ def _build_ratsnest(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str
         "success": True,
         "project_path": project_path,
         "pcb_path": pcb_path,
-        "ratsnest_type": "geometric_pad_ratsnest",
+        "ratsnest_type": "routed_pad_connectivity_ratsnest",
         "net_count": len(pads_by_net),
+        "routed_net_count": routed_net_count,
+        "expected_connection_count": expected_connection_count,
+        "routed_connection_count": max(0, expected_connection_count - len(connections)),
+        "unrouted_connection_count": len(connections),
         "connection_count": len(connections),
         "connections": connections,
     }
+
+
+def _pad_key(pad: dict[str, Any]) -> tuple[str, str]:
+    return str(pad.get("reference", "")), str(pad.get("pad", ""))
+
+
+def _pad_routing_components(
+    pads: list[dict[str, Any]],
+    track_segments: list[dict[str, Any]],
+    vias: list[dict[str, Any]],
+) -> dict[tuple[str, str], tuple[int, int]]:
+    parent: dict[tuple[int, int], tuple[int, int]] = {}
+
+    def coord_key(point: dict[str, float]) -> tuple[int, int]:
+        return (round(float(point["x"]) / 0.05), round(float(point["y"]) / 0.05))
+
+    def find(node: tuple[int, int]) -> tuple[int, int]:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(a: tuple[int, int], b: tuple[int, int]) -> None:
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    pad_coords = {_pad_key(pad): coord_key(pad["position"]) for pad in pads}
+    for node in pad_coords.values():
+        find(node)
+    for segment in track_segments:
+        start = coord_key(segment["start"])
+        end = coord_key(segment["end"])
+        union(start, end)
+    for via in vias:
+        find(coord_key(via["position"]))
+    return {pad_key: find(node) for pad_key, node in pad_coords.items()}
 
 
 def _pcb_quality_report(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str, Any]:
@@ -1590,19 +1656,26 @@ def _pcb_quality_report(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict
     footprints = pcb.list_footprints()
     overlap_warnings = _footprint_overlap_warnings(footprints)
     keepout_warnings = _esp_antenna_keepout_warnings(pcb)
-    track_count = len(pcb._top_level("segment"))
+    track_count = len(pcb.list_track_segments())
+    via_count = len(pcb.list_vias())
+    unrouted_connection_count = int(ratsnest.get("connection_count", 0) or 0)
+    expected_connection_count = int(ratsnest.get("expected_connection_count", 0) or 0)
     if not assigned_pads:
         routing_status = "unrouted"
         routing_confidence = "low"
-    elif track_count == 0 and ratsnest.get("connection_count", 0) > 0:
+    elif unrouted_connection_count == 0:
+        routing_status = "routed_needs_drc" if track_count > 0 else "no_multinode_nets"
+        routing_confidence = "high"
+    elif track_count == 0 and unrouted_connection_count > 0:
         routing_status = "unrouted"
         routing_confidence = "medium"
     elif track_count > 0:
-        routing_status = "unknown_needs_drc"
+        routing_status = "partially_routed_needs_drc"
         routing_confidence = "medium"
     else:
         routing_status = "unknown_needs_drc"
         routing_confidence = "low"
+    routing_complete = bool(assigned_pads) and unrouted_connection_count == 0
     return {
         "success": True,
         "project_path": project_path,
@@ -1613,11 +1686,14 @@ def _pcb_quality_report(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict
         "assigned_pad_count": len(assigned_pads),
         "unassigned_pad_count": len(unassigned_pads),
         "track_count": track_count,
+        "via_count": via_count,
         "routing_status": routing_status,
-        "routing_complete": False,
+        "routing_complete": routing_complete,
         "routing_confidence": routing_confidence,
         "requires_drc_for_final_answer": True,
-        "ratsnest_connection_count": ratsnest.get("connection_count", 0),
+        "ratsnest_connection_count": unrouted_connection_count,
+        "ratsnest_expected_connection_count": expected_connection_count,
+        "ratsnest_routed_connection_count": ratsnest.get("routed_connection_count", 0),
         "overlap_warnings": overlap_warnings,
         "overlap_warning_count": len(overlap_warnings),
         "keepout_warnings": keepout_warnings,

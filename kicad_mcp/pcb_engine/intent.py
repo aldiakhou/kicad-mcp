@@ -39,12 +39,22 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
         },
     },
     "routing": {
-        "description": "Routing scope. Automatic obstacle-aware routing is not exposed.",
+        "description": "Routing scope for the async PCB layout job.",
         "fields": {
-            "mode": "none or report_only. The default is none.",
-            "track_width_mm": "Preferred width for future/debug routing steps.",
+            "mode": "none, report_only, or auto. auto runs the bounded obstacle-aware grid router.",
+            "layer": "Copper layer to use for auto routing. Default: F.Cu.",
+            "track_width_mm": "Track width for auto routing.",
+            "clearance_mm": "Minimum routing keepout clearance around footprints and other-net copper.",
+            "grid_mm": "Routing grid pitch. Smaller values can route tighter designs but take longer.",
+            "max_connections": "Optional cap on routed ratsnest connections in one job.",
         },
-        "example": {"mode": "report_only", "track_width_mm": 0.25},
+        "example": {
+            "mode": "auto",
+            "layer": "F.Cu",
+            "track_width_mm": 0.25,
+            "clearance_mm": 0.35,
+            "grid_mm": 1.27,
+        },
     },
     "validation": {
         "description": "Validation requested inside the async layout job.",
@@ -117,8 +127,20 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
         raise ValueError("placement.style must be one of: functional, grid")
 
     routing_mode = str(routing.get("mode", "none")).strip().lower()
-    if routing_mode not in {"none", "report_only"}:
-        raise ValueError("routing.mode must be one of: none, report_only")
+    if routing_mode not in {"none", "report_only", "auto"}:
+        raise ValueError("routing.mode must be one of: none, report_only, auto")
+    layer = str(routing.get("layer", "F.Cu")).strip() or "F.Cu"
+    track_width = _positive_float(routing.get("track_width_mm", 0.25), "routing.track_width_mm")
+    clearance = _nonnegative_float(routing.get("clearance_mm", 0.35), "routing.clearance_mm")
+    grid = _positive_float(routing.get("grid_mm", 1.27), "routing.grid_mm")
+    max_connections = routing.get("max_connections")
+    if max_connections is not None:
+        try:
+            max_connections = int(max_connections)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("routing.max_connections must be an integer") from exc
+        if max_connections <= 0:
+            raise ValueError("routing.max_connections must be positive")
 
     placement_rules = _merge_placement_rules(
         placement.get("rules"),
@@ -140,7 +162,11 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
         },
         "routing": {
             "mode": routing_mode,
-            "track_width_mm": float(routing.get("track_width_mm", 0.25)),
+            "layer": layer,
+            "track_width_mm": track_width,
+            "clearance_mm": clearance,
+            "grid_mm": grid,
+            "max_connections": max_connections,
         },
         "validation": {
             "run_drc": bool(validation.get("run_drc", False)),
@@ -188,4 +214,14 @@ def _positive_float(value: Any, field: str) -> float:
         raise ValueError(f"{field} must be a number") from exc
     if number <= 0:
         raise ValueError(f"{field} must be positive")
+    return number
+
+
+def _nonnegative_float(value: Any, field: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if number < 0:
+        raise ValueError(f"{field} must be zero or positive")
     return number

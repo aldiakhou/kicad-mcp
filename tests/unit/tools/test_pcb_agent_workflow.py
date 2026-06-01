@@ -64,3 +64,5 @@ async def test_pcb_schema_recommends_async_workflow():
     assert schema["recommended_apply_tool"] == "pcb_start_layout_job"
     assert schema["recommended_status_tool"] == "pcb_get_layout_job_status"
     assert schema["recommended_result_tool"] == "pcb_get_layout_job_result"
+    assert schema["schemas"]["routing"]["example"]["mode"] == "auto"
+    assert "clearance_mm" in schema["schemas"]["routing"]["fields"]

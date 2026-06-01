@@ -76,7 +76,9 @@ Recommended PCB order:
 6. `pcb_validate_layout`
 7. `pcb_export_fabrication_package`
 
-The PCB job syncs footprints and pad nets from the generated schematic, creates or updates the board outline, applies functional placement constraints, and returns ratsnest/quality status. It does not expose coordinate-level manual routing in the agent profile. Low-level footprint, track, via, and pad-routing tools remain debug-only.
+The PCB job syncs footprints and pad nets from the generated schematic, creates or updates the board outline, applies functional placement constraints, and can run the bounded grid autorouter with `routing.mode="auto"`. The autorouter respects board bounds, footprint keepouts, existing other-net copper, `track_width_mm`, `clearance_mm`, and `grid_mm`, then quality reporting verifies whether the remaining ratsnest is zero. Low-level footprint, track, via, and pad-routing tools remain debug-only and are not exposed in the default agent profile.
+
+This is an initial rule-aware router for agent-safe first-pass boards, not a full professional push-and-shove router. Dense boards, impedance-controlled nets, differential pairs, and complex layer strategies still need KiCad review and DRC.
 
 PCB intent example:
 
@@ -97,7 +99,13 @@ PCB intent example:
       }
     }
   },
-  "routing": {"mode": "report_only", "track_width_mm": 0.25},
+  "routing": {
+    "mode": "auto",
+    "layer": "F.Cu",
+    "track_width_mm": 0.25,
+    "clearance_mm": 0.35,
+    "grid_mm": 1.27
+  },
   "validation": {"run_drc": false, "require_clean_drc": false},
   "fabrication": {"include_step": false, "include_ipc2581": false, "run_drc": true}
 }

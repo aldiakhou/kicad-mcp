@@ -317,6 +317,46 @@ class KiCadPcb:
                 )
         return sorted(nets, key=lambda item: item["id"])
 
+    def list_track_segments(self) -> list[dict[str, Any]]:
+        """List routed track segments with resolved net names."""
+        net_names = {net["id"]: net["name"] for net in self.list_nets()}
+        segments = []
+        for segment in self._top_level("segment"):
+            start = _xy_child(segment, "start")
+            end = _xy_child(segment, "end")
+            if start is None or end is None:
+                continue
+            net_id = _child_int(segment, "net", 0)
+            segments.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "width_mm": _child_float(segment, "width", 0.0),
+                    "layer": _child_text(segment, "layer") or "",
+                    "net_id": net_id,
+                    "net_name": net_names.get(net_id, ""),
+                }
+            )
+        return segments
+
+    def list_vias(self) -> list[dict[str, Any]]:
+        """List through vias with resolved net names."""
+        net_names = {net["id"]: net["name"] for net in self.list_nets()}
+        vias = []
+        for via in self._top_level("via"):
+            position = self._parse_at(via)
+            net_id = _child_int(via, "net", 0)
+            vias.append(
+                {
+                    "position": {"x": position["x"], "y": position["y"]},
+                    "diameter_mm": _child_float(via, "size", 0.0),
+                    "drill_mm": _child_float(via, "drill", 0.0),
+                    "net_id": net_id,
+                    "net_name": net_names.get(net_id, ""),
+                }
+            )
+        return vias
+
     def footprint_pad_positions(self) -> list[dict[str, Any]]:
         """Return transformed pad positions with assigned net names."""
         pads = []
@@ -549,6 +589,39 @@ def _child_text(expr: SExprList, head: str) -> str | None:
     if child is None or len(child.items) < 2:
         return None
     return _atom_text(child.items[1])
+
+
+def _child_float(expr: SExprList, head: str, default: float) -> float:
+    text = _child_text(expr, head)
+    if text is None:
+        return default
+    try:
+        return float(text)
+    except ValueError:
+        return default
+
+
+def _child_int(expr: SExprList, head: str, default: int) -> int:
+    text = _child_text(expr, head)
+    if text is None:
+        return default
+    try:
+        return int(text)
+    except ValueError:
+        return default
+
+
+def _xy_child(expr: SExprList, head: str) -> dict[str, float] | None:
+    child = expr.first_child(head)
+    if child is None or len(child.items) < 3:
+        return None
+    try:
+        return {
+            "x": float(_atom_text(child.items[1]) or "0"),
+            "y": float(_atom_text(child.items[2]) or "0"),
+        }
+    except ValueError:
+        return None
 
 
 def _atom_text(node: object | None) -> str | None:

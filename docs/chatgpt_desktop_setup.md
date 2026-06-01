@@ -149,9 +149,9 @@ For PCB layout after schematic validation:
 6. `pcb_validate_layout`
 7. `pcb_export_fabrication_package`
 
-The default agent profile does not expose manual coordinate routing tools. PCB layout jobs sync footprints from the schematic, assign pad nets, apply board/placement constraints, and report ratsnest and DRC status.
+The default agent profile does not expose manual coordinate routing tools. PCB layout jobs sync footprints from the schematic, assign pad nets, apply board/placement constraints, and can run the bounded grid autorouter when the intent uses `routing.mode="auto"`.
 
 ## Current limitations
 
-- No PCB routing yet.
+- PCB autorouting is a first-pass grid router, not a full professional push-and-shove router. Review dense boards in KiCad and run DRC before fabrication.
 - Manual schematic edit and cleanup tools are not exposed by the installed server.
