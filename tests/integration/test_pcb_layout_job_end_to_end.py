@@ -7,6 +7,7 @@ import pytest
 
 from kicad_mcp.server import create_server
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
+from kicad_mcp.utils.pcbnew_runtime import pcbnew_runtime_status
 
 
 def _kicad_cli_available() -> bool:
@@ -69,6 +70,7 @@ def _pcb_intent() -> dict:
             "clearance_mm": 0.35,
             "grid_mm": 1.27,
         },
+        "zones": [{"net": "GND", "layer": "B.Cu", "margin_mm": 0.5}],
         "validation": {"run_drc": False, "require_clean_drc": False},
         "fabrication": {"include_step": False, "include_ipc2581": False, "run_drc": False},
     }
@@ -122,8 +124,11 @@ async def test_pcb_layout_job_end_to_end(tmp_path: Path):
         pcb_job["job_id"],
     )
     assert pcb_result["stage"] == "pcb_layout_committed"
+    if pcbnew_runtime_status().get("available"):
+        assert pcb_result["backend"]["backend"] == "pcbnew"
     assert pcb_result["quality"]["footprint_count"] == 3
     assert pcb_result["routing"]["changed_objects"]["routed_count"] == 3
+    assert pcb_result["zones"]["changed_objects"]["created_count"] == 1
     assert pcb_result["quality"]["track_count"] > 0
     assert pcb_result["quality"]["ratsnest_connection_count"] == 0
     assert pcb_result["quality"]["routing_complete"] is True

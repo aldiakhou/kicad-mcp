@@ -14,6 +14,7 @@ from typing import Any, cast
 from fastmcp import FastMCP
 
 from kicad_mcp.config import TIMEOUT_CONSTANTS
+from kicad_mcp.pcb_engine.backends import BoardModel, get_board_backend
 from kicad_mcp.tools.drc_impl.cli_drc import _drc_report_violations, run_drc_via_cli
 from kicad_mcp.tools.export_tools import _generate_pcb_thumbnail_impl
 from kicad_mcp.utils.file_utils import get_project_files
@@ -610,7 +611,7 @@ async def _project_completion_report(
         ratsnest = None
         drc = {"success": True, "skipped": True, "reason": "run_drc=False"}
         if "pcb" in files:
-            pcb = KiCadPcb.from_file(files["pcb"])
+            pcb = get_board_backend().from_file(files["pcb"])
             pcb_quality = _pcb_quality_report(validated_project, files["pcb"], pcb)
             ratsnest = _build_ratsnest(validated_project, files["pcb"], pcb)
             if run_drc:
@@ -1211,7 +1212,8 @@ def _complete_pcb_from_schematic(
                 "placement": placement,
             }
 
-    pcb = KiCadPcb.from_file(files["pcb"])
+    backend = get_board_backend()
+    pcb = backend.from_file(files["pcb"])
     ratsnest = _build_ratsnest(project_path, files["pcb"], pcb)
     quality = _pcb_quality_report(project_path, files["pcb"], pcb)
     placement_objects = placement.get("changed_objects", {}) if placement else {}
@@ -1221,6 +1223,7 @@ def _complete_pcb_from_schematic(
         "project_path": project_path,
         "pcb_path": files["pcb"],
         "stage": "placed" if place_pcb else "synced",
+        "backend": backend.status(),
         "status": {
             "schematic_complete": bool(
                 sync.get("native_netlist", {}).get("connectivity_complete", False)
@@ -1421,7 +1424,7 @@ def _role_lane_position(
 
 
 def _apply_functional_placement(
-    pcb: KiCadPcb,
+    pcb: BoardModel,
     board_width_mm: float,
     board_height_mm: float,
     placement_rules: dict[str, Any] | None = None,
@@ -1518,7 +1521,7 @@ def _bounds_intersect(a: dict[str, float], b: dict[str, float], padding: float =
     )
 
 
-def _esp_antenna_keepout_warnings(pcb: KiCadPcb) -> list[dict[str, str]]:
+def _esp_antenna_keepout_warnings(pcb: BoardModel) -> list[dict[str, str]]:
     warnings = []
     footprints = pcb.list_footprints()
     for footprint in footprints:
@@ -1545,7 +1548,7 @@ def _esp_antenna_keepout_warnings(pcb: KiCadPcb) -> list[dict[str, str]]:
     return warnings
 
 
-def _build_ratsnest(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str, Any]:
+def _build_ratsnest(project_path: str, pcb_path: str, pcb: BoardModel) -> dict[str, Any]:
     pads_by_net: dict[str, list[dict[str, Any]]] = {}
     for pad in pcb.footprint_pad_positions():
         if pad.get("net_name"):
@@ -1598,6 +1601,7 @@ def _build_ratsnest(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str
         "success": True,
         "project_path": project_path,
         "pcb_path": pcb_path,
+        "backend": getattr(pcb, "backend_name", "unknown"),
         "ratsnest_type": "routed_pad_connectivity_ratsnest",
         "net_count": len(pads_by_net),
         "routed_net_count": routed_net_count,
@@ -1648,7 +1652,7 @@ def _pad_routing_components(
     return {pad_key: find(node) for pad_key, node in pad_coords.items()}
 
 
-def _pcb_quality_report(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict[str, Any]:
+def _pcb_quality_report(project_path: str, pcb_path: str, pcb: BoardModel) -> dict[str, Any]:
     pads = pcb.footprint_pad_positions()
     assigned_pads = [pad for pad in pads if pad.get("net_name")]
     unassigned_pads = [pad for pad in pads if not pad.get("net_name")]
@@ -1680,6 +1684,8 @@ def _pcb_quality_report(project_path: str, pcb_path: str, pcb: KiCadPcb) -> dict
         "success": True,
         "project_path": project_path,
         "pcb_path": pcb_path,
+        "backend": getattr(pcb, "backend_name", "unknown"),
+        "backend_status": getattr(pcb, "backend_status", {}),
         "footprint_count": len(footprints),
         "net_count": max(0, len(pcb.list_nets()) - 1),
         "pad_count": len(pads),
@@ -1730,7 +1736,7 @@ def _manhattan_points(waypoints: list[dict[str, float]]) -> list[dict[str, float
 
 
 def _route_between_pads(
-    pcb: KiCadPcb,
+    pcb: BoardModel,
     from_ref: str,
     from_pad: str,
     to_ref: str,
@@ -1791,13 +1797,15 @@ def _create_pcb_file(
         if pcb_path.exists() and not overwrite:
             return {"success": False, "pcb_path": str(pcb_path), "error": "PCB already exists"}
         backup = create_file_backup(str(pcb_path)) if pcb_path.exists() else None
-        pcb = KiCadPcb.empty(board_width_mm, board_height_mm)
+        backend = get_board_backend()
+        pcb = backend.empty(board_width_mm, board_height_mm)
         validation = validate_pcb_text(pcb.to_text())
         atomic_write_text(pcb_path, pcb.to_text())
         return {
             "success": True,
             "project_path": validated_project,
             "pcb_path": str(pcb_path),
+            "backend": backend.status(),
             "created": backup is None,
             "backup_path": backup["backup_path"] if backup else None,
             "validation": {"syntax": validation},
@@ -1808,7 +1816,7 @@ def _create_pcb_file(
 
 def _apply_transactional_pcb_edit(
     pcb_path: str,
-    mutator: Callable[[KiCadPcb], dict[str, Any]],
+    mutator: Callable[[BoardModel], dict[str, Any]],
     *,
     run_cli_validation: bool = True,
     run_drc: bool = False,
@@ -1818,9 +1826,10 @@ def _apply_transactional_pcb_edit(
     with transactional_file_lock(validated_path):
         original_text = Path(validated_path).read_text(encoding="utf-8")
         backup = create_file_backup(validated_path)
+        backend = get_board_backend()
         try:
             before_validation = validate_pcb_text(original_text)
-            pcb = KiCadPcb.from_text(original_text)
+            pcb = backend.from_text(original_text)
             change_result = mutator(pcb)
             updated_text = pcb.to_text()
             after_validation = validate_pcb_text(updated_text)
@@ -1859,6 +1868,7 @@ def _apply_transactional_pcb_edit(
                 "stage": "pcb_authoring",
                 "changed": True,
                 "pcb_path": validated_path,
+                "backend": backend.status(),
                 "backup_path": backup["backup_path"],
                 "changed_objects": change_result,
                 "validation": {
@@ -1879,6 +1889,7 @@ def _apply_transactional_pcb_edit(
             return {
                 "success": False,
                 "pcb_path": validated_path,
+                "backend": backend.status(),
                 "backup_path": backup["backup_path"],
                 "error": str(exc),
                 "rolled_back": restore_result.get("success", False),

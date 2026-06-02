@@ -4,6 +4,7 @@ from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 
+from kicad_mcp.pcb_engine.backends import get_board_backend
 from kicad_mcp.pcb_engine.fabrication import export_fabrication_package
 from kicad_mcp.pcb_engine.intent import pcb_design_intent_schema as _pcb_design_intent_schema
 from kicad_mcp.pcb_engine.jobs import (
@@ -15,7 +16,6 @@ from kicad_mcp.pcb_engine.jobs import (
     validate_layout,
 )
 import kicad_mcp.tools.creation_tools as ct
-from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb
 from kicad_mcp.utils.kicad_s_expr import KiCadSchematic
 from kicad_mcp.utils.library_resolver import KiCadLibraryError
 
@@ -27,6 +27,30 @@ def register_pcb_tools(mcp: FastMCP) -> None:
     def pcb_design_intent_schema(section: str = "all") -> dict[str, Any]:
         """Return compact PCB layout-intent schema examples for agents."""
         return _pcb_design_intent_schema(section)
+
+    @mcp.tool()
+    def pcb_layout_engine_status() -> dict[str, Any]:
+        """Report readiness of the PCB layout backend runtime."""
+        try:
+            backend = get_board_backend()
+        except Exception as exc:
+            from kicad_mcp.utils.pcbnew_runtime import pcbnew_runtime_status
+
+            return {
+                "success": False,
+                "tool": "pcb_layout_engine_status",
+                "selected_backend": "pcbnew",
+                "backend": pcbnew_runtime_status(),
+                "ready": False,
+                "error": str(exc),
+            }
+        return {
+            "success": True,
+            "tool": "pcb_layout_engine_status",
+            "selected_backend": backend.name,
+            "backend": backend.status(),
+            "ready": bool(backend.status().get("available")),
+        }
 
     @mcp.tool()
     def pcb_preview_layout_intent(
@@ -255,7 +279,7 @@ def register_pcb_tools(mcp: FastMCP) -> None:
                         "symbol": symbol,
                     }
 
-            def mutate(pcb: KiCadPcb) -> dict[str, Any]:
+            def mutate(pcb: Any) -> dict[str, Any]:
                 outline = pcb.create_board_outline(board_width_mm, board_height_mm)
                 placed = []
                 columns = max(1, int(board_width_mm // 20))
@@ -381,7 +405,7 @@ def register_pcb_tools(mcp: FastMCP) -> None:
                     "project_path": project_path,
                     "error": "PCB file not found",
                 }
-            pcb = KiCadPcb.from_file(files["pcb"])
+            pcb = get_board_backend().from_file(files["pcb"])
             return ct._build_ratsnest(project_path, files["pcb"], pcb)
         except Exception as exc:
             return {"success": False, "project_path": project_path, "error": str(exc)}
@@ -399,7 +423,7 @@ def register_pcb_tools(mcp: FastMCP) -> None:
                     "project_path": project_path,
                     "error": "PCB file not found",
                 }
-            pcb = KiCadPcb.from_file(files["pcb"])
+            pcb = get_board_backend().from_file(files["pcb"])
             return ct._pcb_quality_report(project_path, files["pcb"], pcb)
         except Exception as exc:
             return {"success": False, "project_path": project_path, "error": str(exc)}
@@ -481,7 +505,7 @@ def register_pcb_tools(mcp: FastMCP) -> None:
         )
         if "pcb" not in files:
             return {"success": False, "project_path": project_path, "error": "PCB file not found"}
-        pcb = KiCadPcb.from_file(files["pcb"])
+        pcb = get_board_backend().from_file(files["pcb"])
         ratsnest = ct._build_ratsnest(project_path, files["pcb"], pcb)
         connections = ratsnest.get("connections", [])
         if connection_index < 0 or connection_index >= len(connections):

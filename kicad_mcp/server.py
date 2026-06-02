@@ -40,6 +40,7 @@ from kicad_mcp.tools import (
     DEBUG_PROFILE_TOOLS,
     register_all_tools,
 )
+from kicad_mcp.utils.pcbnew_runtime import pcbnew_runtime_status
 
 # Track cleanup handlers
 cleanup_handlers = []
@@ -197,6 +198,14 @@ def create_server() -> FastMCP:
     # else:
     # Always print this now, as we rely on CLI
     logging.info("KiCad Python module setup removed; relying on kicad-cli for external operations.")
+    pcb_runtime = pcbnew_runtime_status()
+    logging.info(
+        "PCB layout backend status: backend=pcbnew available=%s python=%s kicad=%s error=%s",
+        pcb_runtime.get("available"),
+        pcb_runtime.get("python_version"),
+        pcb_runtime.get("kicad_version"),
+        pcb_runtime.get("error"),
+    )
 
     # Build a lifespan callable with the kwarg baked in (FastMCP 2.x dropped lifespan_kwargs)
     lifespan_factory = functools.partial(

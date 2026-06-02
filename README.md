@@ -20,7 +20,7 @@ This guide will help you set up a Model Context Protocol (MCP) server for KiCad.
 ## Prerequisites
 
 - macOS, Windows, or Linux
-- Python 3.10 or higher
+- Python 3.11 for full PCB layout support with KiCad `pcbnew`
 - KiCad 9.0 or higher
 - uv 0.8.0 or higher
 - Claude Desktop (or another MCP client)
@@ -38,7 +38,7 @@ cd kicad-mcp
 
 # Install dependencies – `uv` will create a `.venv/` folder automatically
 # (Install `uv` first: `brew install uv` on macOS or `pipx install uv`)
-make install
+uv sync --python 3.11
 
 # Optional: activate the environment for manual commands
 source .venv/bin/activate
@@ -230,8 +230,17 @@ The KiCad MCP Server can be configured using environment variables or a `.env` f
 | `KICAD_SEARCH_PATHS` | Comma-separated list of directories to search for KiCad projects | `~/pcb,~/Electronics,~/Projects` |
 | `KICAD_USER_DIR` | Override the default KiCad user directory | `~/Documents/KiCadProjects` |
 | `KICAD_APP_PATH` | Override the default KiCad application path | `/Applications/KiCad7/KiCad.app` |
+| `KICAD_MCP_PCB_BACKEND` | PCB backend selection: `auto`, `pcbnew`, or `sexpr` | `pcbnew` |
+| `KICAD_BIN_PATH` | KiCad `bin` directory used to import `pcbnew` | `C:\Program Files\KiCad\10.0\bin` |
+| `KICAD_PCBNEW_SITE_PACKAGES` | KiCad Python site-packages containing `pcbnew.py` | `C:\Program Files\KiCad\10.0\bin\Lib\site-packages` |
 
 See [Configuration Guide](docs/configuration.md) for more details.
+
+KiCad 10 on Windows ships `pcbnew` for Python 3.11. Python 3.13 cannot load that
+module directly because `_pcbnew.pyd` depends on `python311.dll`. The server falls
+back to the internal S-expression PCB backend when `pcbnew` is unavailable, but the
+production PCB layout backend is selected only when the MCP process runs on a
+compatible Python runtime.
 
 ## Development Guide
 

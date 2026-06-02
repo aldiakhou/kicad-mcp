@@ -13,6 +13,7 @@ import pytest
 from kicad_mcp.server import create_server
 from kicad_mcp.utils.kicad_cli import get_kicad_cli_path
 from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb
+from kicad_mcp.utils.pcbnew_runtime import pcbnew_runtime_status
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +77,14 @@ async def test_fastmcp_client_can_call_compare_and_promotion_tools(
         tools = {tool.name for tool in await client.list_tools()}
         assert "schematic_compare_netlists" in tools
         assert "schematic_export_candidate_to_project" in tools
+        assert "pcb_layout_engine_status" in tools
+
+        pcb_status = await client.call_tool("pcb_layout_engine_status", {})
+        assert pcb_status.is_error is False
+        assert pcb_status.data["success"] is True
+        assert pcb_status.data["selected_backend"] in {"pcbnew", "sexpr"}
+        if pcbnew_runtime_status().get("available"):
+            assert pcb_status.data["selected_backend"] == "pcbnew"
 
         compare = await client.call_tool(
             "schematic_compare_netlists",

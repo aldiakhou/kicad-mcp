@@ -50,6 +50,7 @@ AGENT_PROFILE_TOOLS = {
     "validate_project_boundaries",
     "generate_validation_report",
     "pcb_design_intent_schema",
+    "pcb_layout_engine_status",
     "pcb_preview_layout_intent",
     "pcb_start_layout_job",
     "pcb_get_layout_job_status",

@@ -13,9 +13,9 @@ from typing import Any
 import uuid
 
 from kicad_mcp.pcb_engine.autorouter import autoroute_pcb
+from kicad_mcp.pcb_engine.backends import BoardModel, get_board_backend
 from kicad_mcp.pcb_engine.intent import normalize_pcb_layout_intent
 from kicad_mcp.tools import creation_tools as ct
-from kicad_mcp.utils.kicad_pcb_s_expr import KiCadPcb
 
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 PCB_LAYOUT_STEP_COUNT = 8
@@ -51,6 +51,7 @@ def preview_layout_intent(project_path: str, intent: dict[str, Any] | None) -> d
     """Preview PCB layout readiness without writing board files."""
     try:
         normalized = normalize_pcb_layout_intent(intent)
+        backend = get_board_backend()
         validated_project = ct.validate_local_path(project_path, "project", must_exist=True)
         files = ct.get_project_files(validated_project)
         issues: list[dict[str, Any]] = []
@@ -98,6 +99,7 @@ def preview_layout_intent(project_path: str, intent: dict[str, Any] | None) -> d
             "project_path": validated_project,
             "pcb_path": files.get("pcb"),
             "schematic_path": files.get("schematic"),
+            "backend": backend.status(),
             "summary": {
                 "component_count": component_count,
                 "footprint_count": footprint_count,
@@ -105,6 +107,7 @@ def preview_layout_intent(project_path: str, intent: dict[str, Any] | None) -> d
                 "board": normalized["board"],
                 "placement": normalized["placement"],
                 "routing": normalized["routing"],
+                "zones": normalized["zones"],
                 "validation": normalized["validation"],
             },
             "recommended_apply_tool": "pcb_start_layout_job",
@@ -224,7 +227,8 @@ def validate_layout(project_path: str, *, run_drc: bool = False, require_clean_d
                 "stage": "missing_pcb",
                 "error": "PCB file not found.",
             }
-        pcb = KiCadPcb.from_file(files["pcb"])
+        backend = get_board_backend()
+        pcb = backend.from_file(files["pcb"])
         quality = ct._pcb_quality_report(validated_project, files["pcb"], pcb)
         drc = {"success": True, "skipped": True, "reason": "run_drc=False"}
         if run_drc:
@@ -239,6 +243,7 @@ def validate_layout(project_path: str, *, run_drc: bool = False, require_clean_d
             "tool": "pcb_validate_layout",
             "project_path": validated_project,
             "pcb_path": files["pcb"],
+            "backend": backend.status(),
             "stage": "layout_valid" if not blocking else "layout_blocked",
             "quality": quality,
             "drc": drc,
@@ -368,7 +373,7 @@ def _apply_layout_intent(
     if normalized["routing"].get("clean_start"):
         progress("clean_routing", 4, "Clearing existing routed copper before layout")
 
-        def cleanup_mutation(pcb_model: KiCadPcb) -> dict[str, Any]:
+        def cleanup_mutation(pcb_model: BoardModel) -> dict[str, Any]:
             return pcb_model.clear_routing(include_zones=True)
 
         cleanup = ct._apply_transactional_pcb_edit(
@@ -402,7 +407,7 @@ def _apply_layout_intent(
     if normalized["routing"]["mode"] == "auto":
         progress("autoroute", 4, "Routing assigned PCB ratsnest connections")
 
-        def route_mutation(pcb_model: KiCadPcb) -> dict[str, Any]:
+        def route_mutation(pcb_model: BoardModel) -> dict[str, Any]:
             route_result = autoroute_pcb(
                 pcb_model,
                 normalized["board"]["width_mm"],
@@ -440,15 +445,61 @@ def _apply_layout_intent(
     if is_cancelled():
         return _cancelled_payload(project_path, "after_autoroute")
 
-    progress("quality_report", 5, "Building PCB quality and ratsnest report")
-    pcb = KiCadPcb.from_file(files["pcb"])
+    zones = {
+        "success": True,
+        "skipped": True,
+        "reason": "zones not requested",
+        "created_count": 0,
+        "zones": [],
+    }
+    if normalized.get("zones"):
+        progress("zones", 5, "Creating requested PCB copper zones")
+
+        def zone_mutation(pcb_model: BoardModel) -> dict[str, Any]:
+            created = []
+            for zone_spec in normalized["zones"]:
+                created.append(
+                    pcb_model.add_zone(
+                        zone_spec["net"],
+                        zone_spec["layer"],
+                        zone_spec["outline"],
+                        clearance_mm=zone_spec["clearance_mm"],
+                        min_width_mm=zone_spec["min_width_mm"],
+                    )
+                )
+            return {"created_count": len(created), "zones": created}
+
+        zones = ct._apply_transactional_pcb_edit(
+            files["pcb"],
+            zone_mutation,
+            run_cli_validation=True,
+        )
+        if not zones.get("success"):
+            return {
+                "success": False,
+                "changed": True,
+                "project_path": project_path,
+                "pcb_path": files["pcb"],
+                "stage": "zones_failed",
+                "error": zones.get("error", "PCB zone creation failed"),
+                "sync": completed.get("sync"),
+                "placement": completed.get("placement"),
+                "routing": routing,
+                "zones": zones,
+            }
+    if is_cancelled():
+        return _cancelled_payload(project_path, "after_zones")
+
+    progress("quality_report", 6, "Building PCB quality and ratsnest report")
+    backend = get_board_backend()
+    pcb = backend.from_file(files["pcb"])
     quality = ct._pcb_quality_report(project_path, files["pcb"], pcb)
     ratsnest = ct._build_ratsnest(project_path, files["pcb"], pcb)
     if is_cancelled():
         return _cancelled_payload(project_path, "after_quality_report")
 
     drc = {"success": True, "skipped": True, "reason": "validation.run_drc=False"}
-    progress("drc", 6, "Running PCB DRC" if normalized["validation"]["run_drc"] else "Skipping PCB DRC")
+    progress("drc", 7, "Running PCB DRC" if normalized["validation"]["run_drc"] else "Skipping PCB DRC")
     if normalized["validation"]["run_drc"]:
         drc = ct._run_pcb_drc_sync(files["pcb"])
         if normalized["validation"]["require_clean_drc"] and drc.get("total_violations", 0) > 0:
@@ -476,6 +527,7 @@ def _apply_layout_intent(
         "project_path": project_path,
         "pcb_path": files["pcb"],
         "stage": "pcb_layout_committed",
+        "backend": backend.status(),
         "status": status,
         "sync": completed.get("sync"),
         "placement": completed.get("placement"),
@@ -487,6 +539,7 @@ def _apply_layout_intent(
         },
         "routing": routing,
         "cleanup": cleanup,
+        "zones": zones,
         "quality": quality,
         "drc": drc,
         "intent": normalized,

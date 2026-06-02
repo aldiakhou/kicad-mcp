@@ -66,6 +66,8 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
             "grid_mm": "Routing grid pitch. Smaller values can route tighter designs but take longer.",
             "max_connections": "Optional cap on routed ratsnest connections in one job. Use 0 or omit for no cap.",
             "clean_start": "Remove existing segments, vias, and zones before routing/reporting. Also enabled for mode=none with preserve_existing_placement=false.",
+            "vias": "Optional object. enabled=false by default; drill_mm and diameter_mm are used only when a router explicitly inserts vias.",
+            "engine": "internal is the only enabled routing engine in this release. freerouting is reserved for a future optional integration.",
         },
         "example": {
             "mode": "auto",
@@ -74,6 +76,26 @@ PCB_INTENT_SCHEMA: dict[str, Any] = {
             "clearance_mm": 0.35,
             "grid_mm": 1.27,
         },
+    },
+    "zones": {
+        "description": "Optional copper pours created after sync/placement/routing.",
+        "fields": {
+            "net": "Net name to pour, typically GND.",
+            "layer": "Copper layer, for example B.Cu.",
+            "margin_mm": "Board-edge inset used when outline points are omitted.",
+            "outline": "Optional list of {x,y} points in millimeters.",
+            "clearance_mm": "Zone clearance.",
+            "min_width_mm": "Zone minimum copper width.",
+        },
+        "example": [
+            {
+                "net": "GND",
+                "layer": "B.Cu",
+                "margin_mm": 0.5,
+                "clearance_mm": 0.3,
+                "min_width_mm": 0.25,
+            }
+        ],
     },
     "validation": {
         "description": "Validation requested inside the async layout job.",
@@ -165,6 +187,11 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
     routing_mode = str(routing.get("mode", "none")).strip().lower()
     if routing_mode not in {"none", "report_only", "auto"}:
         raise ValueError("routing.mode must be one of: none, report_only, auto")
+    routing_engine = str(routing.get("engine", "internal")).strip().lower()
+    if routing_engine not in {"internal", "freerouting"}:
+        raise ValueError("routing.engine must be one of: internal, freerouting")
+    if routing_engine == "freerouting":
+        raise ValueError("routing.engine=freerouting is reserved for a future optional integration")
     layer = str(routing.get("layer", "F.Cu")).strip() or "F.Cu"
     track_width = _positive_float(routing.get("track_width_mm", 0.25), "routing.track_width_mm")
     clearance = _nonnegative_float(routing.get("clearance_mm", 0.35), "routing.clearance_mm")
@@ -182,6 +209,15 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
     clean_start = bool(routing.get("clean_start", False))
     if routing_mode == "none" and not bool(placement.get("preserve_existing_placement", True)):
         clean_start = True
+    vias_source = routing.get("vias") if isinstance(routing.get("vias"), dict) else {}
+    vias = {
+        "enabled": bool(vias_source.get("enabled", False)),
+        "drill_mm": _positive_float(vias_source.get("drill_mm", 0.3), "routing.vias.drill_mm"),
+        "diameter_mm": _positive_float(
+            vias_source.get("diameter_mm", 0.6),
+            "routing.vias.diameter_mm",
+        ),
+    }
 
     placement_rules = _merge_placement_rules(
         placement.get("rules"),
@@ -203,13 +239,16 @@ def normalize_pcb_layout_intent(intent: dict[str, Any] | None) -> dict[str, Any]
         },
         "routing": {
             "mode": routing_mode,
+            "engine": routing_engine,
             "layer": layer,
             "track_width_mm": track_width,
             "clearance_mm": clearance,
             "grid_mm": grid,
             "max_connections": max_connections,
             "clean_start": clean_start,
+            "vias": vias,
         },
+        "zones": _normalize_zones(source.get("zones"), width, height),
         "validation": {
             "run_drc": bool(validation.get("run_drc", False)),
             "require_clean_drc": bool(validation.get("require_clean_drc", False)),
@@ -247,6 +286,56 @@ def _merge_placement_rules(*sources: Any) -> dict[str, Any]:
                         "angle": item.get("angle", 0.0),
                     }
     return merged
+
+
+def _normalize_zones(raw: Any, board_width_mm: float, board_height_mm: float) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("zones must be a list")
+    zones = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"zones[{index}] must be an object")
+        net_name = str(item.get("net") or item.get("net_name") or "").strip()
+        if not net_name:
+            raise ValueError(f"zones[{index}].net is required")
+        layer = str(item.get("layer", "B.Cu")).strip() or "B.Cu"
+        margin = _nonnegative_float(item.get("margin_mm", 0.5), f"zones[{index}].margin_mm")
+        outline = item.get("outline")
+        if outline is None:
+            points = [
+                {"x": margin, "y": margin},
+                {"x": board_width_mm - margin, "y": margin},
+                {"x": board_width_mm - margin, "y": board_height_mm - margin},
+                {"x": margin, "y": board_height_mm - margin},
+            ]
+        else:
+            if not isinstance(outline, list) or len(outline) < 3:
+                raise ValueError(f"zones[{index}].outline must contain at least three points")
+            points = []
+            for point_index, point in enumerate(outline):
+                if not isinstance(point, dict) or "x" not in point or "y" not in point:
+                    raise ValueError(
+                        f"zones[{index}].outline[{point_index}] must be an object with x and y"
+                    )
+                points.append({"x": float(point["x"]), "y": float(point["y"])})
+        zones.append(
+            {
+                "net": net_name,
+                "layer": layer,
+                "outline": points,
+                "clearance_mm": _nonnegative_float(
+                    item.get("clearance_mm", item.get("clearance", 0.3)),
+                    f"zones[{index}].clearance_mm",
+                ),
+                "min_width_mm": _positive_float(
+                    item.get("min_width_mm", item.get("min_width", 0.25)),
+                    f"zones[{index}].min_width_mm",
+                ),
+            }
+        )
+    return zones
 
 
 def _positive_float(value: Any, field: str) -> float:

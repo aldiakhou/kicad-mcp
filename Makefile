@@ -12,7 +12,7 @@ help:
 	@echo " 	run           		Start the KiCad MCP server"
 
 install:
-	uv sync --group dev
+	uv sync --python 3.11 --group dev
 
 test:
 	# Collect extra args; if none, use tests/
